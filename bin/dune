@@ -1,0 +1,6 @@
+(executable
+ (name main)
+ (public_name rbm-demo)
+ (libraries core core_unix rbm)
+ (preprocess (pps ppx_jane))
+ (flags :standard -open Core))

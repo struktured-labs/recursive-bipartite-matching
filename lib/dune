@@ -1,0 +1,6 @@
+(library
+ (name rbm)
+ (public_name rbm)
+ (libraries core)
+ (preprocess (pps ppx_jane))
+ (flags :standard -open Core))
