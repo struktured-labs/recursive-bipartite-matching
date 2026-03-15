@@ -139,8 +139,8 @@ Root
 ...
 ```
 
-Full tree: ~$10^{18}$ nodes. Even with perfect play, far too large for exact
-computation.
+Full tree: ${\sim}10^{18}$ nodes. Even with perfect play, far too large for
+exact computation.
 
 ### Why This Distance is Natural Here
 
