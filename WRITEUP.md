@@ -42,7 +42,7 @@ assume $m \leq n$.
    matching a real subtree $S$ against a phantom is $\delta(S)$: a structural
    mismatch penalty. Natural choices:
    - $\delta(S) = \alpha \cdot \text{size}(S)$ — proportional to unmatched structure
-   - $\delta(S) = \text{max\_leaf\_value}(S)$ — worst-case payoff loss
+   - $\delta(S) = \max_{\ell \in L(S)} |v(\ell)|$ — worst-case payoff loss
    - $\delta(S) = \text{EV}(S)$ — expected value of the orphaned subtree
 
 3. Solve the min-cost perfect matching on the padded bipartite graph using
