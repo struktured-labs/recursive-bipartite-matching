@@ -499,29 +499,145 @@ runtime.**
 
 ---
 
-## 8. Open Questions
+## 8. Online Learning: The EV Graph as a Living Model
 
-1. **Tight bounds on location:** Is $\Omega(n)$ per step tight, or can
-   incremental/amortized techniques beat it? The structure of game trees
-   (alternating chance/decision) may help.
+The offline approach — enumerate all states, compute pairwise distances, cluster,
+then look up positions at runtime — hits the location problem wall. But there's
+a more natural formulation: **build the EV graph dynamically through play**.
 
-2. **Metric properties:** Under what conditions on $\delta$ is this a true
-   metric? Is there a canonical choice of phantom penalty?
+### The Online Loop
 
-3. **Merge well-definedness:** Is the merge operation associative? Does the
-   order of merging affect the final EV graph? (Likely yes — this connects to
-   the theory of Fréchet means in metric spaces.)
+```
+Initialize: G = empty EV graph, ε = exploration threshold
 
-4. **Approximation quality:** If you play using the strategy from
-   $G_\varepsilon$ (with approximate location), how much EV do you lose
-   compared to the exact game-theoretic solution? Can you bound the
-   exploitability as a function of $\varepsilon$?
+For each game played:
+  For each decision point:
+    1. Observe game state s (cards, history)
+    2. Sample K continuations from s (Monte Carlo rollouts)
+    3. Build a partial subtree T_s from the samples
+    4. Find nearest cluster c* = argmin_c d(T_s, rep(c)) in G
+    5. If d(T_s, rep(c*)) < ε:
+         - USE cluster c*'s strategy
+         - Record outcome
+    6. Else:
+         - CREATE new cluster from T_s
+         - EXPLORE (random or heuristic strategy)
+         - Record outcome
 
-5. **Relationship to CFR:** Counterfactual Regret Minimization is the standard
-   algorithm for poker AI. Does the EV graph structure interact usefully with
-   CFR — e.g., can you run CFR on the compressed graph and get convergence
-   guarantees?
+  After game:
+    - Update cluster representatives with observed payoffs
+    - Merge clusters where d(rep(ci), rep(cj)) < ε_merge
+    - Prune clusters with low visit counts (haven't been useful)
+    - Optionally: anneal ε downward as confidence grows
+```
 
-6. **Beyond poker:** The distance and compression framework applies to any
-   extensive-form game. Are there games where the location problem is easier
-   (e.g., games with more regularity in the tree structure)?
+### Why This Resolves the Core Tensions
+
+**The location problem dissolves.** You never need to locate yourself in a
+precomputed graph because you built the graph *from* your positions. Each cluster
+knows its own game states because it was born from one. The O(K) nearest-cluster
+lookup at runtime is against a small, curated set of representatives — not the
+exponential original tree.
+
+**The enumeration problem dissolves.** You only represent states you actually
+encounter. The graph grows with experience, concentrating resolution where it
+matters. Rare states get fewer clusters; common states get fine-grained
+distinctions. This is the same insight behind MCTS: don't explore the whole tree,
+explore where you play.
+
+**The error bound becomes a regret bound.** When you use cluster c*'s strategy
+on a state at distance ε from its representative, the EV loss is bounded by
+ε. Over T games with a stationary opponent, the cumulative regret from
+generalization error is at most T · ε. As ε shrinks (more clusters, more
+experience), regret shrinks proportionally. This gives a PAC-like guarantee:
+with enough games, the strategy converges to optimal within ε.
+
+**Natural explore/exploit tradeoff.** The threshold ε directly controls it:
+- Large ε → aggressive generalization, fewer clusters, more exploitation
+- Small ε → many clusters, more exploration, finer resolution
+- Annealing ε over time gives UCB-like behavior: explore broadly early,
+  exploit structure later
+
+### The RBM Distance as a Generalization Kernel
+
+This is the key contribution that distinguishes this approach from vanilla RL
+or tabular methods. In standard RL, generalization comes from function
+approximation (neural networks, linear features). Here, generalization comes
+from the **structural similarity of game trees** as measured by the RBM distance.
+
+Two game states generalize to each other when:
+- Their continuation trees have similar branching structure (same actions available)
+- Their leaf payoffs are similar (similar outcomes)
+- The structural alignment is optimal (Hungarian matching finds the best correspondence)
+
+This is a much richer notion of similarity than feature-based approaches. A neural
+network might learn that two hands with similar equity should play similarly, but
+it can't capture that two hands with similar equity but *different strategic
+structures* (e.g., a made hand vs. a draw) should play differently. The RBM
+distance can.
+
+### Connections to Existing Approaches
+
+| Approach | Similarity Metric | Online? | Error Bound? |
+|----------|-------------------|---------|--------------|
+| CFR + bucketing | Hand equity histograms (EMD) | No | Loose (Kroer/Sandholm) |
+| AlphaZero | Learned neural features | Yes (self-play) | No formal bound |
+| MCTS | Visit counts / UCB | Yes | Regret bounds |
+| **RBM Online** | **Tree structure (Hungarian)** | **Yes (self-play)** | **Yes (d ≤ ε ⟹ EV error ≤ ε)** |
+
+The unique position: structural similarity + online learning + formal error bounds.
+
+### Practical Considerations
+
+**Computational budget per decision.** The online loop requires K rollouts
+(cheap) plus K distance computations against the EV graph (moderate). If the
+graph has C clusters and each distance computation is O(s²) for sample subtrees
+of size s, the per-decision cost is O(K · C · s²). With K=50 rollouts, C=100
+clusters, and s=50-node samples, this is ~25M operations — feasible in real time.
+
+**Self-play convergence.** Like AlphaZero, train by playing against yourself.
+Early games produce a coarse EV graph; later games refine it. The distance
+function ensures that refinement is consistent — you can't oscillate because the
+metric enforces coherent clustering.
+
+**Multi-agent extension.** Each player maintains their own EV graph reflecting
+their private information. The graphs evolve independently through play, leading
+to emergent strategic specialization. The distance function on opponent-visible
+trees gives a notion of "opponent modeling": cluster your opponent's play patterns
+the same way you cluster game states.
+
+---
+
+## 9. Open Questions
+
+1. **Formal metric proof:** Under what conditions on the phantom penalty $\delta$
+   is the RBM distance a true metric? Empirically verified on all tested instances.
+   The triangle inequality proof likely follows from optimality of each matching step.
+
+2. **EV error bound theorem:** Formalize: if $d(T_1, T_2) = \varepsilon$, then
+   $|EV(\text{merge}(T_1, T_2)) - EV(T_i)| \leq f(\varepsilon)$. What is $f$?
+   Conjecture: $f(\varepsilon) = \varepsilon$ (linear bound) for equal-weight merges.
+
+3. **Online regret bound:** In the online learning formulation, bound the
+   cumulative regret from using cluster strategies on nearby states. The per-step
+   error is bounded by ε; can we get sublinear cumulative regret via ε-annealing?
+
+4. **Merge ordering independence:** When does merge order matter? Conjecture: for
+   trees with equal branching factor and symmetric structure, the Fréchet mean
+   is unique and merge order doesn't matter. For asymmetric trees, it does.
+
+5. **Comparison with CFR:** Can you run counterfactual regret minimization on the
+   compressed EV graph? The cluster structure defines a reduced game; CFR on the
+   reduced game should converge to an ε-Nash equilibrium of the original.
+
+6. **Scalability:** The distance computation is O(n²) in leaves. For large games,
+   can we use approximate matching (Sinkhorn) or learned embeddings to speed up
+   the distance computation while preserving the error bounds?
+
+7. **Beyond poker:** The framework applies to any extensive-form game. Promising
+   candidates: Stratego (huge hidden information), Magic: The Gathering (variable
+   game trees), negotiation games (continuous action spaces discretized into trees).
+
+8. **Opponent modeling:** In the online setting, can you build an EV graph of your
+   *opponent's* play patterns and use it for exploitation? The RBM distance gives
+   a principled notion of "similar opponent behavior."
