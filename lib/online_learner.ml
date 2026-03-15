@@ -36,6 +36,14 @@ type online_cluster = {
   diameter : float;                 (** max distance from any member to representative *)
 }
 
+(** Cache entry: maps a tree fingerprint to the cluster index it belongs to.
+    Only stores confirmed hits (distance < epsilon). *)
+type cache_entry = {
+  cluster_idx : int;
+  distance : float;
+  cluster_count : int;  (** number of clusters when entry was created *)
+}
+
 (** Mutable state for the online learning loop. *)
 type learner_state = {
   mutable clusters : online_cluster list;
@@ -46,9 +54,10 @@ type learner_state = {
   mutable cache_misses : int;
   mutable recent_misses : int;
   mutable recent_games : int;
-  (** Distance cache: maps (tree_size, tree_ev_quantized) -> (cluster_index, distance).
-      Avoids recomputing distance for structurally identical trees. *)
-  distance_cache : (int * int, int * float) Hashtbl.t;
+  (** Distance cache: maps (tree_size, tree_ev_quantized) -> cache_entry.
+      Only stores confirmed hits (d < epsilon). Invalidated when cluster
+      count changes. *)
+  distance_cache : (int * int * int, cache_entry) Hashtbl.t;
 }
 
 (** Quantize EV to an integer key for hashing. Resolution: 0.1 *)
@@ -64,61 +73,88 @@ let default_config ~game_config ~community =
   ; distance_config = Distance.default_config
   }
 
-(** Deal random hole cards for two players from the remaining deck. *)
-let deal_cards ~deck ~community =
-  let remaining =
-    List.filter deck ~f:(fun c ->
-      not (List.exists community ~f:(fun cc -> Card.equal c cc)))
-  in
-  let arr = Array.of_list remaining in
+(** Shuffle the first [k] elements of [arr] using Fisher-Yates. *)
+let partial_shuffle arr k =
   let n = Array.length arr in
-  (* Fisher-Yates shuffle on first 2 positions *)
-  let i1 = Random.int n in
-  let tmp = arr.(0) in
-  arr.(0) <- arr.(i1);
-  arr.(i1) <- tmp;
-  let i2 = 1 + Random.int (n - 1) in
-  let tmp = arr.(1) in
-  arr.(1) <- arr.(i2);
-  arr.(i2) <- tmp;
-  (arr.(0), arr.(1))
+  for i = 0 to k - 1 do
+    let j = i + Random.int (n - i) in
+    let tmp = arr.(i) in
+    arr.(i) <- arr.(j);
+    arr.(j) <- tmp
+  done
 
-(** Make a cache key from a tree: (size, quantized_ev).
-    Trees with same size and same EV (to 0.1) are treated as structurally
-    identical for caching purposes. This is sound because RI Hold'em trees
-    with the same deal structure always have the same size and EV. *)
+(** Deal a full game: 2 hole cards + 2 community cards from the deck.
+    When [community] is non-empty, use those as fixed community cards.
+    When [community] is empty, deal community cards randomly too. *)
+let deal_full_game ~deck ~community =
+  match community with
+  | _ :: _ :: _ ->
+    (* Fixed community: deal 2 hole cards from remaining *)
+    let remaining =
+      List.filter deck ~f:(fun c ->
+        not (List.exists community ~f:(fun cc -> Card.equal c cc)))
+    in
+    let arr = Array.of_list remaining in
+    partial_shuffle arr 2;
+    (arr.(0), arr.(1), community)
+  | _ ->
+    (* Random community: deal 4 cards total *)
+    let arr = Array.of_list deck in
+    partial_shuffle arr 4;
+    (arr.(0), arr.(1), [ arr.(2); arr.(3) ])
+
+(** Compute a hash of leaf values for finer tree fingerprinting.
+    Combines the first few leaf values into a single integer. *)
+let leaf_hash tree =
+  let h = ref 0 in
+  let count = ref 0 in
+  let _ = Tree.fold_leaves tree ~init:() ~f:(fun () v ->
+    match !count < 8 with
+    | true ->
+      h := !h lxor (Float.iround_nearest_exn (v *. 100.0) lsl (!count * 4));
+      Int.incr count
+    | false -> ())
+  in
+  !h
+
+(** Make a cache key from a tree: (size, quantized_ev, leaf_hash).
+    Trees must match all three to be treated as structurally identical. *)
 let cache_key tree =
   let ev = Tree.ev tree in
   let size = Tree.size tree in
-  (size, quantize_ev ev)
+  (size, quantize_ev ev, leaf_hash tree)
 
 (** Find the nearest cluster to a tree, returning (index, distance).
-    Uses a distance cache for trees with identical structure, and EV
-    pre-filtering for remaining comparisons.
-    Returns None when no clusters exist. *)
-let find_nearest_cluster ~epsilon ~distance_config ~distance_cache clusters tree =
+    Uses a distance cache for confirmed hits, and EV pre-filtering for
+    remaining comparisons. Returns None when no clusters exist. *)
+let find_nearest_cluster ~epsilon ~distance_config ~distance_cache ~cluster_count
+    clusters tree =
   match clusters with
   | [] -> None
   | _ ->
     let key = cache_key tree in
-    (* Check distance cache first *)
-    (match Hashtbl.find distance_cache key with
-     | Some (cached_idx, cached_dist) ->
-       (* Verify the cached cluster still exists at this index *)
-       (match cached_idx < List.length clusters with
-        | true -> Some (cached_idx, cached_dist)
-        | false -> None)  (* cluster was removed by merge; fall through *)
+    (* Check distance cache for confirmed hits *)
+    let cached_valid =
+      match Hashtbl.find distance_cache key with
+      | Some entry ->
+        (* Cache entry is valid only if cluster count hasn't changed *)
+        (match entry.cluster_count = cluster_count with
+         | true -> Some (entry.cluster_idx, entry.distance)
+         | false -> None)
+      | None -> None
+    in
+    (match cached_valid with
+     | Some result -> Some result
      | None ->
+       (* Full search with EV pre-filtering *)
        let tree_ev = Tree.ev tree in
        let best =
          List.foldi clusters ~init:(0, Float.infinity)
            ~f:(fun i (best_i, best_d) oc ->
              let ev_diff = Float.abs (tree_ev -. oc.rep_ev) in
-             (* EV pre-filter: skip when EV alone exceeds threshold *)
              match Float.( > ) ev_diff epsilon with
              | true -> (best_i, best_d)
              | false ->
-               (* Also skip if EV diff exceeds current best *)
                (match Float.( >= ) ev_diff best_d with
                 | true -> (best_i, best_d)
                 | false ->
@@ -131,8 +167,15 @@ let find_nearest_cluster ~epsilon ~distance_config ~distance_cache clusters tree
                   | false -> (best_i, best_d)))
        in
        let (best_i, best_d) = best in
-       (* Cache the result for future identical trees *)
-       Hashtbl.set distance_cache ~key ~data:(best_i, best_d);
+       (* Only cache confirmed hits (d < epsilon) *)
+       (match Float.( < ) best_d epsilon with
+        | true ->
+          Hashtbl.set distance_cache ~key
+            ~data:{ cluster_idx = best_i
+                  ; distance = best_d
+                  ; cluster_count
+                  }
+        | false -> ());
        Some best)
 
 (** Create a new online cluster from a single tree. *)
@@ -146,7 +189,7 @@ let create_online_cluster tree =
   }
 
 (** Record a cache hit: update cluster statistics without modifying the representative.
-    This is O(1) and avoids expensive merge + distance recomputation. *)
+    This is O(1). *)
 let record_hit oc ~tree_ev ~distance =
   let n = Float.of_int oc.member_count in
   let new_count = oc.member_count + 1 in
@@ -234,13 +277,13 @@ let merge_close_clusters ~epsilon ~distance_config clusters =
 
 (** Play one game of RI Hold'em and return the generated game tree. *)
 let play_game ~config =
-  let (p1_card, p2_card) =
-    deal_cards ~deck:config.game_config.deck ~community:config.community
+  let (p1_card, p2_card, community) =
+    deal_full_game ~deck:config.game_config.deck ~community:config.community
   in
   Rhode_island.game_tree_for_deal
     ~config:config.game_config
     ~p1_card ~p2_card
-    ~community:config.community
+    ~community
 
 (** Create a snapshot of convergence metrics. *)
 let make_snapshot ~state ~game_number =
@@ -290,11 +333,14 @@ let run_loop ~config ~report =
     state.total_trees_seen <- state.total_trees_seen + 1;
     state.recent_games <- state.recent_games + 1;
 
-    (* 2. Find nearest cluster (with distance cache + EV pre-filter) *)
+    let cluster_count = List.length state.clusters in
+
+    (* 2. Find nearest cluster (with cache + EV pre-filter) *)
     let nearest =
       find_nearest_cluster ~epsilon:config.epsilon
         ~distance_config:config.distance_config
         ~distance_cache:state.distance_cache
+        ~cluster_count
         state.clusters tree
     in
 
@@ -303,7 +349,7 @@ let run_loop ~config ~report =
      | Some (idx, d) ->
        (match Float.( < ) d config.epsilon with
         | true ->
-          (* Cache hit: record statistics only (O(1), no merge) *)
+          (* Cache hit: record statistics only (O(1)) *)
           let oc = List.nth_exn state.clusters idx in
           let updated = record_hit oc ~tree_ev ~distance:d in
           state.clusters <-
@@ -335,11 +381,7 @@ let run_loop ~config ~report =
            ~distance_config:config.distance_config state.clusters
        in
        state.clusters <- merged;
-       state.clusters_merged <- state.clusters_merged + n_merged;
-       (* Invalidate distance cache after merge (cluster indices changed) *)
-       (match n_merged > 0 with
-        | true -> Hashtbl.clear state.distance_cache
-        | false -> ())
+       state.clusters_merged <- state.clusters_merged + n_merged
      | false -> ());
 
     (* 5. Periodically report *)
@@ -375,9 +417,10 @@ let run ~config =
   stats
 
 let run_exn ~config =
-  (match List.length config.community = 2 with
+  let n_comm = List.length config.community in
+  (match n_comm = 0 || n_comm = 2 with
    | true -> ()
-   | false -> failwith "online_learner: community must have exactly 2 cards (flop + turn)");
+   | false -> failwith "online_learner: community must be empty (random) or exactly 2 cards");
   (match Float.( > ) config.epsilon 0.0 with
    | true -> ()
    | false -> failwith "online_learner: epsilon must be positive");

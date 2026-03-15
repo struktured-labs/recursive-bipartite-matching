@@ -14,7 +14,7 @@
 type config = {
   game_config : Rhode_island.config;
   epsilon : float;          (** Distance threshold for merging into existing cluster *)
-  community : Card.t list;  (** Fixed community cards (flop, turn) *)
+  community : Card.t list;  (** Fixed community cards, or [] for random dealing *)
   num_games : int;          (** Total games to play *)
   report_interval : int;    (** Print stats every N games *)
   merge_interval : int;     (** Attempt inter-cluster merges every N games *)
