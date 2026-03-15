@@ -10,3 +10,4 @@ module Rhode_island = Rhode_island
 module Ev_graph = Ev_graph
 module Locator = Locator
 module Error_bound = Error_bound
+module Emd_baseline = Emd_baseline
