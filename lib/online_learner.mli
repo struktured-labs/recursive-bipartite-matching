@@ -14,7 +14,7 @@
 type config = {
   game_config : Rhode_island.config;
   epsilon : float;          (** Distance threshold for merging into existing cluster *)
-  community : Card.t list;  (** Fixed community cards, or [] for random dealing *)
+  community : Card.t list option;  (** Fixed community cards, or None for random dealing *)
   num_games : int;          (** Total games to play *)
   report_interval : int;    (** Print stats every N games *)
   merge_interval : int;     (** Attempt inter-cluster merges every N games *)
@@ -44,7 +44,8 @@ type snapshot = {
     configuration for online learning with the given game setup. *)
 val default_config
   :  game_config:Rhode_island.config
-  -> community:Card.t list
+  -> ?community:Card.t list
+  -> unit
   -> config
 
 (** [run ~config] plays [config.num_games] games of self-play, building

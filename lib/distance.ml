@@ -70,3 +70,90 @@ let compute_with_config ~config t1 t2 =
 
 let compute_with_matching ~config t1 t2 =
   compute_impl config t1 t2
+
+(** Structural hashing: captures tree shape + leaf values, ignores labels.
+    Quantizes floats to avoid floating-point hash instability. *)
+let rec structural_hash : type a. a Tree.t -> int = fun tree ->
+  match tree with
+  | Leaf { value; _ } ->
+    (* Quantize to 0.01 resolution to avoid floating point noise *)
+    let q = Float.iround_nearest_exn (value *. 100.0) in
+    Hashtbl.hash (0, q)
+  | Node { children; _ } ->
+    let child_hashes = List.map children ~f:structural_hash in
+    (* Sort child hashes so unordered children produce the same hash *)
+    let sorted = List.sort child_hashes ~compare:Int.compare in
+    let n = List.length sorted in
+    Hashtbl.hash (1, n, sorted)
+
+module Memo = struct
+  type memo_stats = {
+    hits : int;
+    misses : int;
+  } [@@deriving sexp]
+
+  let cache : (int * int, float) Hashtbl.t = Hashtbl.Poly.create ~size:1024 ()
+  let memo_hits = ref 0
+  let memo_misses = ref 0
+
+  let clear () =
+    Hashtbl.clear cache;
+    memo_hits := 0;
+    memo_misses := 0
+
+  let stats () =
+    { hits = !memo_hits; misses = !memo_misses }
+end
+
+let rec compute_memoized_impl config (t1 : 'a Tree.t) (t2 : 'a Tree.t) : float =
+  let h1 = structural_hash t1 in
+  let h2 = structural_hash t2 in
+  (* Canonical key: always put smaller hash first for symmetry *)
+  let key =
+    match h1 <= h2 with
+    | true -> (h1, h2)
+    | false -> (h2, h1)
+  in
+  match Hashtbl.find Memo.cache key with
+  | Some d ->
+    Memo.memo_hits := !(Memo.memo_hits) + 1;
+    d
+  | None ->
+    Memo.memo_misses := !(Memo.memo_misses) + 1;
+    let d =
+      match t1, t2 with
+      | Leaf { value = v1; _ }, Leaf { value = v2; _ } ->
+        config.leaf_distance v1 v2
+      | Leaf _, Node _ ->
+        let leaf_as_ev = Tree.ev t1 in
+        let node_ev = Tree.ev t2 in
+        Float.abs (leaf_as_ev -. node_ev) +. phantom_cost config t2
+      | Node _, Leaf _ ->
+        compute_memoized_impl config t2 t1
+      | Node { children = c1; _ }, Node { children = c2; _ } ->
+        let n1 = List.length c1 in
+        let n2 = List.length c2 in
+        match n1, n2 with
+        | 0, 0 -> 0.0
+        | 0, _ ->
+          List.sum (module Float) c2 ~f:(phantom_cost config)
+        | _, 0 ->
+          List.sum (module Float) c1 ~f:(phantom_cost config)
+        | _, _ ->
+          let a1 = Array.of_list c1 in
+          let a2 = Array.of_list c2 in
+          let cost_matrix = Array.init n1 ~f:(fun i ->
+            Array.init n2 ~f:(fun j ->
+              compute_memoized_impl config a1.(i) a2.(j)))
+          in
+          let result = Hungarian.solve_rectangular cost_matrix
+            ~phantom_cost_row:(fun i -> phantom_cost config a1.(i))
+            ~phantom_cost_col:(fun j -> phantom_cost config a2.(j))
+          in
+          result.cost
+    in
+    Hashtbl.set Memo.cache ~key ~data:d;
+    d
+
+let compute_memoized t1 t2 =
+  compute_memoized_impl default_config t1 t2

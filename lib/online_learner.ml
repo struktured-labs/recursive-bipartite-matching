@@ -1,7 +1,7 @@
 type config = {
   game_config : Rhode_island.config;
   epsilon : float;
-  community : Card.t list;
+  community : Card.t list option;
   num_games : int;
   report_interval : int;
   merge_interval : int;
@@ -63,7 +63,7 @@ type learner_state = {
 (** Quantize EV to an integer key for hashing. Resolution: 0.1 *)
 let quantize_ev ev = Float.iround_nearest_exn (ev *. 10.0)
 
-let default_config ~game_config ~community =
+let default_config ~game_config ?community () =
   { game_config
   ; epsilon = 200.0
   ; community
@@ -84,11 +84,11 @@ let partial_shuffle arr k =
   done
 
 (** Deal a full game: 2 hole cards + 2 community cards from the deck.
-    When [community] is non-empty, use those as fixed community cards.
-    When [community] is empty, deal community cards randomly too. *)
+    When [community] is [Some cards], use those as fixed community cards.
+    When [community] is [None], deal community cards randomly too. *)
 let deal_full_game ~deck ~community =
   match community with
-  | _ :: _ :: _ ->
+  | Some community ->
     (* Fixed community: deal 2 hole cards from remaining *)
     let remaining =
       List.filter deck ~f:(fun c ->
@@ -97,7 +97,7 @@ let deal_full_game ~deck ~community =
     let arr = Array.of_list remaining in
     partial_shuffle arr 2;
     (arr.(0), arr.(1), community)
-  | _ ->
+  | None ->
     (* Random community: deal 4 cards total *)
     let arr = Array.of_list deck in
     partial_shuffle arr 4;
@@ -275,14 +275,19 @@ let merge_close_clusters ~epsilon ~distance_config clusters =
   in
   (result, !num_merged)
 
-(** Play one game of RI Hold'em and return the generated game tree. *)
+(** Play one game of RI Hold'em and return the generated game tree.
+    Uses information set trees: P1's perspective aggregating over all
+    possible opponent hands. Different community cards create genuinely
+    different tree structures (different opponent distributions and
+    showdown outcomes). *)
 let play_game ~config =
-  let (p1_card, p2_card, community) =
+  let (p1_card, _p2_card, community) =
     deal_full_game ~deck:config.game_config.deck ~community:config.community
   in
-  Rhode_island.game_tree_for_deal
+  Rhode_island.information_set_tree
     ~config:config.game_config
-    ~p1_card ~p2_card
+    ~player:0
+    ~hole_card:p1_card
     ~community
 
 (** Create a snapshot of convergence metrics. *)
@@ -417,10 +422,12 @@ let run ~config =
   stats
 
 let run_exn ~config =
-  let n_comm = List.length config.community in
-  (match n_comm = 0 || n_comm = 2 with
-   | true -> ()
-   | false -> failwith "online_learner: community must be empty (random) or exactly 2 cards");
+  (match config.community with
+   | None -> ()
+   | Some cards ->
+     (match List.length cards = 2 with
+      | true -> ()
+      | false -> failwith "online_learner: community must be None (random) or exactly 2 cards"));
   (match Float.( > ) config.epsilon 0.0 with
    | true -> ()
    | false -> failwith "online_learner: epsilon must be positive");
@@ -433,7 +440,9 @@ let run_with_report ~config =
   printf "=== Online Self-Play Learner ===\n%!";
   printf "Deck: %d cards, Community: %s\n%!"
     (List.length config.game_config.deck)
-    (String.concat ~sep:" " (List.map config.community ~f:Card.to_string));
+    (match config.community with
+     | None -> "random (dealt each game)"
+     | Some cards -> String.concat ~sep:" " (List.map cards ~f:Card.to_string));
   printf "Epsilon: %.1f, Games: %d\n\n%!"
     config.epsilon config.num_games;
   let (stats, snapshots) = run_loop ~config ~report:true in

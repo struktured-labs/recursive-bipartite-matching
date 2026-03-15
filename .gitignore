@@ -7,3 +7,4 @@ _build/
 tmp/
 log/
 setenv.sh
+a.out

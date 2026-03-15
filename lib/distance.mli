@@ -34,3 +34,28 @@ val compute_with_matching
   -> 'a Tree.t
   -> 'a Tree.t
   -> float * (int * int) list
+
+(** Structural hash of a tree. Captures tree shape and leaf values but
+    ignores labels, so structurally identical subtrees from different
+    deals hash to the same value. *)
+val structural_hash : 'a Tree.t -> int
+
+(** Memoized distance computation. Caches results keyed by
+    (tree1_hash, tree2_hash) for repeated subtree comparisons.
+    Uses structural_hash, so trees with identical structure + leaf values
+    but different labels share cached results. *)
+val compute_memoized : 'a Tree.t -> 'a Tree.t -> float
+
+(** Cache management for memoized distance. *)
+module Memo : sig
+  type memo_stats = {
+    hits : int;
+    misses : int;
+  } [@@deriving sexp]
+
+  (** Clear the memoization cache and reset hit/miss counters. *)
+  val clear : unit -> unit
+
+  (** Return current cache hit/miss statistics. *)
+  val stats : unit -> memo_stats
+end
