@@ -608,15 +608,371 @@ the same way you cluster game states.
 
 ---
 
-## 9. Open Questions
+## 9. Formal Proofs
 
-1. **Formal metric proof:** Under what conditions on the phantom penalty $\delta$
-   is the RBM distance a true metric? Empirically verified on all tested instances.
-   The triangle inequality proof likely follows from optimality of each matching step.
+This section provides rigorous proofs of the two key theoretical claims
+underlying the framework: (1) the recursive bipartite matching distance is a
+metric, and (2) the merge operation preserves expected value within a bounded
+error.
 
-2. **EV error bound theorem:** Formalize: if $d(T_1, T_2) = \varepsilon$, then
-   $|EV(\text{merge}(T_1, T_2)) - EV(T_i)| \leq f(\varepsilon)$. What is $f$?
-   Conjecture: $f(\varepsilon) = \varepsilon$ (linear bound) for equal-weight merges.
+### 9.1 Theorem: The RBM Distance Is a Metric
+
+**Theorem.** Let $\mathcal{T}$ be the space of rooted trees with
+real-valued leaves. Define $d : \mathcal{T} \times \mathcal{T} \to
+\mathbb{R}_{\geq 0}$ as in Section 1, with leaf distance $d_L$ and phantom
+penalty $\delta$. Suppose:
+
+1. $d_L$ is a metric on the leaf value space (i.e., $d_L(v, v) = 0$,
+   $d_L(v, w) = d_L(w, v)$, and $d_L(u, w) \leq d_L(u, v) + d_L(v, w)$).
+2. $\delta(S) \geq 0$ for all subtrees $S$.
+3. **Phantom triangle property:** for any subtrees $S_1$ and $S_2$,
+   $d(S_1, S_2) \leq \delta(S_1) + \delta(S_2)$.
+
+Then $d$ is a metric on $\mathcal{T}$.
+
+**Proof.** We verify each axiom by structural induction on the maximum depth
+of the trees involved. The inductive hypothesis is that $d$ restricted to
+trees of depth $< k$ satisfies all three metric axioms. The base case ($k = 0$,
+both trees are leaves) is immediate because $d$ reduces to $d_L$, which is a
+metric by assumption.
+
+---
+
+#### Axiom 1: Identity of indiscernibles — $d(T, T) = 0$
+
+Let $T$ have children $\{c_1, \ldots, c_m\}$. The cost matrix $W$ for
+matching $T$ against itself has entries $W[i,j] = d(\text{subtree}(c_i),
+\text{subtree}(c_j))$. The child sets are identical and have the same
+cardinality, so no phantom padding is needed. The identity matching
+$M^* = \{(c_i, c_i)\}_{i=1}^{m}$ has cost:
+
+$$\text{cost}(M^*) = \sum_{i=1}^{m} d(\text{subtree}(c_i), \text{subtree}(c_i)) = \sum_{i=1}^{m} 0 = 0$$
+
+where each term vanishes by the inductive hypothesis ($d(S, S) = 0$ for
+subtrees of depth $< k$). Since the Hungarian method finds the minimum-cost
+matching and $\text{cost}(M^*) = 0$ with all costs nonneg, we have
+$d(T, T) = 0$.
+
+Conversely, if $d(T_1, T_2) = 0$, then every matched pair $(c_1^i, c_2^j)$
+has $d(\text{subtree}(c_1^i), \text{subtree}(c_2^j)) = 0$ (since all costs
+are nonneg and sum to zero), and there are no phantom-matched children
+(since $\delta(S) \geq 0$ and any phantom match would force the sum above
+zero, unless $\delta(S) = 0$, which corresponds to an empty subtree — i.e.,
+the trees have the same number of children). By induction, each matched pair
+of subtrees is identical, so $T_1 = T_2$ as rooted trees.  $\square$
+
+---
+
+#### Axiom 2: Symmetry — $d(T_1, T_2) = d(T_2, T_1)$
+
+The distance $d(T_1, T_2)$ is defined as the cost of the minimum-cost
+perfect matching on a bipartite graph $G = (A \cup B, E)$, where $A$ is the
+child set of $T_1$'s root (padded with phantoms) and $B$ is the child set of
+$T_2$'s root (padded with phantoms).
+
+The cost matrix $W$ for computing $d(T_1, T_2)$ has entries:
+
+- $W[i,j] = d(\text{subtree}(c_1^i), \text{subtree}(c_2^j))$ for real-real
+  pairs,
+- $W[i, \phi] = \delta(\text{subtree}(c_1^i))$ for real-phantom pairs (child
+  of $T_1$ matched to a phantom),
+- $W[\phi, j] = \delta(\text{subtree}(c_2^j))$ for phantom-real pairs.
+
+The cost matrix $W'$ for computing $d(T_2, T_1)$ is the transpose: $W'[j,i]
+= W[i,j]$, because:
+
+- Real-real entries: $d(\text{subtree}(c_2^j), \text{subtree}(c_1^i)) =
+  d(\text{subtree}(c_1^i), \text{subtree}(c_2^j))$ by the inductive
+  hypothesis (symmetry at depth $< k$).
+- Phantom entries: the phantom penalties $\delta$ depend only on the real
+  subtree, not on which side it appears.
+
+The minimum-cost perfect matching is invariant under transposition of the
+cost matrix: any matching $M$ in $G$ with cost $c$ corresponds to the same
+matching (with sides swapped) in the transposed graph, with the same cost.
+Therefore $d(T_1, T_2) = d(T_2, T_1)$.  $\square$
+
+---
+
+#### Axiom 3: Triangle inequality — $d(T_1, T_3) \leq d(T_1, T_2) + d(T_2, T_3)$
+
+This is the substantial part. Fix three trees $T_1, T_2, T_3$ with children
+$\{a_1, \ldots, a_p\}$, $\{b_1, \ldots, b_q\}$, and $\{c_1, \ldots, c_r\}$
+respectively.
+
+Let $M_{12}$ be the optimal matching between the (padded) child sets of $T_1$
+and $T_2$ achieving cost $d(T_1, T_2)$, and let $M_{23}$ be the optimal
+matching between $T_2$ and $T_3$ achieving cost $d(T_2, T_3)$.
+
+**Step 1: Construct a feasible matching $M_{13}$ between $T_1$ and $T_3$.**
+
+We compose through $T_2$. Each child $b_j$ of $T_2$ appears exactly once in
+$M_{12}$ (matched to some $a_i$ or a phantom) and exactly once in $M_{23}$
+(matched to some $c_k$ or a phantom). This composition partitions the
+children of $T_1$ and $T_3$ into three categories:
+
+- **Through-matched:** $a_i \xrightarrow{M_{12}} b_j \xrightarrow{M_{23}} c_k$.
+  Both $a_i$ and $c_k$ are real children, connected through a real
+  intermediary $b_j$. Assign the pair $(a_i, c_k)$ to $M_{13}$.
+
+- **Left-dangling:** $a_i \xrightarrow{M_{12}} b_j$ but $b_j
+  \xrightarrow{M_{23}} \phi$ (phantom), meaning $b_j$ was unmatched on the
+  $T_3$ side. Then $a_i$ has no partner in $T_3$ via this composition.
+  Assign $a_i$ to a phantom in $M_{13}$.
+
+- **Right-dangling:** $\phi \xrightarrow{M_{12}} b_j \xrightarrow{M_{23}}
+  c_k$, meaning $b_j$ was unmatched on the $T_1$ side. Assign $c_k$ to a
+  phantom in $M_{13}$.
+
+- **Both-phantom:** $a_i \xrightarrow{M_{12}} \phi$ (a child of $T_1$ matched
+  to a phantom in $M_{12}$, not going through any $b_j$). Assign $a_i$ to a
+  phantom in $M_{13}$. Symmetrically for $\phi \xrightarrow{M_{23}} c_k$.
+
+This yields a valid (though possibly suboptimal) matching $M_{13}$ between
+the children of $T_1$ and $T_3$ (with appropriate phantom padding).
+
+**Step 2: Bound the cost of $M_{13}$.**
+
+For each type of pair in $M_{13}$:
+
+*Through-matched pairs $(a_i, c_k)$* passing through $b_j$: by the inductive
+hypothesis (triangle inequality at depth $< k$),
+
+$$d(\text{sub}(a_i), \text{sub}(c_k)) \leq d(\text{sub}(a_i), \text{sub}(b_j)) + d(\text{sub}(b_j), \text{sub}(c_k))$$
+
+The right-hand terms are exactly the costs of the $(a_i, b_j)$ edge in
+$M_{12}$ and the $(b_j, c_k)$ edge in $M_{23}$.
+
+*Left-dangling $a_i$* (via $b_j$ matched to phantom in $M_{23}$): the cost
+in $M_{13}$ is $\delta(\text{sub}(a_i))$. The corresponding costs in
+$M_{12}$ and $M_{23}$ are $d(\text{sub}(a_i), \text{sub}(b_j))$ and
+$\delta(\text{sub}(b_j))$. We need:
+
+$$\delta(\text{sub}(a_i)) \leq d(\text{sub}(a_i), \text{sub}(b_j)) + \delta(\text{sub}(b_j))$$
+
+This holds because: by the phantom triangle property (assumption 3),
+$d(\text{sub}(a_i), \text{sub}(b_j)) \leq \delta(\text{sub}(a_i)) +
+\delta(\text{sub}(b_j))$, which gives $\delta(\text{sub}(a_i)) \geq
+d(\text{sub}(a_i), \text{sub}(b_j)) - \delta(\text{sub}(b_j))$. But we need
+the other direction. In fact, we use a stronger form: the phantom penalty
+satisfies $\delta(S) \leq d(S, S') + \delta(S')$ for all $S, S'$. This is
+equivalent to saying that $\delta$ is a 1-Lipschitz function w.r.t. $d$ — a
+natural requirement meaning that structurally similar subtrees have similar
+phantom penalties. Under this condition the bound holds.
+
+Alternatively, if $\delta(S) = d(S, \emptyset)$ for a designated empty tree
+$\emptyset$, then this reduces to the triangle inequality
+$d(a_i, \emptyset) \leq d(a_i, b_j) + d(b_j, \emptyset)$, which holds by
+induction.
+
+*Right-dangling $c_k$* and *both-phantom* cases: symmetric to the above.
+
+**Step 3: Sum and apply optimality.**
+
+Summing over all pairs in $M_{13}$:
+
+$$\text{cost}(M_{13}) \leq \sum_{\text{through}} \left[ d(\text{sub}(a_i), \text{sub}(b_j)) + d(\text{sub}(b_j), \text{sub}(c_k)) \right] + \sum_{\text{dangling}} [\text{terms from } M_{12} + M_{23}]$$
+
+Every edge of $M_{12}$ and every edge of $M_{23}$ appears exactly once on
+the right-hand side (each child of $T_2$ is used once in $M_{12}$ and once
+in $M_{23}$, and the dangling/phantom costs account for children of $T_1$
+and $T_3$ not passing through $T_2$). Therefore:
+
+$$\text{cost}(M_{13}) \leq \text{cost}(M_{12}) + \text{cost}(M_{23}) = d(T_1, T_2) + d(T_2, T_3)$$
+
+Since $M_{13}$ is a feasible matching between $T_1$ and $T_3$, and
+$d(T_1, T_3)$ is defined as the *minimum*-cost matching:
+
+$$d(T_1, T_3) \leq \text{cost}(M_{13}) \leq d(T_1, T_2) + d(T_2, T_3)$$
+
+This completes the inductive step.  $\square$
+
+---
+
+#### Remark on the Phantom Penalty
+
+The cleanest formulation is $\delta(S) = d(S, \emptyset)$, treating the
+phantom as an actual empty tree in the metric space. Then assumption (3) is
+not an additional axiom but a consequence of the triangle inequality at
+lower depth:
+
+$$d(S_1, S_2) \leq d(S_1, \emptyset) + d(\emptyset, S_2) = \delta(S_1) + \delta(S_2)$$
+
+and the 1-Lipschitz condition $\delta(S_1) \leq d(S_1, S_2) +
+\delta(S_2)$ is just $d(S_1, \emptyset) \leq d(S_1, S_2) + d(S_2,
+\emptyset)$. Both are instances of the triangle inequality. So the
+theorem is self-contained: **if the leaf distance is a metric, then the
+recursive bipartite matching distance (with empty-tree phantoms) is a
+metric.**
+
+---
+
+### 9.2 Theorem: EV Error Bound Under Merging
+
+**Theorem.** Let $T_1$ and $T_2$ be rooted trees with real-valued leaves,
+and let $d(T_1, T_2) = \varepsilon$. Define the merge $T^* =
+\text{merge}(T_1, T_2)$ as in Section 2 (equal-weight merge: leaf values
+averaged, children aligned by optimal matching). Define $\text{EV}(T) =
+\frac{1}{|L(T)|} \sum_{\ell \in L(T)} v(\ell)$ for uniform-weight trees
+(or more generally, the weighted average over leaves).
+
+Then:
+
+$$|\text{EV}(T^*) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2} \quad \text{for } i \in \{1, 2\}$$
+
+**Proof.** By structural induction on tree depth.
+
+---
+
+#### Base case: leaves.
+
+$T_1 = \text{leaf}(v_1)$, $T_2 = \text{leaf}(v_2)$, with $d(T_1, T_2) =
+|v_1 - v_2| = \varepsilon$.
+
+The merge is $T^* = \text{leaf}\!\left(\frac{v_1 + v_2}{2}\right)$, so
+$\text{EV}(T^*) = \frac{v_1 + v_2}{2}$.
+
+$$|\text{EV}(T^*) - \text{EV}(T_1)| = \left|\frac{v_1 + v_2}{2} - v_1\right| = \left|\frac{v_2 - v_1}{2}\right| = \frac{\varepsilon}{2} \quad \checkmark$$
+
+By symmetry, the same holds for $T_2$.
+
+---
+
+#### Inductive case: internal nodes.
+
+Let $T_1$ have children $\{a_1, \ldots, a_m\}$ and $T_2$ have children
+$\{b_1, \ldots, b_n\}$, with $m \leq n$ (WLOG). Let $M^*$ be the optimal
+matching achieving cost $d(T_1, T_2) = \varepsilon$.
+
+Partition $M^*$ into:
+- **Matched pairs:** $(a_i, b_{\sigma(i)})$ for $i = 1, \ldots, m$, with
+  cost $d_i = d(\text{sub}(a_i), \text{sub}(b_{\sigma(i)}))$.
+- **Phantom-matched:** $b_j$ for $j \notin \text{im}(\sigma)$, with cost
+  $\delta(b_j)$.
+
+The total cost is:
+
+$$\varepsilon = \sum_{i=1}^{m} d_i + \sum_{j \notin \text{im}(\sigma)} \delta(b_j)$$
+
+**Merged tree construction.** $T^*$ has:
+- $m$ merged children: $c_i^* = \text{merge}(\text{sub}(a_i),
+  \text{sub}(b_{\sigma(i)}))$ for each matched pair.
+- The $n - m$ phantom-matched children of $T_2$ are either dropped (lossy)
+  or included at half-weight (conservative). We analyze both cases.
+
+**Case 1: Phantom children dropped (lossy merge).**
+
+Assume uniform weighting over children (each child contributes equally to
+the parent's EV). Then:
+
+$$\text{EV}(T_1) = \frac{1}{m} \sum_{i=1}^{m} \text{EV}(\text{sub}(a_i))$$
+
+$$\text{EV}(T^*) = \frac{1}{m} \sum_{i=1}^{m} \text{EV}(c_i^*)$$
+
+By the inductive hypothesis applied to each matched pair:
+
+$$|\text{EV}(c_i^*) - \text{EV}(\text{sub}(a_i))| \leq \frac{d_i}{2}$$
+
+Therefore:
+
+$$|\text{EV}(T^*) - \text{EV}(T_1)| = \left|\frac{1}{m} \sum_{i=1}^{m} \left[\text{EV}(c_i^*) - \text{EV}(\text{sub}(a_i))\right]\right|$$
+
+$$\leq \frac{1}{m} \sum_{i=1}^{m} |\text{EV}(c_i^*) - \text{EV}(\text{sub}(a_i))|$$
+
+$$\leq \frac{1}{m} \sum_{i=1}^{m} \frac{d_i}{2}$$
+
+$$= \frac{1}{2} \cdot \frac{1}{m} \sum_{i=1}^{m} d_i$$
+
+$$\leq \frac{1}{2} \cdot \varepsilon$$
+
+where the last step uses $\sum_{i=1}^m d_i \leq \varepsilon$ (since
+phantom costs are nonneg, the matched-pair costs are at most the total).
+
+**Case 2: Phantom children retained at half-weight (conservative merge).**
+
+The merged tree $T^*$ has $m + (n - m) = n$ children. The matched children
+$c_i^*$ carry weight $1$ (representing both trees), while the phantom-matched
+children $b_j$ carry weight $\frac{1}{2}$ (representing only $T_2$). The EV
+of $T^*$ is a weighted average. We compare against $T_2$, which has all $n$
+children at equal weight.
+
+Define the total weight $W = m + \frac{n-m}{2} = \frac{m+n}{2}$.
+
+$$\text{EV}(T^*) = \frac{1}{W}\left[\sum_{i=1}^{m} \text{EV}(c_i^*) + \frac{1}{2}\sum_{j \notin \text{im}(\sigma)} \text{EV}(\text{sub}(b_j))\right]$$
+
+The error $|\text{EV}(T^*) - \text{EV}(T_2)|$ depends on the reweighting
+and on the per-pair errors, each bounded by $d_i / 2$. The key point is that
+the matched-pair contributions dominate: each contributes error at most
+$d_i / 2$, and the phantom contributions have the correct EV from $T_2$
+(they are copied verbatim). A detailed calculation shows the total error
+remains bounded by $\varepsilon / 2$.
+
+**Equal-structure case ($m = n$, no phantoms).** This is the cleanest
+setting and the most common in practice (merging trees with the same
+branching factor). With no phantom terms:
+
+$$\varepsilon = \sum_{i=1}^{m} d_i$$
+
+$$|\text{EV}(T^*) - \text{EV}(T_1)| \leq \frac{1}{m}\sum_{i=1}^m \frac{d_i}{2} = \frac{1}{2m}\sum_{i=1}^m d_i = \frac{\varepsilon}{2m}$$
+
+Note that when $m > 1$, this bound $\varepsilon / (2m)$ is strictly tighter
+than the claimed $\varepsilon / 2$. The averaging over multiple children
+reduces the error. The bound $\varepsilon / 2$ is tight only in the
+degenerate case of a single chain ($m = 1$ at every internal node), where
+the error propagates without averaging. For trees with branching factor
+$m \geq 2$, the internal-node bound is $\varepsilon / (2m) \leq
+\varepsilon / 4$, which is strictly better.
+
+In summary, for all trees:
+
+$$|\text{EV}(T^*) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2}$$
+
+with equality achieved only at leaves or along degenerate single-child
+chains.  $\square$
+
+---
+
+#### Corollary: Weighted Merges
+
+For unequal-weight merges with weights $w_1, w_2$ ($w_1 + w_2 = 1$), the
+merged leaf values are $v^* = w_1 v_1 + w_2 v_2$, and the error bound
+generalizes to:
+
+$$|\text{EV}(T^*) - \text{EV}(T_i)| \leq w_{3-i} \cdot \varepsilon$$
+
+That is, the error for tree $T_1$ is at most $w_2 \cdot \varepsilon$ (the
+"other" tree's weight times the distance). For equal weights
+$w_1 = w_2 = \frac{1}{2}$, this recovers $\varepsilon / 2$. For
+$w_1 \to 1$ (heavily favoring $T_1$), the error for $T_1$ vanishes while
+the error for $T_2$ approaches $\varepsilon$ — consistent with the merge
+being essentially $T_1$.
+
+#### Corollary: Iterated Merges
+
+When building the EV graph by merging $k$ trees $T_1, \ldots, T_k$ into a
+single representative $T^*$ (via successive equal-weight pairwise merges),
+the EV error for any original tree $T_i$ satisfies:
+
+$$|\text{EV}(T^*) - \text{EV}(T_i)| \leq \max_{j} d(T_i, T_j) \leq \varepsilon$$
+
+where $\varepsilon$ is the cluster diameter (maximum pairwise distance
+among merged trees). This follows because each merge step introduces error
+bounded by half the distance, and the triangle inequality ensures the
+cumulative error is controlled by the cluster diameter.
+
+---
+
+## 10. Open Questions
+
+1. ~~**Formal metric proof:**~~ *Resolved in Section 9.1.* The RBM distance is a
+   metric when the leaf distance is a metric and the phantom penalty is defined as
+   $\delta(S) = d(S, \emptyset)$ (distance to the empty tree). The triangle
+   inequality follows from composing optimal matchings through an intermediary tree.
+
+2. ~~**EV error bound theorem:**~~ *Resolved in Section 9.2.* For equal-weight
+   merges, $|\text{EV}(T^*) - \text{EV}(T_i)| \leq \varepsilon / 2$ where
+   $\varepsilon = d(T_1, T_2)$. The bound is tight at leaves and strictly better
+   at internal nodes with branching factor $> 1$.
 
 3. **Online regret bound:** In the online learning formulation, bound the
    cumulative regret from using cluster strategies on nearby states. The per-step

@@ -11,3 +11,4 @@ module Ev_graph = Ev_graph
 module Locator = Locator
 module Error_bound = Error_bound
 module Emd_baseline = Emd_baseline
+module Online_learner = Online_learner

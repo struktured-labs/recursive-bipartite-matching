@@ -1,6 +1,6 @@
-(executable
- (name main)
- (public_name rbm-demo)
+(executables
+ (names main self_play compare)
+ (public_names rbm-demo rbm-self-play rbm-compare)
  (libraries core core_unix rbm)
  (preprocess (pps ppx_jane))
  (flags :standard -open Core))
