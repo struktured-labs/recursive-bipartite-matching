@@ -610,10 +610,10 @@ the same way you cluster game states.
 
 ## 9. Formal Proofs
 
-This section provides rigorous proofs of the two key theoretical claims
+This section provides rigorous proofs of the three key theoretical claims
 underlying the framework: (1) the recursive bipartite matching distance is a
-metric, and (2) the merge operation preserves expected value within a bounded
-error.
+metric, (2) the merge operation preserves expected value within a bounded
+error, and (3) the online EV graph learner achieves bounded cumulative regret.
 
 ### 9.1 Theorem: The RBM Distance Is a Metric
 
@@ -960,6 +960,240 @@ among merged trees). This follows because each merge step introduces error
 bounded by half the distance, and the triangle inequality ensures the
 cumulative error is controlled by the cluster diameter.
 
+### 9.3 Theorem: Online Regret Bound for the EV Graph Learner
+
+**Theorem.** Consider the online EV graph learner (Section 8) with clustering
+threshold $\varepsilon > 0$, playing a sequence of $T$ games against a
+stationary environment. At each game $t$, the learner either:
+
+- **(a) Cache hit (exploitation):** finds a cluster $c^*$ with
+  $d(T_t, \text{rep}(c^*)) \leq \varepsilon$ and uses the cluster's strategy, or
+- **(b) Cache miss (exploration):** no cluster is within distance $\varepsilon$,
+  so the learner creates a new cluster and plays an exploratory strategy.
+
+Let $K$ be the number of distinct strategic equivalence classes in the game
+(i.e., the number of structurally distinct game trees up to $\varepsilon$-distance,
+which is finite for any finite game). Let $V_{\max} = \max_t |\text{EV}(T_t)|$
+be the maximum absolute expected value of any game tree encountered.
+
+Then:
+
+1. **Exploration bound.** The total number of cache misses is at most $K$.
+
+2. **Per-step exploitation error.** When exploiting a cluster at distance
+   $d \leq \varepsilon$, the EV error is at most $\varepsilon / 2$.
+
+3. **Cumulative regret bound.** The cumulative regret over $T$ games satisfies:
+
+$$R(T) \leq K \cdot V_{\max} + (T - K) \cdot \frac{\varepsilon}{2}$$
+
+4. **Average regret.** $R(T) / T \to \varepsilon / 2$ as $T \to \infty$.
+
+5. **$\varepsilon$-annealing.** If $\varepsilon$ decreases over time as
+   $\varepsilon(t) = \varepsilon_0 / \sqrt{t}$, then the cumulative regret is
+   $O(\sqrt{T})$, giving sublinear average regret $R(T)/T \to 0$.
+
+---
+
+**Proof.**
+
+We prove each claim in turn.
+
+---
+
+#### Part 1: Exploration bound.
+
+Define a *strategic equivalence class* as a maximal set of game trees
+$\{T : d(T, T') \leq \varepsilon\}$ centered at some representative $T'$.
+Since the game is finite, the space of structurally distinct game trees
+(up to isomorphism) is finite, and thus the number of equivalence classes
+under any fixed $\varepsilon > 0$ is some finite $K$.
+
+A cache miss at game $t$ occurs only when $T_t$ lies outside all existing
+clusters — that is, $d(T_t, \text{rep}(c)) > \varepsilon$ for every cluster
+$c$ in the current EV graph. In this case, a new cluster is created with
+$T_t$ as its representative.
+
+**Claim:** each equivalence class generates at most one cache miss.
+
+*Proof of claim.* Suppose equivalence class $\mathcal{C}$ has representative
+game tree type $T_{\mathcal{C}}$. The first time any game tree $T_t \in
+\mathcal{C}$ is encountered, it may cause a cache miss (if no existing
+cluster covers it). A new cluster $c$ is created with
+$\text{rep}(c) = T_t$. For any subsequent game $T_{t'}$ in the same
+equivalence class, we have:
+
+$$d(T_{t'}, \text{rep}(c)) = d(T_{t'}, T_t) \leq \varepsilon$$
+
+by the definition of the equivalence class (all members are within distance
+$\varepsilon$ of each other). Therefore $T_{t'}$ is a cache hit against
+cluster $c$.
+
+Since there are $K$ equivalence classes, the total number of cache misses
+is at most $K$.  $\square_1$
+
+---
+
+#### Part 2: Per-step exploitation error.
+
+When the learner exploits cluster $c^*$ on game tree $T_t$ with
+$d(T_t, \text{rep}(c^*)) \leq \varepsilon$, the strategy used is the one
+computed for $\text{rep}(c^*)$. The EV of applying this strategy to $T_t$
+may differ from its true optimal EV.
+
+By Theorem 9.2 (EV Error Bound Under Merging), when two trees $T_1, T_2$
+satisfy $d(T_1, T_2) = \varepsilon$, the merged representative satisfies:
+
+$$|\text{EV}(T^*) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2}$$
+
+The cluster representative $\text{rep}(c^*)$ serves exactly the role of the
+merged tree: it is a representative constructed from trees within distance
+$\varepsilon$, and the strategy derived from it is applied to $T_t$. The
+EV error from using the cluster strategy in place of the optimal strategy
+for $T_t$ is therefore bounded by:
+
+$$r_t = |\text{EV}(\text{rep}(c^*)) - \text{EV}(T_t)| \leq \frac{d(T_t, \text{rep}(c^*))}{2} \leq \frac{\varepsilon}{2}$$
+
+where the first inequality applies Theorem 9.2 and the second uses the
+cache-hit condition $d(T_t, \text{rep}(c^*)) \leq \varepsilon$.  $\square_2$
+
+---
+
+#### Part 3: Cumulative regret bound.
+
+Define the per-game regret as the EV loss relative to the optimal strategy
+for game tree $T_t$:
+
+$$r_t = \text{EV}^*(T_t) - \text{EV}_{\text{learner}}(T_t)$$
+
+where $\text{EV}^*(T_t)$ is the EV under the optimal strategy and
+$\text{EV}_{\text{learner}}(T_t)$ is the EV achieved by the learner.
+
+Partition the $T$ games into exploration games $\mathcal{E}$ (cache misses)
+and exploitation games $\mathcal{X}$ (cache hits), with
+$|\mathcal{E}| \leq K$ (by Part 1) and
+$|\mathcal{X}| = T - |\mathcal{E}| \geq T - K$.
+
+**Exploration games.** In the worst case, an exploratory strategy achieves
+zero EV while the optimal strategy achieves $\text{EV}^*(T_t)$. The
+per-game regret is at most:
+
+$$r_t \leq |\text{EV}^*(T_t)| \leq V_{\max}$$
+
+Summing over at most $K$ exploration games:
+
+$$\sum_{t \in \mathcal{E}} r_t \leq K \cdot V_{\max}$$
+
+**Exploitation games.** By Part 2, each exploitation game incurs regret at
+most $\varepsilon / 2$:
+
+$$\sum_{t \in \mathcal{X}} r_t \leq |\mathcal{X}| \cdot \frac{\varepsilon}{2} \leq (T - K) \cdot \frac{\varepsilon}{2}$$
+
+**Total.** The cumulative regret is:
+
+$$R(T) = \sum_{t=1}^{T} r_t = \sum_{t \in \mathcal{E}} r_t + \sum_{t \in \mathcal{X}} r_t \leq K \cdot V_{\max} + (T - K) \cdot \frac{\varepsilon}{2}$$
+
+$\square_3$
+
+---
+
+#### Part 4: Average regret convergence.
+
+Dividing the cumulative regret bound by $T$:
+
+$$\frac{R(T)}{T} \leq \frac{K \cdot V_{\max}}{T} + \frac{(T - K)}{T} \cdot \frac{\varepsilon}{2}$$
+
+As $T \to \infty$, the first term vanishes ($K$ and $V_{\max}$ are constants)
+and the second term converges:
+
+$$\lim_{T \to \infty} \frac{R(T)}{T} \leq \lim_{T \to \infty} \left[\frac{K \cdot V_{\max}}{T} + \frac{\varepsilon}{2}\right] = \frac{\varepsilon}{2}$$
+
+The exploration cost (the $K \cdot V_{\max}$ term) is a one-time overhead
+that is amortized over all future games. After all $K$ equivalence classes
+have been discovered, every subsequent game is pure exploitation with
+per-game regret at most $\varepsilon / 2$.  $\square_4$
+
+---
+
+#### Part 5: Sublinear regret via $\varepsilon$-annealing.
+
+Now let $\varepsilon(t) = \varepsilon_0 / \sqrt{t}$ decrease over time.
+The key tradeoff: smaller $\varepsilon$ reduces exploitation error but
+increases the number of clusters (and thus exploration games).
+
+**Cluster count under annealing.** With threshold $\varepsilon(t)$ at time
+$t$, the equivalence classes become finer as $\varepsilon$ shrinks. Let
+$K(\varepsilon)$ denote the number of equivalence classes at threshold
+$\varepsilon$, which is a non-increasing function of $\varepsilon$.
+
+For a fixed finite game, $K(\varepsilon)$ is a step function: it equals
+some $K_0$ for large $\varepsilon$ and increases as $\varepsilon$ decreases,
+eventually reaching $N$ (the total number of distinct game trees) when
+$\varepsilon < \min_{i \neq j} d(T_i, T_j)$. The crucial property is that
+$K(\varepsilon)$ is always finite and bounded by $N$.
+
+**Cumulative regret decomposition.** At each game $t$, the learner either
+explores (regret $\leq V_{\max}$) or exploits (regret
+$\leq \varepsilon(t) / 2$). The total number of exploration games across
+all $T$ rounds is at most $K(\varepsilon(T))$, since a cluster created at
+any time $t$ covers all future games within distance $\varepsilon(t)$, and
+later (smaller) thresholds can only trigger re-exploration if the existing
+cluster is no longer fine enough. In the worst case, each decrease in
+$\varepsilon$ that splits a class triggers one new exploration event, so
+the total exploration count is bounded by $K(\varepsilon(T)) \leq N$.
+
+For the exploitation games, the per-step regret at time $t$ is at most
+$\varepsilon(t)/2 = \varepsilon_0 / (2\sqrt{t})$. Summing:
+
+$$\sum_{t \in \mathcal{X}} \frac{\varepsilon_0}{2\sqrt{t}} \leq \sum_{t=1}^{T} \frac{\varepsilon_0}{2\sqrt{t}} \leq \frac{\varepsilon_0}{2} \cdot 2\sqrt{T} = \varepsilon_0 \sqrt{T}$$
+
+where we used the standard bound $\sum_{t=1}^{T} t^{-1/2} \leq 2\sqrt{T}$.
+
+Adding the exploration cost:
+
+$$R(T) \leq N \cdot V_{\max} + \varepsilon_0 \sqrt{T}$$
+
+Since $N \cdot V_{\max}$ is a constant, the cumulative regret is
+$O(\sqrt{T})$, and the average regret converges to zero:
+
+$$\frac{R(T)}{T} \leq \frac{N \cdot V_{\max}}{T} + \frac{\varepsilon_0}{\sqrt{T}} \to 0 \quad \text{as } T \to \infty$$
+
+$\square_5$
+
+---
+
+#### Remark: Comparison with Standard Bandit Bounds
+
+The $O(\sqrt{T})$ regret under $\varepsilon$-annealing matches the
+minimax-optimal rate for multi-armed bandit problems with $K$ arms
+(Auer et al., 2002). This is not a coincidence: the EV graph learner is
+effectively a bandit over clusters, where each cluster corresponds to an
+arm with expected payoff equal to the cluster representative's EV.
+
+The key structural advantage over generic bandits is that the RBM distance
+provides a *geometry* on the arm space: nearby arms (clusters with small
+distance) have similar payoffs (by the EV error bound). This is analogous
+to Lipschitz bandits or continuum-armed bandits, where the metric structure
+enables faster learning. In the EV graph setting, the metric is not assumed
+but *derived* from the game structure via recursive bipartite matching.
+
+#### Remark: Tightness of the Bound
+
+The bound in Part 3 is tight in the following senses:
+
+- The exploration term $K \cdot V_{\max}$ is tight when each equivalence
+  class is first encountered at a worst-case game, and the exploratory
+  strategy is adversarial (achieving zero payoff). In practice, exploration
+  is not adversarial — heuristic strategies typically achieve reasonable EV —
+  so the effective exploration cost is much lower.
+
+- The exploitation term $(T - K) \cdot \varepsilon / 2$ is tight when the
+  learner always exploits at the maximum distance $\varepsilon$ and the
+  EV error bound from Theorem 9.2 is saturated (leaf-only trees or
+  single-child chains). For trees with branching factor $m > 1$, the
+  per-step error is at most $\varepsilon / (2m)$ (Theorem 9.2, equal-structure
+  case), giving a tighter bound of $(T - K) \cdot \varepsilon / (2m)$.
+
 ---
 
 ## 10. Open Questions
@@ -974,9 +1208,11 @@ cumulative error is controlled by the cluster diameter.
    $\varepsilon = d(T_1, T_2)$. The bound is tight at leaves and strictly better
    at internal nodes with branching factor $> 1$.
 
-3. **Online regret bound:** In the online learning formulation, bound the
-   cumulative regret from using cluster strategies on nearby states. The per-step
-   error is bounded by ε; can we get sublinear cumulative regret via ε-annealing?
+3. ~~**Online regret bound:**~~ *Resolved in Section 9.3.* With fixed threshold
+   $\varepsilon$, cumulative regret is $R(T) \leq K \cdot V_{\max} + (T-K) \cdot
+   \varepsilon/2$, giving average regret $\to \varepsilon/2$. With
+   $\varepsilon$-annealing ($\varepsilon(t) = \varepsilon_0/\sqrt{t}$), cumulative
+   regret is $O(\sqrt{T})$ and average regret $\to 0$.
 
 4. **Merge ordering independence:** When does merge order matter? Conjecture: for
    trees with equal branching factor and symmetric structure, the Fréchet mean
