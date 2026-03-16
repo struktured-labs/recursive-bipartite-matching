@@ -24,8 +24,29 @@ type cfr_state = {
   strategy_sum : (string, float array) Hashtbl.Poly.t;
 }
 
+(** Bucketing method selector. *)
+type bucket_method =
+  | Equity_based
+  | Rbm_based of { epsilon : float; distance_config : Distance.config }
+
+(** A single postflop cluster for RBM-based bucketing. *)
+type postflop_cluster = {
+  representative : Rhode_island.Node_label.t Tree.t;
+  rep_ev : float;
+  mutable member_count : int;
+}
+
+(** Per-street mutable cluster state for RBM-based post-flop bucketing.
+    Clusters are keyed by street index: 1=flop, 2=turn, 3=river. *)
+type postflop_state = {
+  clusters : (int, postflop_cluster list ref) Hashtbl.t;
+}
+
 (** [create ()] returns a fresh CFR state with empty tables. *)
 val create : unit -> cfr_state
+
+(** [create_postflop_state ()] returns a fresh empty cluster state. *)
+val create_postflop_state : unit -> postflop_state
 
 (** [sample_deal ()] draws 2 + 2 + 5 = 9 distinct cards uniformly at random
     from a 52-card deck.  Returns (p1_hole, p2_hole, board) where board has
@@ -41,6 +62,7 @@ val train_mccfr
   -> abstraction:Abstraction.abstraction_partial
   -> iterations:int
   -> ?report_every:int
+  -> ?bucket_method:bucket_method
   -> unit
   -> strategy * strategy
 
@@ -48,15 +70,49 @@ val train_mccfr
     the average strategy. *)
 val average_strategy : cfr_state -> strategy
 
+(** Convert an action to its single-character string representation. *)
+val action_char : Rhode_island.Action.t -> string
+
 (** [make_info_key ~buckets ~round_idx ~history] constructs the information set
     key string from per-street bucket assignments and the action history.
     Format: "B{pf}:{fl}:{tu}:{ri}|{history}" (truncated to current street). *)
 val make_info_key : buckets:int array -> round_idx:int -> history:string -> info_key
 
 (** [precompute_buckets ~abstraction ~hole_cards ~board] returns a 4-element
-    array of bucket assignments for preflop, flop, turn, and river. *)
+    array of bucket assignments for preflop, flop, turn, and river.
+    Uses equity-based bucketing. *)
 val precompute_buckets
   :  abstraction:Abstraction.abstraction_partial
   -> hole_cards:Card.t * Card.t
   -> board:Card.t list
   -> int array
+
+(** [precompute_buckets_rbm ~abstraction ~game_config ~epsilon ~distance_config
+    ~postflop ~hole_cards ~board ~player] returns a 4-element array of bucket
+    assignments.  Preflop uses equity-based; post-flop uses RBM distance
+    clustering with formal error bounds. *)
+val precompute_buckets_rbm
+  :  abstraction:Abstraction.abstraction_partial
+  -> game_config:Limit_holdem.config
+  -> epsilon:float
+  -> distance_config:Distance.config
+  -> postflop:postflop_state
+  -> hole_cards:Card.t * Card.t
+  -> board:Card.t list
+  -> player:int
+  -> int array
+
+(** [precompute_buckets_equity] is the explicit equity-based bucketing function. *)
+val precompute_buckets_equity
+  :  abstraction:Abstraction.abstraction_partial
+  -> hole_cards:Card.t * Card.t
+  -> board:Card.t list
+  -> int array
+
+(** [postflop_cluster_count postflop] returns the total number of clusters
+    across all post-flop streets. *)
+val postflop_cluster_count : postflop_state -> int
+
+(** [hand_score hole_cards board_visible] evaluates hand strength as a float
+    in [0.0, 1.0] for equity-based bucketing.  Exposed for comparison. *)
+val hand_score : Card.t * Card.t -> Card.t list -> float

@@ -124,77 +124,113 @@ let () =
   show_hand "TT" (card Ten Hearts, card Ten Spades);
   show_hand "55" (card Five Hearts, card Five Spades);
 
-  (* Run MCCFR *)
+  (* Helper to display preflop strategy *)
+  let show_preflop_strategy label strat =
+    printf "\n--- %s: P0 (SB) Preflop Opening ---\n%!" label;
+    printf "  (Facing BB's opening bet: fold / call / raise)\n%!";
+    for bucket = 0 to 9 do
+      let key = sprintf "B%d|" bucket in
+      match Hashtbl.find strat key with
+      | Some probs ->
+        let action_names =
+          match Array.length probs with
+          | 3 -> [| "fold"; "call"; "raise" |]
+          | 2 -> [| "fold"; "call" |]
+          | _ -> Array.init (Array.length probs) ~f:(fun i -> sprintf "a%d" i)
+        in
+        printf "  Bucket %d: " bucket;
+        Array.iteri probs ~f:(fun i p ->
+          printf "%s=%.1f%%" action_names.(i) (p *. 100.0);
+          match i < Array.length probs - 1 with
+          | true  -> printf "  "
+          | false -> ());
+        printf "\n%!"
+      | None ->
+        printf "  Bucket %d: (no data)\n%!" bucket
+    done
+  in
+
   let iterations = 100_000 in
-  printf "\nRunning MCCFR for %d iterations...\n%!" iterations;
+
+  (* -------------------------------------------------------------- *)
+  (* 1. Train with EQUITY-based bucketing (baseline)                 *)
+  (* -------------------------------------------------------------- *)
+  printf "\n========================================\n%!";
+  printf "  Training with EQUITY-based post-flop bucketing\n%!";
+  printf "========================================\n%!";
   let t2 = Core_unix.gettimeofday () in
-  let (p0_strat, p1_strat) =
+  let (eq_p0, eq_p1) =
     Cfr_abstract.train_mccfr ~config ~abstraction ~iterations
-      ~report_every:10_000 ()
+      ~report_every:25_000
+      ~bucket_method:Equity_based ()
   in
   let t3 = Core_unix.gettimeofday () in
-  printf "\nTraining complete in %.2fs (%.0f iter/s)\n%!"
-    (t3 -. t2) (Float.of_int iterations /. (t3 -. t2));
+  let eq_time = t3 -. t2 in
+  let eq_n0 = Hashtbl.length eq_p0 in
+  let eq_n1 = Hashtbl.length eq_p1 in
+  printf "\nEquity training: %.2fs (%.0f iter/s), P0=%d P1=%d infosets\n%!"
+    eq_time (Float.of_int iterations /. eq_time) eq_n0 eq_n1;
+  show_preflop_strategy "Equity" eq_p0;
 
-  (* Print strategy table sizes *)
-  printf "\nStrategy sizes: P0=%d infosets, P1=%d infosets\n%!"
-    (Hashtbl.length p0_strat) (Hashtbl.length p1_strat);
+  (* -------------------------------------------------------------- *)
+  (* 2. Train with RBM-based bucketing (preserves error bounds)      *)
+  (* -------------------------------------------------------------- *)
+  printf "\n========================================\n%!";
+  printf "  Training with RBM-based post-flop bucketing\n%!";
+  printf "  (preserves Theorem 9.2 error bounds)\n%!";
+  printf "========================================\n%!";
+  let rbm_epsilon = 50.0 in
+  let rbm_bucket_method =
+    Cfr_abstract.Rbm_based
+      { epsilon = rbm_epsilon
+      ; distance_config = Distance.default_config
+      }
+  in
+  let t4 = Core_unix.gettimeofday () in
+  let (rbm_p0, rbm_p1) =
+    Cfr_abstract.train_mccfr ~config ~abstraction ~iterations
+      ~report_every:25_000
+      ~bucket_method:rbm_bucket_method ()
+  in
+  let t5 = Core_unix.gettimeofday () in
+  let rbm_time = t5 -. t4 in
+  let rbm_n0 = Hashtbl.length rbm_p0 in
+  let rbm_n1 = Hashtbl.length rbm_p1 in
+  printf "\nRBM training: %.2fs (%.0f iter/s), P0=%d P1=%d infosets\n%!"
+    rbm_time (Float.of_int iterations /. rbm_time) rbm_n0 rbm_n1;
+  show_preflop_strategy "RBM" rbm_p0;
 
-  (* Show sample strategies: preflop open for P0 (SB) *)
-  printf "\n--- P0 (SB) Preflop Opening Strategies ---\n%!";
-  printf "  (Facing BB's opening bet: fold / call / raise)\n%!";
-  for bucket = 0 to 9 do
-    let key = sprintf "B%d|" bucket in
-    match Hashtbl.find p0_strat key with
-    | Some probs ->
-      let action_names =
-        match Array.length probs with
-        | 3 -> [| "fold"; "call"; "raise" |]
-        | 2 -> [| "fold"; "call" |]
-        | _ -> Array.init (Array.length probs) ~f:(fun i -> sprintf "a%d" i)
-      in
-      printf "  Bucket %d: " bucket;
-      Array.iteri probs ~f:(fun i p ->
-        printf "%s=%.1f%%" action_names.(i) (p *. 100.0);
-        match i < Array.length probs - 1 with
-        | true  -> printf "  "
-        | false -> ());
-      printf "\n%!"
-    | None ->
-      printf "  Bucket %d: (no data)\n%!" bucket
-  done;
+  (* -------------------------------------------------------------- *)
+  (* 3. Comparison summary                                           *)
+  (* -------------------------------------------------------------- *)
+  printf "\n========================================\n%!";
+  printf "  COMPARISON SUMMARY\n%!";
+  printf "========================================\n%!";
+  printf "  Equity postflop: P0=%d P1=%d infosets  (%.2fs)\n%!"
+    eq_n0 eq_n1 eq_time;
+  printf "  RBM postflop:    P0=%d P1=%d infosets  (%.2fs, eps=%.1f)\n%!"
+    rbm_n0 rbm_n1 rbm_time rbm_epsilon;
+  printf "  RBM/equity ratio: P0=%.2fx P1=%.2fx infosets, %.2fx time\n%!"
+    (Float.of_int rbm_n0 /. Float.of_int (Int.max 1 eq_n0))
+    (Float.of_int rbm_n1 /. Float.of_int (Int.max 1 eq_n1))
+    (rbm_time /. Float.max 0.001 eq_time);
 
-  (* Show P1 (BB) responses to SB raise *)
-  printf "\n--- P1 (BB) Response to SB Raise ---\n%!";
-  printf "  (After SB raises: fold / call / raise)\n%!";
-  for bucket = 0 to 9 do
-    let key = sprintf "B%d|r" bucket in
-    match Hashtbl.find p1_strat key with
-    | Some probs ->
-      let action_names =
-        match Array.length probs with
-        | 3 -> [| "fold"; "call"; "raise" |]
-        | 2 -> [| "fold"; "call" |]
-        | _ -> Array.init (Array.length probs) ~f:(fun i -> sprintf "a%d" i)
-      in
-      printf "  Bucket %d: " bucket;
-      Array.iteri probs ~f:(fun i p ->
-        printf "%s=%.1f%%" action_names.(i) (p *. 100.0);
-        match i < Array.length probs - 1 with
-        | true  -> printf "  "
-        | false -> ());
-      printf "\n%!"
-    | None ->
-      printf "  Bucket %d: (no data)\n%!" bucket
-  done;
-
-  (* Save strategy *)
+  (* Save equity strategy (primary output) *)
   let out_file = "strategy_mccfr_100k.dat" in
-  printf "\nSaving strategies to %s...\n%!" out_file;
+  printf "\nSaving equity strategies to %s...\n%!" out_file;
   let oc = Out_channel.create out_file in
-  Marshal.to_channel oc (p0_strat, p1_strat) [ Marshal.Closures ];
+  Marshal.to_channel oc (eq_p0, eq_p1) [ Marshal.Closures ];
   Out_channel.close oc;
   printf "Done. File size: %d bytes\n%!"
     (Int64.to_int_exn (Core_unix.stat out_file).st_size);
+
+  (* Save RBM strategy *)
+  let rbm_file = "strategy_mccfr_rbm_100k.dat" in
+  printf "Saving RBM strategies to %s...\n%!" rbm_file;
+  let oc2 = Out_channel.create rbm_file in
+  Marshal.to_channel oc2 (rbm_p0, rbm_p1) [ Marshal.Closures ];
+  Out_channel.close oc2;
+  printf "Done. File size: %d bytes\n%!"
+    (Int64.to_int_exn (Core_unix.stat rbm_file).st_size);
 
   printf "\n=== Training Complete ===\n%!"

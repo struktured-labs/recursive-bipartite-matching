@@ -208,3 +208,113 @@ let game_tree_for_deal ~config ~p1_cards ~p2_cards ~board =
     round_idx = 0;
   } in
   betting_round ~config ~p1_cards ~p2_cards ~board ~state
+
+(** Build a game tree starting from a specific betting round.
+
+    Unlike [game_tree_for_deal] which always starts from preflop,
+    this starts at [round_idx] with [pot_so_far] already invested.
+    [board] must contain exactly 5 community cards for showdown evaluation.
+
+    This is used by [information_set_tree] to build subtrees from
+    post-flop streets. *)
+let game_tree_from_street ~config ~p1_cards ~p2_cards ~board
+    ~(round_idx : int) ~(pot_so_far : int) =
+  let half_pot = pot_so_far / 2 in
+  let state = {
+    to_act = 0;
+    num_raises = 0;
+    bet_outstanding = false;
+    first_checked = false;
+    p1_invested = half_pot;
+    p2_invested = pot_so_far - half_pot;
+    round_idx;
+  } in
+  betting_round ~config ~p1_cards ~p2_cards ~board ~state
+
+(** Build an information set tree for [player] at a given street.
+
+    Aggregates over all possible opponent hole-card pairs AND remaining
+    board cards from the remaining deck.
+
+    [hole_cards] is the player's hand.
+    [board_visible] is the visible board cards so far (3 for flop, 4 for
+    turn, 5 for river).
+    [round_idx] is the current street (1=flop, 2=turn, 3=river).
+    [pot_so_far] is the total chips invested before this street.
+
+    For flop/turn, samples remaining board cards to complete the 5-card
+    board.  For each (opponent_hand, board_completion) pair, generates a
+    game subtree from [round_idx] onward.
+
+    To keep tree size manageable, we sample a subset of opponent hands
+    when the combination count exceeds [max_opponents] (default 50). *)
+let information_set_tree ?(max_opponents = 50) ~config ~player ~hole_cards
+    ~board_visible ~round_idx ~pot_so_far () =
+  let (h1, h2) = hole_cards in
+  let dealt = [ h1; h2 ] @ board_visible in
+  let remaining = remove_cards config.deck dealt in
+  let n_board_needed = 5 - List.length board_visible in
+  (* Generate all possible board completions *)
+  let board_completions =
+    match n_board_needed with
+    | 0 -> [ [] ]
+    | 1 ->
+      List.map remaining ~f:(fun c -> [ c ])
+    | 2 ->
+      let arr = Array.of_list remaining in
+      let n = Array.length arr in
+      let pairs = ref [] in
+      for i = 0 to n - 2 do
+        for j = i + 1 to n - 1 do
+          pairs := [ arr.(i); arr.(j) ] :: !pairs
+        done
+      done;
+      List.rev !pairs
+    | _ -> [ [] ]  (* shouldn't happen *)
+  in
+  (* For each board completion, generate opponent-aggregated subtrees *)
+  let children =
+    List.concat_map board_completions ~f:(fun extra_board ->
+      let full_board = board_visible @ extra_board in
+      let remaining_after_board = remove_cards remaining extra_board in
+      let all_opps = all_pairs remaining_after_board in
+      (* Subsample opponent hands if too many *)
+      let opponent_hands =
+        match List.length all_opps > max_opponents with
+        | true ->
+          let arr = Array.of_list all_opps in
+          let n = Array.length arr in
+          (* Fisher-Yates partial shuffle for first max_opponents *)
+          for i = 0 to Int.min (max_opponents - 1) (n - 1) do
+            let j = i + Random.int (n - i) in
+            let tmp = arr.(i) in
+            arr.(i) <- arr.(j);
+            arr.(j) <- tmp
+          done;
+          Array.to_list (Array.sub arr ~pos:0 ~len:(Int.min max_opponents n))
+        | false -> all_opps
+      in
+      List.map opponent_hands ~f:(fun (opp1, opp2) ->
+        let p1_cards, p2_cards =
+          match player with
+          | 0 -> (hole_cards, (opp1, opp2))
+          | _ -> ((opp1, opp2), hole_cards)
+        in
+        let subtree =
+          game_tree_from_street ~config ~p1_cards ~p2_cards
+            ~board:full_board ~round_idx ~pot_so_far
+        in
+        Tree.node
+          ~label:(Node_label.Chance {
+            description = sprintf "opp=%s,%s board=%s"
+              (Card.to_string opp1) (Card.to_string opp2)
+              (String.concat ~sep:"," (List.map extra_board ~f:Card.to_string))
+          })
+          ~children:[ subtree ]))
+  in
+  Tree.node
+    ~label:(Node_label.Chance {
+      description = sprintf "p%d holds %s,%s at street %d"
+        (player + 1) (Card.to_string h1) (Card.to_string h2) round_idx
+    })
+    ~children

@@ -194,13 +194,13 @@ let hand_score (hole_cards : Card.t * Card.t) (board_visible : Card.t list) : fl
   in
   Float.min 0.999 (rank_score +. tb_score *. 0.1)
 
-(** Compute bucket for a hand at a given street.
+(** Compute bucket for a hand at a given street using equity-based scoring.
 
     preflop: use the preflop abstraction (canonical hand -> bucket).
     flop/turn/river: evaluate the hand rank on visible board cards and
     quantise into n_buckets.  Uses direct hand evaluation (O(1) per call)
     rather than Equity.hand_strength (which enumerates all opponents). *)
-let compute_bucket
+let compute_bucket_equity
     ~(abstraction : Abstraction.abstraction_partial)
     ~(hole_cards : Card.t * Card.t)
     ~(board : Card.t list)
@@ -222,14 +222,194 @@ let compute_bucket
     let n = abstraction.n_buckets in
     Int.min (n - 1) (Float.to_int (score *. Float.of_int n))
 
-(** Precompute all 4 street buckets for a given deal *)
-let precompute_buckets
+(** Precompute all 4 street buckets for a given deal (equity-based). *)
+let precompute_buckets_equity
     ~(abstraction : Abstraction.abstraction_partial)
     ~(hole_cards : Card.t * Card.t)
     ~(board : Card.t list)
   : int array =
   Array.init 4 ~f:(fun round_idx ->
-    compute_bucket ~abstraction ~hole_cards ~board ~round_idx)
+    compute_bucket_equity ~abstraction ~hole_cards ~board ~round_idx)
+
+(* ------------------------------------------------------------------ *)
+(* RBM-based post-flop bucketing                                       *)
+(* ------------------------------------------------------------------ *)
+
+(** Bucketing method selector.
+
+    [Equity_based]: uses hand_score equity quantisation (fast but loses RBM
+    error bounds from Theorem 9.2).
+    [Rbm_based { epsilon; distance_config }]: builds information set trees
+    for each street and clusters by RBM distance, preserving formal error
+    bounds. *)
+type bucket_method =
+  | Equity_based
+  | Rbm_based of { epsilon : float; distance_config : Distance.config }
+
+(** A single postflop cluster: stores the representative IS tree and its
+    cached EV for fast pre-filtering. *)
+type postflop_cluster = {
+  representative : Rhode_island.Node_label.t Tree.t;
+  rep_ev : float;
+  mutable member_count : int;
+}
+
+(** Per-street mutable cluster state for RBM-based bucketing. *)
+type postflop_state = {
+  clusters : (int, postflop_cluster list ref) Hashtbl.t;
+  (** Keyed by street index: 1=flop, 2=turn, 3=river. *)
+}
+
+let create_postflop_state () =
+  { clusters = Hashtbl.Poly.create ~size:4 () }
+
+(** Find the nearest cluster for a tree among the existing clusters for
+    a given street.  Uses EV pre-filtering: skip any cluster whose
+    |EV difference| > epsilon.  Returns [(cluster_index, distance)] or
+    [None] if no clusters exist. *)
+let find_nearest_postflop_cluster ~epsilon ~distance_config clusters tree =
+  match clusters with
+  | [] -> None
+  | _ ->
+    let tree_ev = Tree.ev tree in
+    let best =
+      List.foldi clusters ~init:(0, Float.infinity)
+        ~f:(fun i (best_i, best_d) oc ->
+          let ev_diff = Float.abs (tree_ev -. oc.rep_ev) in
+          match Float.( > ) ev_diff epsilon with
+          | true -> (best_i, best_d)
+          | false ->
+            match Float.( >= ) ev_diff best_d with
+            | true -> (best_i, best_d)
+            | false ->
+              let d =
+                Distance.compute_with_config ~config:distance_config
+                  tree oc.representative
+              in
+              match Float.( < ) d best_d with
+              | true -> (i, d)
+              | false -> (best_i, best_d))
+    in
+    Some best
+
+(** Compute bucket for a hand at a given post-flop street using RBM distance.
+
+    Builds an information set tree for the player's hand + visible board,
+    then finds or creates a cluster for this street.
+
+    Returns the cluster index (= bucket ID). *)
+let compute_bucket_rbm_postflop
+    ~(game_config : Limit_holdem.config)
+    ~(epsilon : float)
+    ~(distance_config : Distance.config)
+    ~(postflop : postflop_state)
+    ~(hole_cards : Card.t * Card.t)
+    ~(board : Card.t list)
+    ~(round_idx : int)
+    ~(player : int)
+  : int =
+  let board_visible =
+    match round_idx with
+    | 1 -> List.take board 3
+    | 2 -> List.take board 4
+    | _ -> board
+  in
+  (* Estimate pot at this street: blinds + small_bet rounds for prior streets *)
+  let pot_so_far =
+    let base = game_config.small_blind + game_config.big_blind in
+    match round_idx with
+    | 1 -> base + 2 * game_config.small_bet     (* after preflop call *)
+    | 2 -> base + 4 * game_config.small_bet      (* after flop call *)
+    | _ -> base + 4 * game_config.small_bet + 2 * game_config.big_bet
+  in
+  (* Build information set tree for this hand + visible board *)
+  let is_tree =
+    Limit_holdem.information_set_tree ~max_opponents:30 ~config:game_config
+      ~player ~hole_cards ~board_visible ~round_idx ~pot_so_far ()
+  in
+  (* Get or create the cluster list for this street *)
+  let clusters_ref =
+    match Hashtbl.find postflop.clusters round_idx with
+    | Some r -> r
+    | None ->
+      let r = ref [] in
+      Hashtbl.set postflop.clusters ~key:round_idx ~data:r;
+      r
+  in
+  let clusters = !clusters_ref in
+  let nearest =
+    find_nearest_postflop_cluster ~epsilon ~distance_config clusters is_tree
+  in
+  match nearest with
+  | Some (idx, d) ->
+    (match Float.( < ) d epsilon with
+     | true ->
+       (* Close enough -- assign to existing cluster *)
+       let oc = List.nth_exn clusters idx in
+       oc.member_count <- oc.member_count + 1;
+       idx
+     | false ->
+       (* Too far -- create new cluster *)
+       let new_cluster =
+         { representative = is_tree
+         ; rep_ev = Tree.ev is_tree
+         ; member_count = 1
+         }
+       in
+       clusters_ref := clusters @ [ new_cluster ];
+       List.length clusters)  (* new cluster index *)
+  | None ->
+    (* First cluster for this street *)
+    let new_cluster =
+      { representative = is_tree
+      ; rep_ev = Tree.ev is_tree
+      ; member_count = 1
+      }
+    in
+    clusters_ref := [ new_cluster ];
+    0
+
+(** Compute bucket for a hand at a given street using RBM distance for
+    post-flop streets.  Preflop uses the canonical-hand abstraction (same
+    as equity-based).  Post-flop builds IS trees and clusters by RBM
+    distance, preserving the formal error bounds of Theorem 9.2. *)
+let compute_bucket_rbm
+    ~(abstraction : Abstraction.abstraction_partial)
+    ~(game_config : Limit_holdem.config)
+    ~(epsilon : float)
+    ~(distance_config : Distance.config)
+    ~(postflop : postflop_state)
+    ~(hole_cards : Card.t * Card.t)
+    ~(board : Card.t list)
+    ~(round_idx : int)
+    ~(player : int)
+  : int =
+  match round_idx with
+  | 0 ->
+    Abstraction.get_bucket abstraction ~hole_cards
+  | _ ->
+    compute_bucket_rbm_postflop ~game_config ~epsilon ~distance_config
+      ~postflop ~hole_cards ~board ~round_idx ~player
+
+(** Precompute all 4 street buckets for a given deal (RBM-based).
+    [player] = 0 or 1, used for building information set trees from the
+    correct perspective. *)
+let precompute_buckets_rbm
+    ~(abstraction : Abstraction.abstraction_partial)
+    ~(game_config : Limit_holdem.config)
+    ~(epsilon : float)
+    ~(distance_config : Distance.config)
+    ~(postflop : postflop_state)
+    ~(hole_cards : Card.t * Card.t)
+    ~(board : Card.t list)
+    ~(player : int)
+  : int array =
+  Array.init 4 ~f:(fun round_idx ->
+    compute_bucket_rbm ~abstraction ~game_config ~epsilon ~distance_config
+      ~postflop ~hole_cards ~board ~round_idx ~player)
+
+(** Backward-compatible alias: precompute_buckets uses equity-based method. *)
+let precompute_buckets = precompute_buckets_equity
 
 (* ------------------------------------------------------------------ *)
 (* Inline betting tree traversal (no tree materialisation)             *)
@@ -482,19 +662,44 @@ and advance_to_next_round
 (* Top-level training loop                                             *)
 (* ------------------------------------------------------------------ *)
 
+(** Count total postflop clusters across all streets. *)
+let postflop_cluster_count (postflop : postflop_state) : int =
+  Hashtbl.fold postflop.clusters ~init:0 ~f:(fun ~key:_ ~data:clusters_ref acc ->
+    acc + List.length !clusters_ref)
+
 let train_mccfr ~(config : Limit_holdem.config)
     ~(abstraction : Abstraction.abstraction_partial)
     ~(iterations : int)
     ?(report_every = 10_000)
+    ?(bucket_method = Equity_based)
     ()
   : strategy * strategy =
   let cfr_states = [| create (); create () |] in
   let util_sum = ref 0.0 in
+  (* Create shared postflop state for RBM bucketing (one per player) *)
+  let postflop_states =
+    match bucket_method with
+    | Rbm_based _ -> [| create_postflop_state (); create_postflop_state () |]
+    | Equity_based -> [| create_postflop_state (); create_postflop_state () |]
+  in
   for iter = 1 to iterations do
     let (p1_cards, p2_cards, board) = sample_deal () in
     (* Precompute buckets for both players *)
-    let p1_buckets = precompute_buckets ~abstraction ~hole_cards:p1_cards ~board in
-    let p2_buckets = precompute_buckets ~abstraction ~hole_cards:p2_cards ~board in
+    let p1_buckets, p2_buckets =
+      match bucket_method with
+      | Equity_based ->
+        let b1 = precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board in
+        let b2 = precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board in
+        (b1, b2)
+      | Rbm_based { epsilon; distance_config } ->
+        let b1 = precompute_buckets_rbm ~abstraction ~game_config:config
+            ~epsilon ~distance_config ~postflop:postflop_states.(0)
+            ~hole_cards:p1_cards ~board ~player:0 in
+        let b2 = precompute_buckets_rbm ~abstraction ~game_config:config
+            ~epsilon ~distance_config ~postflop:postflop_states.(1)
+            ~hole_cards:p2_cards ~board ~player:1 in
+        (b1, b2)
+    in
     (* Alternate traverser *)
     let traverser = (iter - 1) % 2 in
     (* Initial state: preflop with blinds *)
@@ -516,8 +721,16 @@ let train_mccfr ~(config : Limit_holdem.config)
       let avg_util = !util_sum /. Float.of_int iter in
       let n_infosets_0 = Hashtbl.length cfr_states.(0).regret_sum in
       let n_infosets_1 = Hashtbl.length cfr_states.(1).regret_sum in
-      printf "  [MCCFR] iter %d/%d  avg_util=%.4f  infosets=(%d, %d)\n%!"
-        iter iterations avg_util n_infosets_0 n_infosets_1
+      (match bucket_method with
+       | Equity_based ->
+         printf "  [MCCFR-equity] iter %d/%d  avg_util=%.4f  infosets=(%d, %d)\n%!"
+           iter iterations avg_util n_infosets_0 n_infosets_1
+       | Rbm_based _ ->
+         let n_clusters_0 = postflop_cluster_count postflop_states.(0) in
+         let n_clusters_1 = postflop_cluster_count postflop_states.(1) in
+         printf "  [MCCFR-rbm] iter %d/%d  avg_util=%.4f  infosets=(%d, %d)  postflop_clusters=(%d, %d)\n%!"
+           iter iterations avg_util n_infosets_0 n_infosets_1
+           n_clusters_0 n_clusters_1)
     | false -> ()
   done;
   let p0_avg = average_strategy cfr_states.(0) in

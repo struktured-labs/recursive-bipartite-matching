@@ -42,6 +42,42 @@ val game_tree_for_deal
   -> board:Card.t list
   -> Node_label.t Tree.t
 
+(** Build a game tree starting from a specific betting round.
+    Unlike [game_tree_for_deal], starts at [round_idx] with [pot_so_far]
+    chips already invested.  [board] must be exactly 5 cards. *)
+val game_tree_from_street
+  :  config:config
+  -> p1_cards:Card.t * Card.t
+  -> p2_cards:Card.t * Card.t
+  -> board:Card.t list
+  -> round_idx:int
+  -> pot_so_far:int
+  -> Node_label.t Tree.t
+
+(** Build an information set tree for [player] at a given street.
+
+    Aggregates over all possible opponent hole-card pairs AND remaining
+    board cards.  [board_visible] is the known community cards (3 for flop,
+    4 for turn, 5 for river).  [round_idx] is the street (1=flop, 2=turn,
+    3=river).  [pot_so_far] is the total chips invested before this street.
+
+    Subsamples opponent hands when there are more than [?max_opponents]
+    (default 50) to keep tree construction tractable.
+
+    The resulting tree captures strategic similarity for RBM distance
+    comparison: two hands that play out similarly against the field will
+    have small tree distance. *)
+val information_set_tree
+  :  ?max_opponents:int
+  -> config:config
+  -> player:int
+  -> hole_cards:Card.t * Card.t
+  -> board_visible:Card.t list
+  -> round_idx:int
+  -> pot_so_far:int
+  -> unit
+  -> Node_label.t Tree.t
+
 (** Remove a list of cards from a deck. *)
 val remove_cards : Card.t list -> Card.t list -> Card.t list
 
