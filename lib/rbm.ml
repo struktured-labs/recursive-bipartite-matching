@@ -22,3 +22,5 @@ module Hand_iso = Hand_iso
 module Limit_holdem = Limit_holdem
 module Equity = Equity
 module Abstraction = Abstraction
+module Cfr_abstract = Cfr_abstract
+module Acpc_protocol = Acpc_protocol
