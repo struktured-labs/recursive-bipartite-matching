@@ -107,6 +107,81 @@ let compress ~epsilon ?(distance_config = Distance.default_config) ?precomputed 
   ; compression_ratio = Float.of_int n /. Float.of_int (Int.max 1 num_clusters)
   }
 
+let precompute_distances_pruned ?(distance_config = Distance.default_config)
+    ~threshold (trees : 'a Tree.t list) =
+  let n = List.length trees in
+  let tree_arr = Array.of_list trees in
+  (* Precompute EVs for all trees (O(n) each) *)
+  let evs = Array.map tree_arr ~f:Tree.ev in
+  let num_computed = ref 0 in
+  let num_skipped = ref 0 in
+  let dist = Array.init n ~f:(fun i ->
+    Array.init n ~f:(fun j ->
+      match i <= j with
+      | true ->
+        let ev_diff = Float.abs (evs.(i) -. evs.(j)) in
+        (* |EV(T1) - EV(T2)| is a lower bound on d(T1, T2) *)
+        (match Float.( > ) ev_diff threshold with
+         | true ->
+           Int.incr num_skipped;
+           Float.infinity
+         | false ->
+           Int.incr num_computed;
+           Distance.compute_with_config ~config:distance_config
+             tree_arr.(i) tree_arr.(j))
+      | false -> 0.0))
+  in
+  (* Fill lower triangle *)
+  for i = 0 to n - 1 do
+    for j = 0 to i - 1 do
+      dist.(i).(j) <- dist.(j).(i)
+    done
+  done;
+  (dist, !num_computed, !num_skipped)
+
+let precompute_distances_fast ?(distance_config = Distance.default_config)
+    ~threshold (trees : 'a Tree.t list) =
+  let n = List.length trees in
+  let tree_arr = Array.of_list trees in
+  (* Precompute EVs for all trees *)
+  let evs = Array.map tree_arr ~f:Tree.ev in
+  let ev_pruned = ref 0 in
+  let shallow_pruned = ref 0 in
+  let full_computed = ref 0 in
+  let dist = Array.init n ~f:(fun i ->
+    Array.init n ~f:(fun j ->
+      match i <= j with
+      | true ->
+        (* Stage 1: EV pruning *)
+        let ev_diff = Float.abs (evs.(i) -. evs.(j)) in
+        (match Float.( > ) ev_diff threshold with
+         | true ->
+           Int.incr ev_pruned;
+           Float.infinity
+         | false ->
+           (* Stage 2: Progressive depth truncation *)
+           let d, depth_used =
+             Distance.compute_progressive ~config:distance_config ~threshold
+               tree_arr.(i) tree_arr.(j)
+           in
+           (match depth_used < Int.max_value with
+            | true ->
+              (* Shallow computation was sufficient to exceed threshold *)
+              Int.incr shallow_pruned;
+              d
+            | false ->
+              Int.incr full_computed;
+              d))
+      | false -> 0.0))
+  in
+  (* Fill lower triangle *)
+  for i = 0 to n - 1 do
+    for j = 0 to i - 1 do
+      dist.(i).(j) <- dist.(j).(i)
+    done
+  done;
+  (dist, (!ev_pruned, !shallow_pruned, !full_computed))
+
 let find_cluster ?(distance_config = Distance.default_config) graph tree =
   let distances = List.mapi graph.clusters ~f:(fun i c ->
     let d = Distance.compute_with_config ~config:distance_config

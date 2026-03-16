@@ -17,4 +17,5 @@
   (dune (>= 3.16))
   (core (>= v0.17.0))
   (core_unix (>= v0.17.0))
-  (ppx_jane (>= v0.17.0))))
+  (ppx_jane (>= v0.17.0))
+  (domainslib (>= 0.5.0))))

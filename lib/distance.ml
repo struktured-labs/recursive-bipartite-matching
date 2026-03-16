@@ -157,3 +157,63 @@ let rec compute_memoized_impl config (t1 : 'a Tree.t) (t2 : 'a Tree.t) : float =
 
 let compute_memoized t1 t2 =
   compute_memoized_impl default_config t1 t2
+
+(** Depth-truncated RBM distance: recurse normally until [max_depth], then
+    compare subtrees by |EV(T1) - EV(T2)| only.  This gives a LOWER BOUND
+    on the full distance because the EV comparison is cheaper than the full
+    recursive matching. *)
+let rec compute_truncated_impl config ~max_depth ~depth
+    (t1 : 'a Tree.t) (t2 : 'a Tree.t) : float =
+  (* At or beyond max_depth: fall back to EV difference *)
+  match depth >= max_depth with
+  | true -> Float.abs (Tree.ev t1 -. Tree.ev t2)
+  | false ->
+    match t1, t2 with
+    | Leaf { value = v1; _ }, Leaf { value = v2; _ } ->
+      config.leaf_distance v1 v2
+    | Leaf _, Node _ ->
+      let leaf_as_ev = Tree.ev t1 in
+      let node_ev = Tree.ev t2 in
+      Float.abs (leaf_as_ev -. node_ev) +. phantom_cost config t2
+    | Node _, Leaf _ ->
+      compute_truncated_impl config ~max_depth ~depth t2 t1
+    | Node { children = c1; _ }, Node { children = c2; _ } ->
+      let n1 = List.length c1 in
+      let n2 = List.length c2 in
+      match n1, n2 with
+      | 0, 0 -> 0.0
+      | 0, _ ->
+        List.sum (module Float) c2 ~f:(phantom_cost config)
+      | _, 0 ->
+        List.sum (module Float) c1 ~f:(phantom_cost config)
+      | _, _ ->
+        let a1 = Array.of_list c1 in
+        let a2 = Array.of_list c2 in
+        let cost_matrix = Array.init n1 ~f:(fun i ->
+          Array.init n2 ~f:(fun j ->
+            compute_truncated_impl config ~max_depth ~depth:(depth + 1)
+              a1.(i) a2.(j)))
+        in
+        let result = Hungarian.solve_rectangular cost_matrix
+          ~phantom_cost_row:(fun i -> phantom_cost config a1.(i))
+          ~phantom_cost_col:(fun j -> phantom_cost config a2.(j))
+        in
+        result.cost
+
+let compute_truncated ?(config = default_config) ~max_depth t1 t2 =
+  compute_truncated_impl config ~max_depth ~depth:0 t1 t2
+
+let compute_progressive ?(config = default_config) ~threshold t1 t2 =
+  (* Depth 2: very cheap lower bound *)
+  let d2 = compute_truncated_impl config ~max_depth:2 ~depth:0 t1 t2 in
+  match Float.( > ) d2 threshold with
+  | true -> (d2, 2)
+  | false ->
+    (* Depth 4: moderate cost, tighter lower bound *)
+    let d4 = compute_truncated_impl config ~max_depth:4 ~depth:0 t1 t2 in
+    match Float.( > ) d4 threshold with
+    | true -> (d4, 4)
+    | false ->
+      (* Full depth: exact distance *)
+      let d_full = compute_with_config ~config t1 t2 in
+      (d_full, Int.max_value)

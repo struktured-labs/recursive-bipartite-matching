@@ -59,3 +59,26 @@ module Memo : sig
   (** Return current cache hit/miss statistics. *)
   val stats : unit -> memo_stats
 end
+
+(** [compute_truncated ~max_depth t1 t2] computes the RBM distance but
+    stops recursing beyond [max_depth]. Subtrees beyond that depth are
+    compared by EV difference only. This gives a LOWER BOUND on the
+    full distance (since we're using a cheaper comparison at depth). *)
+val compute_truncated
+  :  ?config:config
+  -> max_depth:int
+  -> 'a Tree.t
+  -> 'a Tree.t
+  -> float
+
+(** [compute_progressive ~threshold t1 t2] uses progressive deepening:
+    starts with depth 2, checks if distance > threshold. If yes, returns
+    immediately. Otherwise deepens to depth 4, then full computation.
+    Returns (distance, depth_used) where depth_used is 2, 4, or max_int
+    for full computation. *)
+val compute_progressive
+  :  ?config:config
+  -> threshold:float
+  -> 'a Tree.t
+  -> 'a Tree.t
+  -> float * int

@@ -35,6 +35,25 @@ val precompute_distances
   -> 'a Tree.t list
   -> dist_matrix
 
+(** [precompute_distances_pruned ~threshold trees] computes the pairwise
+    distance matrix but skips full distance computation when the EV
+    difference alone exceeds [threshold]. Skipped pairs are set to
+    [Float.infinity]. Returns (matrix, num_computed, num_skipped). *)
+val precompute_distances_pruned
+  :  ?distance_config:Distance.config
+  -> threshold:float
+  -> 'a Tree.t list
+  -> dist_matrix * int * int
+
+(** [precompute_distances_fast ~threshold trees] combines EV pruning
+    and progressive depth truncation. Returns (matrix, stats) where
+    stats = (ev_pruned, shallow_pruned, full_computed). *)
+val precompute_distances_fast
+  :  ?distance_config:Distance.config
+  -> threshold:float
+  -> 'a Tree.t list
+  -> dist_matrix * (int * int * int)
+
 val compress
   :  epsilon:float
   -> ?distance_config:Distance.config
