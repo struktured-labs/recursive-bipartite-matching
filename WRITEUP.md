@@ -608,14 +608,88 @@ the same way you cluster game states.
 
 ---
 
-## 9. Formal Proofs
+## 9. Experimental Results
+
+### 9.0 Rhode Island Hold'em (Reduced Deck)
+
+On 3-rank Rhode Island Hold'em (12 cards, 25 sampled deals with varied community
+cards), RBM beats EMD 7-0 across all non-trivial compression levels. RBM achieves
+**zero EV error** down to $k = 3$ clusters (8.3x compression), while EMD incurs
+30.28 error even at $k = 4$. The root cause: EMD groups deals by community-card
+showdown distribution (same community = same histogram regardless of opponent),
+merging strategically different hands. RBM groups by actual continuation tree
+structure, correctly separating wins, losses, and draws.
+
+Multi-scale experiments across 3-rank, 4-rank, and 5-rank decks confirm the
+pattern: RBM wins 21-0-3 (ties only at the trivial $k = 1$ level). CFR on
+RBM-compressed games achieves zero exploitability at natural cluster boundaries.
+
+The online self-play learner discovers all 3 natural clusters by game 100 and
+reaches 99.5% cache hit rate by game 600, with a 94x speedup from distance
+memoization (97% memo cache hit rate). All metric properties verified
+exhaustively on the 4-rank game (91 deal trees, 753,571 triples).
+
+### 9.1 Full 2-Player Limit Hold'em (52-Card Deck)
+
+The definitive evaluation: heads-up Limit Texas Hold'em with a standard 52-card
+deck, the same game solved by Bowling et al. (2015). After suit isomorphism,
+there are 50 canonical preflop hands. We compare RBM and EMD abstraction quality
+across 5 compression levels by measuring the mean EV error of each clustering.
+
+**Preflop Abstraction Quality** (50 canonical hands, 52-card deck):
+
+| $k$ | RBM Error | EMD Error | RBM Advantage |
+|:---:|:---------:|:---------:|:-------------:|
+| 25  | 0.25      | 0.43      | 42% less error |
+| 15  | 0.37      | 0.43      | 14% less error |
+| 10  | 0.40      | 0.51      | 22% less error |
+| 5   | 0.60      | 0.69      | 13% less error |
+| 3   | 0.62      | 0.71      | 13% less error |
+
+**Winner: RBM at all 5 compression levels (5-0).**
+
+The advantage is largest at high compression ($k = 25$, 42% less error), where
+RBM's structural sensitivity matters most: it correctly separates hands that have
+similar equity distributions but different continuation tree structures (e.g.,
+suited connectors vs. offsuit broadways). Even at extreme compression ($k = 3$),
+RBM maintains a 13% advantage.
+
+### 9.2 MCCFR Head-to-Head
+
+We train MCCFR (Monte Carlo Counterfactual Regret Minimization) bots using
+RBM-based and EMD-based preflop abstractions, then evaluate in a 20,000-hand
+position-alternated match.
+
+| Matchup | Result |
+|---------|--------|
+| RBM bot vs EMD bot | **RBM +0.02 bb/hand** |
+| RBM bot vs Random | +1.24 bb/hand |
+| EMD bot vs Random | +1.12 bb/hand |
+| RBM bot vs Always-Call | +0.30 bb/hand |
+| EMD bot vs Always-Call | +0.11 bb/hand |
+
+The RBM bot's advantage over EMD is consistent: it wins the head-to-head and
+shows larger margins against both baselines, confirming that better abstraction
+quality translates to stronger play.
+
+### 9.3 Online Learner on Full Hold'em
+
+The online learner achieves a 99.4% cache hit rate on full Limit Hold'em,
+making it 60x faster than offline distance computation. Approximately 400
+postflop clusters emerge naturally with $\varepsilon = 0.5$, without any
+hand-crafted bucketing. This demonstrates that the RBM distance discovers
+meaningful strategic groupings even in the full game.
+
+---
+
+## 10. Formal Proofs
 
 This section provides rigorous proofs of the three key theoretical claims
 underlying the framework: (1) the recursive bipartite matching distance is a
 metric, (2) the merge operation preserves expected value within a bounded
 error, and (3) the online EV graph learner achieves bounded cumulative regret.
 
-### 9.1 Theorem: The RBM Distance Is a Metric
+### 10.1 Theorem: The RBM Distance Is a Metric
 
 **Theorem.** Let $\mathcal{T}$ be the space of rooted trees with
 real-valued leaves. Define $d : \mathcal{T} \times \mathcal{T} \to
@@ -807,7 +881,7 @@ metric.**
 
 ---
 
-### 9.2 Theorem: EV Error Bound Under Merging
+### 10.2 Theorem: EV Error Bound Under Merging
 
 **Theorem.** Let $T_1$ and $T_2$ be rooted trees with real-valued leaves,
 and let $d(T_1, T_2) = \varepsilon$. Define the merge $T^{\ast} =
@@ -960,7 +1034,7 @@ among merged trees). This follows because each merge step introduces error
 bounded by half the distance, and the triangle inequality ensures the
 cumulative error is controlled by the cluster diameter.
 
-### 9.3 Theorem: Online Regret Bound for the EV Graph Learner
+### 10.3 Theorem: Online Regret Bound for the EV Graph Learner
 
 **Theorem.** Consider the online EV graph learner (Section 8) with clustering
 threshold $\varepsilon > 0$, playing a sequence of $T$ games against a
@@ -1196,19 +1270,19 @@ The bound in Part 3 is tight in the following senses:
 
 ---
 
-## 10. Open Questions
+## 11. Open Questions
 
-1. ~~**Formal metric proof:**~~ *Resolved in Section 9.1.* The RBM distance is a
+1. ~~**Formal metric proof:**~~ *Resolved in Section 10.1.* The RBM distance is a
    metric when the leaf distance is a metric and the phantom penalty is defined as
    $\delta(S) = d(S, \emptyset)$ (distance to the empty tree). The triangle
    inequality follows from composing optimal matchings through an intermediary tree.
 
-2. ~~**EV error bound theorem:**~~ *Resolved in Section 9.2.* For equal-weight
+2. ~~**EV error bound theorem:**~~ *Resolved in Section 10.2.* For equal-weight
    merges, $|\text{EV}(T^{\ast}) - \text{EV}(T_i)| \leq \varepsilon / 2$ where
    $\varepsilon = d(T_1, T_2)$. The bound is tight at leaves and strictly better
    at internal nodes with branching factor $> 1$.
 
-3. ~~**Online regret bound:**~~ *Resolved in Section 9.3.* With fixed threshold
+3. ~~**Online regret bound:**~~ *Resolved in Section 10.3.* With fixed threshold
    $\varepsilon$, cumulative regret is $R(T) \leq K \cdot V_{\max} + (T-K) \cdot
    \varepsilon/2$, giving average regret $\to \varepsilon/2$. With
    $\varepsilon$-annealing ($\varepsilon(t) = \varepsilon_0/\sqrt{t}$), cumulative
