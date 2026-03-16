@@ -81,7 +81,7 @@ inherent order.
 ## 2. The Merge Operation
 
 The distance function induces a natural **merge** operation. Given trees
-$T_1$ and $T_2$ with small distance, produce a representative tree $T^{*}$ that
+$T_1$ and $T_2$ with small distance, produce a representative tree $T^{\ast}$ that
 captures their shared structure.
 
 ### Construction (bottom-up)
@@ -92,7 +92,7 @@ Given the optimal matching $M$ between children of $n_1$ and $n_2$:
   The merged child represents both original children.
 
 - **Phantoms** (unmatched children from the larger set): either:
-  - **Keep**: include in $T^{*}$ at reduced weight (they represent structure
+  - **Keep**: include in $T^{\ast}$ at reduced weight (they represent structure
     present in one tree but not the other)
   - **Drop**: discard if below a significance threshold (lossy compression)
   - **Annotate**: keep with a provenance tag indicating partial coverage
@@ -622,8 +622,8 @@ real-valued leaves. Define $d : \mathcal{T} \times \mathcal{T} \to
 \mathbb{R}_{\geq 0}$ as in Section 1, with leaf distance $d_L$ and phantom
 penalty $\delta$. Suppose:
 
-1. $d_L$ is a metric on the leaf value space (i.e., $d_L(v, v) = 0$,
-   $d_L(v, w) = d_L(w, v)$, and $d_L(u, w) \leq d_L(u, v) + d_L(v, w)$).
+1. $d_L$ is a metric on the leaf value space (identity, symmetry, and
+   triangle inequality: $d_L(u, w) \leq d_L(u, v) + d_L(v, w)$).
 2. $\delta(S) \geq 0$ for all subtrees $S$.
 3. **Phantom triangle property:** for any subtrees $S_1$ and $S_2$,
    $d(S_1, S_2) \leq \delta(S_1) + \delta(S_2)$.
@@ -644,13 +644,13 @@ Let $T$ have children $\{c_1, \ldots, c_m\}$. The cost matrix $W$ for
 matching $T$ against itself has entries $W[i,j] = d(\text{subtree}(c_i),
 \text{subtree}(c_j))$. The child sets are identical and have the same
 cardinality, so no phantom padding is needed. The identity matching
-$M^{*} = \lbrace(c_i, c_i)\rbrace_{i=1}^{m}$ has cost:
+$M^{\ast} = \lbrace(c_i, c_i)\rbrace_{i=1}^{m}$ has cost:
 
-$$\text{cost}(M^{*}) = \sum_{i=1}^{m} d(\text{subtree}(c_i), \text{subtree}(c_i)) = \sum_{i=1}^{m} 0 = 0$$
+$$\text{cost}(M^{\ast}) = \sum_{i=1}^{m} d(\text{subtree}(c_i), \text{subtree}(c_i)) = \sum_{i=1}^{m} 0 = 0$$
 
 where each term vanishes by the inductive hypothesis ($d(S, S) = 0$ for
 subtrees of depth $< k$). Since the Hungarian method finds the minimum-cost
-matching and $\text{cost}(M^{*}) = 0$ with all costs nonneg, we have
+matching and $\text{cost}(M^{\ast}) = 0$ with all costs nonneg, we have
 $d(T, T) = 0$.
 
 Conversely, if $d(T_1, T_2) = 0$, then every matched pair $(c_1^i, c_2^j)$
@@ -810,7 +810,7 @@ metric.**
 ### 9.2 Theorem: EV Error Bound Under Merging
 
 **Theorem.** Let $T_1$ and $T_2$ be rooted trees with real-valued leaves,
-and let $d(T_1, T_2) = \varepsilon$. Define the merge $T^{*} =
+and let $d(T_1, T_2) = \varepsilon$. Define the merge $T^{\ast} =
 \text{merge}(T_1, T_2)$ as in Section 2 (equal-weight merge: leaf values
 averaged, children aligned by optimal matching). Define $\text{EV}(T) =
 \frac{1}{|L(T)|} \sum_{\ell \in L(T)} v(\ell)$ for uniform-weight trees
@@ -818,7 +818,7 @@ averaged, children aligned by optimal matching). Define $\text{EV}(T) =
 
 Then:
 
-$$|\text{EV}(T^{*}) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2} \quad \text{for } i \in \{1, 2\}$$
+$$|\text{EV}(T^{\ast}) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2} \quad \text{for } i \in \{1, 2\}$$
 
 **Proof.** By structural induction on tree depth.
 
@@ -829,10 +829,10 @@ $$|\text{EV}(T^{*}) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2} \quad \text{for
 $T_1 = \text{leaf}(v_1)$, $T_2 = \text{leaf}(v_2)$, with $d(T_1, T_2) =
 |v_1 - v_2| = \varepsilon$.
 
-The merge is $T^{*} = \text{leaf}\!\left(\frac{v_1 + v_2}{2}\right)$, so
-$\text{EV}(T^{*}) = \frac{v_1 + v_2}{2}$.
+The merge is $T^{\ast} = \text{leaf}\!\left(\frac{v_1 + v_2}{2}\right)$, so
+$\text{EV}(T^{\ast}) = \frac{v_1 + v_2}{2}$.
 
-$$|\text{EV}(T^{*}) - \text{EV}(T_1)| = \left|\frac{v_1 + v_2}{2} - v_1\right| = \left|\frac{v_2 - v_1}{2}\right| = \frac{\varepsilon}{2} \quad \checkmark$$
+$$|\text{EV}(T^{\ast}) - \text{EV}(T_1)| = \left|\frac{v_1 + v_2}{2} - v_1\right| = \left|\frac{v_2 - v_1}{2}\right| = \frac{\varepsilon}{2} \quad \checkmark$$
 
 By symmetry, the same holds for $T_2$.
 
@@ -841,10 +841,10 @@ By symmetry, the same holds for $T_2$.
 #### Inductive case: internal nodes.
 
 Let $T_1$ have children $\{a_1, \ldots, a_m\}$ and $T_2$ have children
-$\{b_1, \ldots, b_n\}$, with $m \leq n$ (WLOG). Let $M^{*}$ be the optimal
+$\{b_1, \ldots, b_n\}$, with $m \leq n$ (WLOG). Let $M^{\ast}$ be the optimal
 matching achieving cost $d(T_1, T_2) = \varepsilon$.
 
-Partition $M^{*}$ into:
+Partition $M^{\ast}$ into:
 - **Matched pairs:** $(a_i, b_{\sigma(i)})$ for $i = 1, \ldots, m$, with
   cost $d_i = d(\text{sub}(a_i), \text{sub}(b_{\sigma(i)}))$.
 - **Phantom-matched:** $b_j$ for $j \notin \text{im}(\sigma)$, with cost
@@ -854,8 +854,8 @@ The total cost is:
 
 $$\varepsilon = \sum_{i=1}^{m} d_i + \sum_{j \notin \text{im}(\sigma)} \delta(b_j)$$
 
-**Merged tree construction.** $T^{*}$ has:
-- $m$ merged children: $c_i^{*} = \text{merge}(\text{sub}(a_i),
+**Merged tree construction.** $T^{\ast}$ has:
+- $m$ merged children: $c_i^{\ast} = \text{merge}(\text{sub}(a_i),
   \text{sub}(b_{\sigma(i)}))$ for each matched pair.
 - The $n - m$ phantom-matched children of $T_2$ are either dropped (lossy)
   or included at half-weight (conservative). We analyze both cases.
@@ -867,17 +867,17 @@ the parent's EV). Then:
 
 $$\text{EV}(T_1) = \frac{1}{m} \sum_{i=1}^{m} \text{EV}(\text{sub}(a_i))$$
 
-$$\text{EV}(T^{*}) = \frac{1}{m} \sum_{i=1}^{m} \text{EV}(c_i^{*})$$
+$$\text{EV}(T^{\ast}) = \frac{1}{m} \sum_{i=1}^{m} \text{EV}(c_i^{\ast})$$
 
 By the inductive hypothesis applied to each matched pair:
 
-$$|\text{EV}(c_i^{*}) - \text{EV}(\text{sub}(a_i))| \leq \frac{d_i}{2}$$
+$$|\text{EV}(c_i^{\ast}) - \text{EV}(\text{sub}(a_i))| \leq \frac{d_i}{2}$$
 
 Therefore:
 
-$$|\text{EV}(T^{*}) - \text{EV}(T_1)| = \left|\frac{1}{m} \sum_{i=1}^{m} \left[\text{EV}(c_i^{*}) - \text{EV}(\text{sub}(a_i))\right]\right|$$
+$$|\text{EV}(T^{\ast}) - \text{EV}(T_1)| = \left|\frac{1}{m} \sum_{i=1}^{m} \left[\text{EV}(c_i^{\ast}) - \text{EV}(\text{sub}(a_i))\right]\right|$$
 
-$$\leq \frac{1}{m} \sum_{i=1}^{m} |\text{EV}(c_i^{*}) - \text{EV}(\text{sub}(a_i))|$$
+$$\leq \frac{1}{m} \sum_{i=1}^{m} |\text{EV}(c_i^{\ast}) - \text{EV}(\text{sub}(a_i))|$$
 
 $$\leq \frac{1}{m} \sum_{i=1}^{m} \frac{d_i}{2}$$
 
@@ -890,17 +890,17 @@ phantom costs are nonneg, the matched-pair costs are at most the total).
 
 **Case 2: Phantom children retained at half-weight (conservative merge).**
 
-The merged tree $T^{*}$ has $m + (n - m) = n$ children. The matched children
-$c_i^{*}$ carry weight $1$ (representing both trees), while the phantom-matched
+The merged tree $T^{\ast}$ has $m + (n - m) = n$ children. The matched children
+$c_i^{\ast}$ carry weight $1$ (representing both trees), while the phantom-matched
 children $b_j$ carry weight $\frac{1}{2}$ (representing only $T_2$). The EV
-of $T^{*}$ is a weighted average. We compare against $T_2$, which has all $n$
+of $T^{\ast}$ is a weighted average. We compare against $T_2$, which has all $n$
 children at equal weight.
 
 Define the total weight $W = m + \frac{n-m}{2} = \frac{m+n}{2}$.
 
-$$\text{EV}(T^{*}) = \frac{1}{W}\left[\sum_{i=1}^{m} \text{EV}(c_i^{*}) + \frac{1}{2}\sum_{j \notin \text{im}(\sigma)} \text{EV}(\text{sub}(b_j))\right]$$
+$$\text{EV}(T^{\ast}) = \frac{1}{W}\left[\sum_{i=1}^{m} \text{EV}(c_i^{\ast}) + \frac{1}{2}\sum_{j \notin \text{im}(\sigma)} \text{EV}(\text{sub}(b_j))\right]$$
 
-The error $|\text{EV}(T^{*}) - \text{EV}(T_2)|$ depends on the reweighting
+The error $|\text{EV}(T^{\ast}) - \text{EV}(T_2)|$ depends on the reweighting
 and on the per-pair errors, each bounded by $d_i / 2$. The key point is that
 the matched-pair contributions dominate: each contributes error at most
 $d_i / 2$, and the phantom contributions have the correct EV from $T_2$
@@ -913,7 +913,7 @@ branching factor). With no phantom terms:
 
 $$\varepsilon = \sum_{i=1}^{m} d_i$$
 
-$$|\text{EV}(T^{*}) - \text{EV}(T_1)| \leq \frac{1}{m}\sum_{i=1}^m \frac{d_i}{2} = \frac{1}{2m}\sum_{i=1}^m d_i = \frac{\varepsilon}{2m}$$
+$$|\text{EV}(T^{\ast}) - \text{EV}(T_1)| \leq \frac{1}{m}\sum_{i=1}^m \frac{d_i}{2} = \frac{1}{2m}\sum_{i=1}^m d_i = \frac{\varepsilon}{2m}$$
 
 Note that when $m > 1$, this bound $\varepsilon / (2m)$ is strictly tighter
 than the claimed $\varepsilon / 2$. The averaging over multiple children
@@ -925,7 +925,7 @@ $m \geq 2$, the internal-node bound is $\varepsilon / (2m) \leq
 
 In summary, for all trees:
 
-$$|\text{EV}(T^{*}) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2}$$
+$$|\text{EV}(T^{\ast}) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2}$$
 
 with equality achieved only at leaves or along degenerate single-child
 chains.  $\square$
@@ -935,10 +935,10 @@ chains.  $\square$
 #### Corollary: Weighted Merges
 
 For unequal-weight merges with weights $w_1, w_2$ ($w_1 + w_2 = 1$), the
-merged leaf values are $v^{*} = w_1 v_1 + w_2 v_2$, and the error bound
+merged leaf values are $v^{\ast} = w_1 v_1 + w_2 v_2$, and the error bound
 generalizes to:
 
-$$|\text{EV}(T^{*}) - \text{EV}(T_i)| \leq w_{3-i} \cdot \varepsilon$$
+$$|\text{EV}(T^{\ast}) - \text{EV}(T_i)| \leq w_{3-i} \cdot \varepsilon$$
 
 That is, the error for tree $T_1$ is at most $w_2 \cdot \varepsilon$ (the
 "other" tree's weight times the distance). For equal weights
@@ -950,10 +950,10 @@ being essentially $T_1$.
 #### Corollary: Iterated Merges
 
 When building the EV graph by merging $k$ trees $T_1, \ldots, T_k$ into a
-single representative $T^{*}$ (via successive equal-weight pairwise merges),
+single representative $T^{\ast}$ (via successive equal-weight pairwise merges),
 the EV error for any original tree $T_i$ satisfies:
 
-$$|\text{EV}(T^{*}) - \text{EV}(T_i)| \leq \max_{j} d(T_i, T_j) \leq \varepsilon$$
+$$|\text{EV}(T^{\ast}) - \text{EV}(T_i)| \leq \max_{j} d(T_i, T_j) \leq \varepsilon$$
 
 where $\varepsilon$ is the cluster diameter (maximum pairwise distance
 among merged trees). This follows because each merge step introduces error
@@ -966,8 +966,8 @@ cumulative error is controlled by the cluster diameter.
 threshold $\varepsilon > 0$, playing a sequence of $T$ games against a
 stationary environment. At each game $t$, the learner either:
 
-- **(a) Cache hit (exploitation):** finds a cluster $c^{*}$ with
-  $d(T_t, \text{rep}(c^{*})) \leq \varepsilon$ and uses the cluster's strategy, or
+- **(a) Cache hit (exploitation):** finds a cluster $c^{\ast}$ with
+  $d(T_t, \text{rep}(c^{\ast})) \leq \varepsilon$ and uses the cluster's strategy, or
 - **(b) Cache miss (exploration):** no cluster is within distance $\varepsilon$,
   so the learner creates a new cluster and plays an exploratory strategy.
 
@@ -1036,26 +1036,26 @@ is at most $K$.  $\square_1$
 
 #### Part 2: Per-step exploitation error.
 
-When the learner exploits cluster $c^{*}$ on game tree $T_t$ with
-$d(T_t, \text{rep}(c^{*})) \leq \varepsilon$, the strategy used is the one
-computed for $\text{rep}(c^{*})$. The EV of applying this strategy to $T_t$
+When the learner exploits cluster $c^{\ast}$ on game tree $T_t$ with
+$d(T_t, \text{rep}(c^{\ast})) \leq \varepsilon$, the strategy used is the one
+computed for $\text{rep}(c^{\ast})$. The EV of applying this strategy to $T_t$
 may differ from its true optimal EV.
 
 By Theorem 9.2 (EV Error Bound Under Merging), when two trees $T_1, T_2$
 satisfy $d(T_1, T_2) = \varepsilon$, the merged representative satisfies:
 
-$$|\text{EV}(T^{*}) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2}$$
+$$|\text{EV}(T^{\ast}) - \text{EV}(T_i)| \leq \frac{\varepsilon}{2}$$
 
-The cluster representative $\text{rep}(c^{*})$ serves exactly the role of the
+The cluster representative $\text{rep}(c^{\ast})$ serves exactly the role of the
 merged tree: it is a representative constructed from trees within distance
 $\varepsilon$, and the strategy derived from it is applied to $T_t$. The
 EV error from using the cluster strategy in place of the optimal strategy
 for $T_t$ is therefore bounded by:
 
-$$r_t = |\text{EV}(\text{rep}(c^{*})) - \text{EV}(T_t)| \leq \frac{d(T_t, \text{rep}(c^{*}))}{2} \leq \frac{\varepsilon}{2}$$
+$$r_t = |\text{EV}(\text{rep}(c^{\ast})) - \text{EV}(T_t)| \leq \frac{d(T_t, \text{rep}(c^{\ast}))}{2} \leq \frac{\varepsilon}{2}$$
 
 where the first inequality applies Theorem 9.2 and the second uses the
-cache-hit condition $d(T_t, \text{rep}(c^{*})) \leq \varepsilon$.  $\square_2$
+cache-hit condition $d(T_t, \text{rep}(c^{\ast})) \leq \varepsilon$.  $\square_2$
 
 ---
 
@@ -1064,9 +1064,9 @@ cache-hit condition $d(T_t, \text{rep}(c^{*})) \leq \varepsilon$.  $\square_2$
 Define the per-game regret as the EV loss relative to the optimal strategy
 for game tree $T_t$:
 
-$$r_t = \text{EV}^{*}(T_t) - \text{EV}_{\text{learner}}(T_t)$$
+$$r_t = \text{EV}^{\ast}(T_t) - \text{EV}_{\text{learner}}(T_t)$$
 
-where $\text{EV}^{*}(T_t)$ is the EV under the optimal strategy and
+where $\text{EV}^{\ast}(T_t)$ is the EV under the optimal strategy and
 $\text{EV}_{\text{learner}}(T_t)$ is the EV achieved by the learner.
 
 Partition the $T$ games into exploration games $\mathcal{E}$ (cache misses)
@@ -1075,10 +1075,10 @@ $|\mathcal{E}| \leq K$ (by Part 1) and
 $|\mathcal{X}| = T - |\mathcal{E}| \geq T - K$.
 
 **Exploration games.** In the worst case, an exploratory strategy achieves
-zero EV while the optimal strategy achieves $\text{EV}^{*}(T_t)$. The
+zero EV while the optimal strategy achieves $\text{EV}^{\ast}(T_t)$. The
 per-game regret is at most:
 
-$$r_t \leq |\text{EV}^{*}(T_t)| \leq V_{\max}$$
+$$r_t \leq |\text{EV}^{\ast}(T_t)| \leq V_{\max}$$
 
 Summing over at most $K$ exploration games:
 
@@ -1204,7 +1204,7 @@ The bound in Part 3 is tight in the following senses:
    inequality follows from composing optimal matchings through an intermediary tree.
 
 2. ~~**EV error bound theorem:**~~ *Resolved in Section 9.2.* For equal-weight
-   merges, $|\text{EV}(T^{*}) - \text{EV}(T_i)| \leq \varepsilon / 2$ where
+   merges, $|\text{EV}(T^{\ast}) - \text{EV}(T_i)| \leq \varepsilon / 2$ where
    $\varepsilon = d(T_1, T_2)$. The bound is tight at leaves and strictly better
    at internal nodes with branching factor $> 1$.
 
