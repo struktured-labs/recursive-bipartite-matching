@@ -644,7 +644,7 @@ Let $T$ have children $\{c_1, \ldots, c_m\}$. The cost matrix $W$ for
 matching $T$ against itself has entries $W[i,j] = d(\text{subtree}(c_i),
 \text{subtree}(c_j))$. The child sets are identical and have the same
 cardinality, so no phantom padding is needed. The identity matching
-$M^* = \{(c_i, c_i)\}_{i=1}^{m}$ has cost:
+$M^* = \lbrace(c_i, c_i)\rbrace_{i=1}^{m}$ has cost:
 
 $$\text{cost}(M^*) = \sum_{i=1}^{m} d(\text{subtree}(c_i), \text{subtree}(c_i)) = \sum_{i=1}^{m} 0 = 0$$
 
@@ -735,7 +735,7 @@ the children of $T_1$ and $T_3$ (with appropriate phantom padding).
 
 For each type of pair in $M_{13}$:
 
-*Through-matched pairs $(a_i, c_k)$* passing through $b_j$: by the inductive
+**Through-matched pairs** $(a_i, c_k)$ passing through $b_j$: by the inductive
 hypothesis (triangle inequality at depth $< k$),
 
 $$d(\text{sub}(a_i), \text{sub}(c_k)) \leq d(\text{sub}(a_i), \text{sub}(b_j)) + d(\text{sub}(b_j), \text{sub}(c_k))$$
@@ -743,7 +743,7 @@ $$d(\text{sub}(a_i), \text{sub}(c_k)) \leq d(\text{sub}(a_i), \text{sub}(b_j)) +
 The right-hand terms are exactly the costs of the $(a_i, b_j)$ edge in
 $M_{12}$ and the $(b_j, c_k)$ edge in $M_{23}$.
 
-*Left-dangling $a_i$* (via $b_j$ matched to phantom in $M_{23}$): the cost
+**Left-dangling** $a_i$ (via $b_j$ matched to phantom in $M_{23}$): the cost
 in $M_{13}$ is $\delta(\text{sub}(a_i))$. The corresponding costs in
 $M_{12}$ and $M_{23}$ are $d(\text{sub}(a_i), \text{sub}(b_j))$ and
 $\delta(\text{sub}(b_j))$. We need:
@@ -765,7 +765,7 @@ $\emptyset$, then this reduces to the triangle inequality
 $d(a_i, \emptyset) \leq d(a_i, b_j) + d(b_j, \emptyset)$, which holds by
 induction.
 
-*Right-dangling $c_k$* and *both-phantom* cases: symmetric to the above.
+**Right-dangling** $c_k$ and **both-phantom** cases: symmetric to the above.
 
 **Step 3: Sum and apply optimality.**
 
