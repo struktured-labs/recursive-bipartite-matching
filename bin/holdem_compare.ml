@@ -146,9 +146,12 @@ let fast_preflop_abstraction ~n_buckets ~n_samples =
 (* ------------------------------------------------------------------ *)
 
 (** Compute a preflop equity distribution histogram for a canonical hand.
-    Samples random boards (5 cards) and for each computes hand strength
-    vs all opponents.  Bins results into [n_bins] buckets in [0,1]. *)
-let preflop_equity_distribution ~n_bins ~n_board_samples
+    Samples random (board + opponent) deals and computes showdown result
+    for each.  For each board, uses [n_opps_per_board] opponents to
+    estimate hand strength, then bins into [n_bins] buckets in [0,1].
+    Much faster than exact Equity.hand_strength which enumerates all
+    C(45,2)=990 opponent pairs per board. *)
+let preflop_equity_distribution ~n_bins ~n_board_samples ~n_opps_per_board
     (h : Equity.canonical_hand) =
   let (h1, h2) = concrete_hole_cards h in
   let histogram = Array.create ~len:n_bins 0.0 in
@@ -159,16 +162,34 @@ let preflop_equity_distribution ~n_bins ~n_board_samples
   in
   let n_rem = Array.length remaining in
   for _ = 1 to n_board_samples do
-    (* Shuffle and take first 5 as board *)
-    for i = n_rem - 1 downto 1 do
-      let j = Random.int (i + 1) in
+    (* Partial shuffle: need 5 board + 2*n_opps opponent cards *)
+    let cards_needed = Int.min (5 + 2 * n_opps_per_board) n_rem in
+    for i = 0 to cards_needed - 1 do
+      let j = i + Random.int (n_rem - i) in
       let tmp = remaining.(i) in
       remaining.(i) <- remaining.(j);
       remaining.(j) <- tmp
     done;
-    let board = Array.to_list (Array.sub remaining ~pos:0 ~len:5) in
-    (* Compute hand strength on this board against sampled opponents *)
-    let eq = Equity.hand_strength ~hole_cards:(h1, h2) ~board in
+    (* Estimate hand strength via MC opponents on this board *)
+    let wins = ref 0.0 in
+    let n_opps = Int.min n_opps_per_board ((n_rem - 5) / 2) in
+    for k = 0 to n_opps - 1 do
+      let o1 = remaining.(5 + k * 2) in
+      let o2 = remaining.(5 + k * 2 + 1) in
+      let cmp = Equity.compare_7card
+          (h1, h2, remaining.(0), remaining.(1), remaining.(2),
+           remaining.(3), remaining.(4))
+          (o1, o2, remaining.(0), remaining.(1), remaining.(2),
+           remaining.(3), remaining.(4))
+      in
+      match cmp > 0 with
+      | true -> wins := !wins +. 1.0
+      | false ->
+        match cmp = 0 with
+        | true -> wins := !wins +. 0.5
+        | false -> ()
+    done;
+    let eq = !wins /. Float.of_int n_opps in
     let bin = Int.min (n_bins - 1)
         (Float.to_int (eq *. Float.of_int n_bins)) in
     histogram.(bin) <- histogram.(bin) +. 1.0
@@ -183,7 +204,7 @@ let preflop_equity_distribution ~n_bins ~n_board_samples
 
 (** Single-linkage agglomerative clustering.
     Returns list of (member_indices, diameter). *)
-let cluster_by_distance_matrix ~epsilon (dist_matrix : float array array) n =
+let _cluster_by_distance_matrix ~epsilon (dist_matrix : float array array) n =
   let active = Array.create ~len:n true in
   let members = Array.init n ~f:(fun i -> [ i ]) in
   let diameters = Array.create ~len:n 0.0 in
@@ -228,6 +249,55 @@ let cluster_by_distance_matrix ~epsilon (dist_matrix : float array array) n =
     | true -> Some (members.(i), diameters.(i))
     | false -> None))
 
+(** Run agglomerative clustering until exactly [target_k] clusters remain.
+    Returns list of (member_indices, diameter). *)
+let cluster_to_k ~target_k (dist_matrix : float array array) n =
+  let active = Array.create ~len:n true in
+  let members = Array.init n ~f:(fun i -> [ i ]) in
+  let diameters = Array.create ~len:n 0.0 in
+  let n_active = ref n in
+  while !n_active > target_k do
+    let best_dist = ref Float.infinity in
+    let best_ci = ref (-1) in
+    let best_cj = ref (-1) in
+    for ci = 0 to n - 1 do
+      match active.(ci) with
+      | false -> ()
+      | true ->
+        for cj = ci + 1 to n - 1 do
+          match active.(cj) with
+          | false -> ()
+          | true ->
+            let min_d = ref Float.infinity in
+            List.iter members.(ci) ~f:(fun mi ->
+              List.iter members.(cj) ~f:(fun mj ->
+                let d = dist_matrix.(mi).(mj) in
+                match Float.( < ) d !min_d with
+                | true -> min_d := d
+                | false -> ()));
+            (match Float.( < ) !min_d !best_dist with
+             | true -> best_dist := !min_d; best_ci := ci; best_cj := cj
+             | false -> ())
+        done
+    done;
+    match !best_ci >= 0 with
+    | true ->
+      let ci = !best_ci in
+      let cj = !best_cj in
+      members.(ci) <- members.(ci) @ members.(cj);
+      diameters.(ci) <-
+        Float.max (Float.max diameters.(ci) diameters.(cj)) !best_dist;
+      active.(cj) <- false;
+      Int.decr n_active
+    | false ->
+      (* No more pairs to merge (shouldn't happen if target_k >= 1) *)
+      n_active := 0
+  done;
+  Array.to_list (Array.filter_mapi active ~f:(fun i is_active ->
+    match is_active with
+    | true -> Some (members.(i), diameters.(i))
+    | false -> None))
+
 (** Max EV error for a clustering, measured against tree EVs. *)
 let max_ev_error_from_evs (evs : float array) clusters =
   List.fold clusters ~init:0.0 ~f:(fun acc (member_indices, _diam) ->
@@ -248,7 +318,7 @@ let _find_eps_for_k ~target_k dist_matrix max_dist n =
   for step = 0 to 200 do
     let frac = Float.of_int step /. 200.0 in
     let eps = frac *. max_dist *. 1.1 in
-    let clusters = cluster_by_distance_matrix ~epsilon:eps dist_matrix n in
+    let clusters = _cluster_by_distance_matrix ~epsilon:eps dist_matrix n in
     let k = List.length clusters in
     match Int.abs (k - target_k) < Int.abs (!best_k - target_k) with
     | true -> best_eps := eps; best_k := k
@@ -654,13 +724,14 @@ let () =
   (* Step 1d: EMD pairwise distance matrix *)
   printf "\n[1d] Computing EMD equity distributions for %d hands...\n%!" n;
   let n_bins = 20 in
-  let n_board_samples = 500 in
+  let n_board_samples = 200 in
+  let n_opps_per_board = 20 in
   let (emd_histograms, emd_hist_time) = time (fun () ->
     Array.map sampled_hands ~f:(fun (h, _eq) ->
-      preflop_equity_distribution ~n_bins ~n_board_samples h))
+      preflop_equity_distribution ~n_bins ~n_board_samples ~n_opps_per_board h))
   in
-  printf "  Histograms computed in %.2fs (%d bins, %d board samples each)\n%!"
-    emd_hist_time n_bins n_board_samples;
+  printf "  Histograms computed in %.2fs (%d bins, %d boards x %d opps each)\n%!"
+    emd_hist_time n_bins n_board_samples n_opps_per_board;
 
   let (emd_matrix, emd_time) = time (fun () ->
     let m = Array.init n ~f:(fun i ->
@@ -692,80 +763,24 @@ let () =
   in
   printf "  EV matrix: %dx%d in %.3fs\n\n%!" n n ev_time;
 
-  (* Step 1f: Find max distances for sweep *)
-  let max_rbm = ref 0.0 in
-  let max_emd = ref 0.0 in
-  let max_ev = ref 0.0 in
-  for i = 0 to n - 1 do
-    for j = i + 1 to n - 1 do
-      (match Float.is_finite rbm_matrix.(i).(j) with
-       | true -> max_rbm := Float.max !max_rbm rbm_matrix.(i).(j)
-       | false -> ());
-      max_emd := Float.max !max_emd emd_matrix.(i).(j);
-      max_ev := Float.max !max_ev ev_matrix.(i).(j)
-    done
-  done;
-
-  (* Step 1g: Sweep epsilon for all methods, collect (k, err) *)
-  printf "[1f] Clustering sweep (40 epsilon steps per method)...\n%!";
-  let n_steps = 40 in
-
-  let sweep_with_matrix dist_matrix max_dist =
-    let results = ref [] in
-    for step = 0 to n_steps do
-      let frac = Float.of_int step /. Float.of_int n_steps in
-      let eps = frac *. max_dist *. 1.1 in
-      let clusters = cluster_by_distance_matrix ~epsilon:eps dist_matrix n in
-      let k = List.length clusters in
-      let err = max_ev_error_from_evs tree_evs clusters in
-      results := (k, err) :: !results
-    done;
-    !results
-  in
-
-  let (rbm_results, rbm_sweep_t) = time (fun () ->
-    sweep_with_matrix rbm_matrix !max_rbm)
-  in
-  let (emd_results, emd_sweep_t) = time (fun () ->
-    sweep_with_matrix emd_matrix !max_emd)
-  in
-  let (ev_results, ev_sweep_t) = time (fun () ->
-    sweep_with_matrix ev_matrix !max_ev)
-  in
-  printf "  Sweep times: RBM=%.3fs EMD=%.3fs EV=%.3fs\n\n%!"
-    rbm_sweep_t emd_sweep_t ev_sweep_t;
-
-  (* Best error at each k *)
-  let best_at_k results =
-    let h = Hashtbl.create (module Int) in
-    List.iter results ~f:(fun (k, err) ->
-      Hashtbl.update h k ~f:(function
-        | None -> err
-        | Some prev -> Float.min prev err));
-    Hashtbl.to_alist h
-    |> List.sort ~compare:(fun (k1, _) (k2, _) -> Int.compare k2 k1)
-  in
-
-  let rbm_by_k = best_at_k rbm_results in
-  let emd_by_k = best_at_k emd_results in
-  let ev_by_k = best_at_k ev_results in
-
-  (* Target k values *)
+  (* Step 1f: Cluster at exact k values for each distance metric *)
   let target_ks =
     [ 25; 15; 10; 5; 3 ]
     |> List.filter ~f:(fun k -> k <= n && k >= 1)
   in
 
-  let find_closest_k by_k target =
-    List.fold by_k ~init:(None : (int * float) option)
-      ~f:(fun best (k, err) ->
-        match best with
-        | None -> Some (k, err)
-        | Some (bk, _) ->
-          match Int.abs (k - target) < Int.abs (bk - target) with
-          | true -> Some (k, err)
-          | false -> best)
+  printf "[1f] Clustering at exact k values...\n%!";
+  let (cluster_results, cluster_time) = time (fun () ->
+    List.map target_ks ~f:(fun k ->
+      let rbm_clusters = cluster_to_k ~target_k:k rbm_matrix n in
+      let emd_clusters = cluster_to_k ~target_k:k emd_matrix n in
+      let ev_clusters = cluster_to_k ~target_k:k ev_matrix n in
+      let rbm_err = max_ev_error_from_evs tree_evs rbm_clusters in
+      let emd_err = max_ev_error_from_evs tree_evs emd_clusters in
+      let ev_err = max_ev_error_from_evs tree_evs ev_clusters in
+      (k, rbm_err, emd_err, ev_err)))
   in
+  printf "  Clustering completed in %.3fs\n\n%!" cluster_time;
 
   printf "=== Preflop Abstraction Quality ===\n\n%!";
   printf "  All methods clustered by their own metric, error measured as\n%!";
@@ -779,56 +794,28 @@ let () =
   let ev_wins = ref 0 in
   let ties = ref 0 in
 
-  List.iter target_ks ~f:(fun target_k ->
-    let format_entry entry =
-      match entry with
-      | None -> ("N/A", Float.infinity)
-      | Some (k, err) ->
-        match k = target_k with
-        | true -> (sprintf "%.4f" err, err)
-        | false -> (sprintf "%.4f[%d]" err k, err)
-    in
-
-    let rbm_str, rbm_err = format_entry (find_closest_k rbm_by_k target_k) in
-    let emd_str, emd_err = format_entry (find_closest_k emd_by_k target_k) in
-    let ev_str, ev_err = format_entry (find_closest_k ev_by_k target_k) in
-
+  List.iter cluster_results ~f:(fun (k, rbm_err, emd_err, ev_err) ->
+    let min_err = Float.min rbm_err (Float.min emd_err ev_err) in
+    let tol = 0.0001 in
     let winner =
-      let candidates = [
-        ("RBM", rbm_err);
-        ("EMD", emd_err);
-        ("EV", ev_err);
-      ] |> List.filter ~f:(fun (_, e) -> Float.is_finite e)
-      in
-      match candidates with
-      | [] -> "N/A"
-      | _ ->
-        let all_zero = List.for_all candidates ~f:(fun (_, e) ->
-          Float.( < ) (Float.abs e) 0.0001) in
-        match all_zero with
-        | true -> "tie"
+      let rbm_best = Float.( < ) (Float.abs (rbm_err -. min_err)) tol in
+      let emd_best = Float.( < ) (Float.abs (emd_err -. min_err)) tol in
+      let ev_best = Float.( < ) (Float.abs (ev_err -. min_err)) tol in
+      match rbm_best && emd_best && ev_best with
+      | true -> Int.incr ties; "tie"
+      | false ->
+        match rbm_best with
+        | true -> Int.incr rbm_wins; "RBM"
         | false ->
-          let best_name, _ =
-            List.fold candidates ~init:("", Float.infinity)
-              ~f:(fun (bn, be) (name, err) ->
-                match Float.( < ) err be with
-                | true -> (name, err)
-                | false -> (bn, be))
-          in
-          (* Track wins *)
-          (match String.equal best_name "RBM" with
-           | true -> Int.incr rbm_wins
-           | false ->
-             match String.equal best_name "EMD" with
-             | true -> Int.incr emd_wins
-             | false ->
-               match String.equal best_name "EV" with
-               | true -> Int.incr ev_wins
-               | false -> Int.incr ties);
-          best_name
+          match emd_best with
+          | true -> Int.incr emd_wins; "EMD"
+          | false ->
+            match ev_best with
+            | true -> Int.incr ev_wins; "EV"
+            | false -> Int.incr ties; "tie"
     in
-    printf "  %-5d  %-10s  %-10s  %-10s  %-8s\n%!"
-      target_k rbm_str emd_str ev_str winner);
+    printf "  %-5d  %-10.4f  %-10.4f  %-10.4f  %-8s\n%!"
+      k rbm_err emd_err ev_err winner);
 
   printf "\n  Abstraction quality wins: RBM=%d EMD=%d EV=%d Tie=%d\n\n%!"
     !rbm_wins !emd_wins !ev_wins !ties;
@@ -843,29 +830,70 @@ let () =
   (* Build abstractions *)
   printf "[2a] Building %d-bucket preflop abstractions...\n%!" !n_buckets;
   let (rbm_abs, rbm_abs_time) = time (fun () ->
-    (* For RBM-based preflop abstraction: build IS trees for all 169 hands,
-       cluster by RBM distance, assign buckets.
-       But this is expensive, so we use a fast approach: build IS trees for
-       a subset, compute distances, k-means partition. *)
-
-    (* Use all 169 canonical hands but with very small IS trees *)
-    let all_equities = fast_preflop_equities ~n_samples:!eq_mc_samples in
-    (* Build small IS trees for 169 hands *)
-    let small_trees = Array.map (Array.of_list Equity.all_canonical_hands)
+    (* Build compact showdown distribution trees for all 169 canonical
+       hands, extract game-theoretic EVs, bucket by quantile on tree EV.
+       This captures strategic value (not just raw equity). *)
+    let all_hands = Array.of_list Equity.all_canonical_hands in
+    let small_trees = Array.map all_hands
         ~f:(fun (h : Equity.canonical_hand) ->
-          let hole_cards = concrete_hole_cards h in
-          Limit_holdem.information_set_tree
-            ~max_opponents:10 ~max_board_samples:5
-            ~config ~player:0 ~hole_cards ~board_visible:[]
-            ~round_idx:0 ~pot_so_far:3 ())
+          let (h1, h2) = concrete_hole_cards h in
+          let dealt = [ h1; h2 ] in
+          let rem =
+            List.filter Card.full_deck ~f:(fun c ->
+              not (List.exists dealt ~f:(fun cc -> Card.equal c cc)))
+          in
+          let rem_arr = Array.of_list rem in
+          let n_rem = Array.length rem_arr in
+          let children =
+            List.init 10 ~f:(fun _ ->
+              for i = 0 to Int.min 6 (n_rem - 1) do
+                let j = i + Random.int (n_rem - i) in
+                let tmp = rem_arr.(i) in
+                rem_arr.(i) <- rem_arr.(j);
+                rem_arr.(j) <- tmp
+              done;
+              let n_opps = Int.min 10 ((n_rem - 5) / 2) in
+              for i = 5 to Int.min (5 + n_opps * 2 - 1) (n_rem - 1) do
+                let j = i + Random.int (n_rem - i) in
+                let tmp = rem_arr.(i) in
+                rem_arr.(i) <- rem_arr.(j);
+                rem_arr.(j) <- tmp
+              done;
+              let leaves =
+                List.init n_opps ~f:(fun k ->
+                  let o1 = rem_arr.(5 + k * 2) in
+                  let o2 = rem_arr.(5 + k * 2 + 1) in
+                  let cmp = Hand_eval7.compare_hands7
+                      [ h1; h2; rem_arr.(0); rem_arr.(1); rem_arr.(2);
+                        rem_arr.(3); rem_arr.(4) ]
+                      [ o1; o2; rem_arr.(0); rem_arr.(1); rem_arr.(2);
+                        rem_arr.(3); rem_arr.(4) ]
+                  in
+                  let v = match cmp > 0 with
+                    | true -> 1.0
+                    | false -> match cmp = 0 with
+                      | true -> 0.0
+                      | false -> -1.0
+                  in
+                  Tree.leaf
+                    ~label:(Rhode_island.Node_label.Terminal
+                              { winner = None; pot = 0 })
+                    ~value:v)
+              in
+              Tree.node
+                ~label:(Rhode_island.Node_label.Chance
+                          { description = "b" })
+                ~children:leaves)
+          in
+          Tree.node
+            ~label:(Rhode_island.Node_label.Chance
+                      { description = "root" })
+            ~children)
     in
     let small_evs = Array.map small_trees ~f:Tree.ev in
-    (* Use IS tree EVs (game-theoretic values) for bucketing instead of
-       raw equity.  This captures the strategic value better. *)
     let assignments, centroids =
       Abstraction.quantile_bucketing ~n_buckets:!n_buckets small_evs
     in
-    ignore all_equities;
     ({ Abstraction.street = Preflop
      ; n_buckets = !n_buckets
      ; assignments
@@ -987,26 +1015,10 @@ let () =
     "k" "RBM_err" "EMD_err" "EV_err" "Winner";
   printf "  %s\n%!" (String.make 53 '-');
 
-  List.iter target_ks ~f:(fun target_k ->
-    let format_entry entry =
-      match entry with
-      | None -> "N/A"
-      | Some (k, err) ->
-        match k = target_k with
-        | true -> sprintf "%.4f" err
-        | false -> sprintf "%.4f[%d]" err k
-    in
-    let rbm_str = format_entry (find_closest_k rbm_by_k target_k) in
-    let emd_str = format_entry (find_closest_k emd_by_k target_k) in
-    let ev_str = format_entry (find_closest_k ev_by_k target_k) in
-
-    let get_err entry = Option.value_map entry ~default:Float.infinity ~f:snd in
-    let rbm_err = get_err (find_closest_k rbm_by_k target_k) in
-    let emd_err = get_err (find_closest_k emd_by_k target_k) in
-    let ev_err = get_err (find_closest_k ev_by_k target_k) in
+  List.iter cluster_results ~f:(fun (k, rbm_err, emd_err, ev_err) ->
     let min_err = Float.min rbm_err (Float.min emd_err ev_err) in
+    let tol = 0.0001 in
     let winner =
-      let tol = 0.0001 in
       match Float.( < ) (Float.abs (rbm_err -. min_err)) tol with
       | true -> "RBM"
       | false ->
@@ -1014,8 +1026,8 @@ let () =
         | true -> "EMD"
         | false -> "EV"
     in
-    printf "  %-5d  %-10s  %-10s  %-10s  %-8s\n%!"
-      target_k rbm_str emd_str ev_str winner);
+    printf "  %-5d  %-10.4f  %-10.4f  %-10.4f  %-8s\n%!"
+      k rbm_err emd_err ev_err winner);
 
   printf "\nMCCFR Head-to-Head (%d hands, position-alternated):\n\n%!"
     total_hands;
