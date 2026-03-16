@@ -1,0 +1,1175 @@
+\documentclass[11pt]{article}
+
+% --- Packages ---
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{xcolor}
+\usepackage{enumitem}
+
+% --- Theorem environments ---
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+% --- Macros ---
+\newcommand{\EV}{\mathrm{EV}}
+\newcommand{\sub}{\mathrm{sub}}
+\newcommand{\cost}{\mathrm{cost}}
+\newcommand{\rep}{\mathrm{rep}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\calT}{\mathcal{T}}
+\newcommand{\calC}{\mathcal{C}}
+\newcommand{\calE}{\mathcal{E}}
+\newcommand{\calX}{\mathcal{X}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{Recursive Bipartite Matching Distance for Game Tree Abstraction\\with Bounded Error}
+
+\author{
+  Anonymous Authors\thanks{Work in progress. Correspondence to the authors.}
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ====================================================================
+% ABSTRACT
+% ====================================================================
+\begin{abstract}
+We introduce the \emph{recursive bipartite matching} (RBM) distance, a
+metric on rooted trees defined by recursively solving minimum-cost
+bipartite matchings over children. Unlike scalar hand-strength metrics
+used in prior game abstraction work, RBM captures the full strategic
+structure of continuation trees. We prove three results: (1)~RBM is a
+metric when the leaf distance is a metric; (2)~merging two trees at
+distance~$\varepsilon$ introduces expected-value error at most
+$\varepsilon/2$; and (3)~an online learner that clusters game states by
+RBM distance achieves cumulative regret
+$O(K V_{\max} + T\varepsilon/2)$ with fixed threshold, or $O(\sqrt{T})$
+under $\varepsilon$-annealing. On Rhode Island Hold'em, RBM-based
+abstraction beats Earth Mover's Distance abstraction 7--0 across
+compression levels measured by EV error, and counterfactual regret
+minimization on RBM-compressed games achieves zero exploitability at
+natural cluster boundaries.
+\end{abstract}
+
+% ====================================================================
+% 1. INTRODUCTION
+% ====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Abstraction is the dominant paradigm for solving large extensive-form
+games. The idea is straightforward: collapse strategically similar game
+states into equivalence classes, solve the smaller \emph{abstract} game,
+and map the abstract strategy back to the original.  Superhuman poker
+agents~\citep{bowling2015solving,moravvcik2017deepstack,brown2018superhuman}
+all rely on some form of abstraction to make computation tractable.
+
+The quality of an abstraction depends critically on the \emph{distance
+metric} used to decide which states are ``similar.'' The standard
+approach in poker AI, pioneered by \citet{gilpin2007potential}, clusters
+information sets using Earth Mover's Distance (EMD) on hand-strength
+histograms: distributions over scalar equity values obtained by
+evaluating each hand against a uniform random opponent. This is
+effective but inherently limited---it reduces each game state to a
+one-dimensional summary, discarding the branching structure of future
+play.
+
+Two hands may have identical equity distributions yet lead to
+fundamentally different strategic situations. A made hand and a draw can
+have the same expected value but completely different continuation trees:
+one calls safely, the other bets aggressively to deny correct pot odds
+or folds against reraises. Scalar metrics cannot distinguish them.
+
+We propose a structural alternative. The \emph{recursive bipartite
+matching} (RBM) distance between two game trees is defined by
+recursively computing minimum-cost bipartite matchings between their
+children at every level. Leaves are compared by payoff difference;
+internal nodes are compared by the cost of optimally aligning their
+subtrees. Structural mismatches (differing numbers of children) incur an
+explicit phantom penalty. The result is a metric that respects both the
+values at the leaves and the \emph{shape} of the computation that
+produces them.
+
+This paper develops the theory and practice of RBM-based game
+abstraction in three parts.
+
+\paragraph{The metric and its error bound.}  We prove that RBM is a
+metric (Section~\ref{sec:rbm}), and that merging two trees at
+distance~$\varepsilon$ introduces EV error at most~$\varepsilon/2$
+(Section~\ref{sec:merge}). The bound is tight at leaves but strictly
+tighter at branching nodes, where averaging reduces error.
+
+\paragraph{The location problem.}  Using a structurally rich distance
+creates a compressed \emph{EV graph}---a DAG of merged game
+states---that faithfully preserves strategic content. But locating
+oneself in this graph during live play requires comparing one's
+continuation tree against cluster representatives, which can be as
+expensive as solving the uncompressed game
+(Section~\ref{sec:location}).
+
+\paragraph{The online learning resolution.}  We dissolve the location
+problem by building the EV graph \emph{incrementally through self-play}.
+The learner always knows where it is because it constructed the graph
+from its own positions. We prove that this online learner achieves
+bounded cumulative regret, with sublinear average regret under
+$\varepsilon$-annealing (Section~\ref{sec:online}).
+
+Experiments on Rhode Island Hold'em~\citep{gilpin2005rhode}
+(Section~\ref{sec:experiments}) validate the theory: RBM-based
+clustering beats EMD-based clustering 7--0 across compression levels on
+EV error, CFR on compressed games achieves zero exploitability at
+natural cluster boundaries, and the online learner converges to stable
+clusters within 100 games with 99.5\% cache hit rates.
+
+% ====================================================================
+% 2. RECURSIVE BIPARTITE MATCHING DISTANCE
+% ====================================================================
+\section{Recursive Bipartite Matching Distance}
+\label{sec:rbm}
+
+\subsection{Definition}
+
+Let $\calT$ denote the space of finite rooted trees with real-valued
+leaves. We define a distance $d : \calT \times \calT \to \R_{\ge 0}$
+recursively.
+
+\begin{definition}[RBM Distance]
+\label{def:rbm}
+Given two rooted trees $T_1$ and $T_2$:
+
+\textbf{Base case.} If both are leaves with values $v_1, v_2$:
+\[
+  d(\mathrm{leaf}_1, \mathrm{leaf}_2) = |v_1 - v_2|.
+\]
+
+\textbf{Recursive case.} Let $n_1$ have children $\{c_1^1, \ldots,
+c_1^m\}$ and $n_2$ have children $\{c_2^1, \ldots, c_2^n\}$, with $m
+\le n$ (WLOG).
+\begin{enumerate}[nosep]
+  \item Compute the pairwise cost matrix $W$ where $W[i,j] =
+    d(\sub(c_1^i), \sub(c_2^j))$.
+  \item Pad the smaller child set with $|n - m|$ \emph{phantom nodes}.
+    The cost of matching a real subtree $S$ against a phantom is
+    $\delta(S)$.
+  \item Solve the minimum-cost perfect matching on the padded bipartite
+    graph via the Hungarian method~\citep{kuhn1955hungarian}, yielding
+    optimal matching $M^*$.
+  \item $d(T_1, T_2) = \cost(M^*)$.
+\end{enumerate}
+\end{definition}
+
+The phantom penalty $\delta$ quantifies the cost of structural
+mismatch. The cleanest formulation is $\delta(S) = d(S, \emptyset)$,
+treating the phantom as a designated empty tree in the metric space.
+Under this choice, all conditions needed for the metric proof are
+consequences of the triangle inequality at lower depth (see
+Remark~\ref{rem:phantom}).
+
+Children are treated as \emph{unordered sets}. The matching finds the
+best structural alignment without requiring a canonical ordering---exactly
+the right semantics for game trees, where children of a chance node
+(possible deals) or decision node (possible actions) have no inherent
+order.
+
+\subsection{Metric Properties}
+
+\begin{theorem}[RBM is a Metric]
+\label{thm:metric}
+Let $d_L$ be a metric on leaf values and let $\delta(S) = d(S,
+\emptyset)$ for a designated empty tree $\emptyset$. Then the RBM
+distance $d$ is a metric on~$\calT$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+By structural induction on tree depth. The base case ($k=0$) reduces to
+$d_L$, which is a metric by assumption.
+
+\emph{Identity:} The identity matching $\{(c_i, c_i)\}$ has cost zero
+by induction; since all costs are nonneg, the minimum-cost matching
+achieves $d(T, T) = 0$.
+
+\emph{Symmetry:} The cost matrix for $d(T_2, T_1)$ is the transpose of
+that for $d(T_1, T_2)$, using symmetry at depth ${<}\,k$. The
+minimum-cost perfect matching is invariant under transposition.
+
+\emph{Triangle inequality:} Given optimal matchings $M_{12}$ (between
+$T_1, T_2$) and $M_{23}$ (between $T_2, T_3$), compose through $T_2$
+to construct a feasible matching $M_{13}$ between $T_1$ and $T_3$.
+Children ``through-matched'' via some $b_j \in T_2$ satisfy
+$d(\sub(a_i), \sub(c_k)) \le d(\sub(a_i), \sub(b_j)) + d(\sub(b_j),
+\sub(c_k))$ by induction. Dangling children (matched to phantoms on one
+side) are handled by the 1-Lipschitz property of~$\delta$. Summing over
+all pairs: $\cost(M_{13}) \le \cost(M_{12}) + \cost(M_{23})$. Since
+$d(T_1, T_3) \le \cost(M_{13})$ by optimality, the triangle inequality
+follows.
+
+The full proof appears in Appendix~\ref{app:metric}.
+\end{proof}
+
+\begin{remark}[Phantom Penalty]
+\label{rem:phantom}
+With $\delta(S) = d(S, \emptyset)$, the phantom triangle property
+$d(S_1, S_2) \le \delta(S_1) + \delta(S_2)$ and the 1-Lipschitz
+condition $\delta(S_1) \le d(S_1, S_2) + \delta(S_2)$ are both
+instances of the triangle inequality. The theorem is self-contained: if
+the leaf distance is a metric, then RBM with empty-tree phantoms is a
+metric.
+\end{remark}
+
+\subsection{Relation to Prior Tree Distances}
+
+RBM is related to but distinct from tree edit distance
+\citep{zhang1996constrained}, which uses insert/delete/relabel
+operations on ordered trees. Edit distance is more flexible but less
+natural for \emph{unordered} trees where children are interchangeable.
+The recursive matching structure also connects to hierarchical optimal
+transport~\citep{memoli2011gromov} and the Tree Mover's
+Distance~\citep{chuang2022tree}, but those works target different
+applications (shape matching and GNN analysis, respectively). See
+Section~\ref{sec:related} for a detailed comparison.
+
+% ====================================================================
+% 3. GAME TREE COMPRESSION VIA MERGE
+% ====================================================================
+\section{Game Tree Compression via Merge}
+\label{sec:merge}
+
+\subsection{The Merge Operation}
+
+The RBM distance induces a natural \emph{merge} operation. Given trees
+$T_1, T_2$ with small distance, produce a representative $T^*$ that
+captures their shared structure.
+
+\begin{definition}[Tree Merge]
+Given the optimal matching $M^*$ between children of $T_1$ and $T_2$:
+\begin{itemize}[nosep]
+  \item \textbf{Matched pairs} $(c_1^i, c_2^j) \in M^*$: recursively
+    merge their subtrees.
+  \item \textbf{Phantom-matched children}: either retain at reduced
+    weight or drop (lossy compression).
+  \item \textbf{Leaf merging}: average the payoff values: $v^* =
+    (v_1 + v_2) / 2$.
+\end{itemize}
+\end{definition}
+
+\subsection{The EV Graph}
+
+Repeated merging across all subtrees at each depth produces a
+directed acyclic graph---the \emph{EV graph}. Multiple original game
+paths converge to the same node, meaning ``from here, these situations
+play out essentially the same way.'' This is hierarchical clustering
+over subtrees using RBM as the metric, with each cluster represented by
+a merged prototype tree.
+
+\subsection{EV Error Bound}
+
+\begin{theorem}[EV Error Bound Under Merging]
+\label{thm:ev-error}
+Let $T_1, T_2$ be rooted trees with real-valued leaves, $d(T_1, T_2) =
+\varepsilon$. Let $T^* = \mathrm{merge}(T_1, T_2)$ with equal-weight
+leaf averaging. Then:
+\[
+  |\EV(T^*) - \EV(T_i)| \le \frac{\varepsilon}{2}, \quad i \in \{1, 2\}.
+\]
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+By structural induction on tree depth.
+
+\emph{Base case (leaves):} $T^* = \mathrm{leaf}((v_1+v_2)/2)$, so
+$|\EV(T^*) - v_1| = |v_2 - v_1|/2 = \varepsilon/2$.
+
+\emph{Inductive case:} Let $M^*$ be the optimal matching with
+matched-pair costs $d_i$ and total $\varepsilon = \sum_i d_i +
+\sum_{\text{phantom}} \delta(b_j)$. Each merged child satisfies
+$|\EV(c_i^*) - \EV(\sub(a_i))| \le d_i / 2$ by induction. With uniform
+weighting over $m$ children:
+\[
+  |\EV(T^*) - \EV(T_1)| \le \frac{1}{m} \sum_{i=1}^m \frac{d_i}{2}
+  = \frac{1}{2m} \sum_{i=1}^m d_i \le \frac{\varepsilon}{2}.
+\]
+
+For trees with branching factor $m > 1$ and no phantom terms, the bound
+tightens to $\varepsilon / (2m) \le \varepsilon / 4$. The stated bound
+$\varepsilon/2$ is tight only at leaves or degenerate single-child
+chains.
+\end{proof}
+
+\begin{corollary}[Weighted Merges]
+For unequal-weight merges with weights $w_1 + w_2 = 1$:
+\[
+  |\EV(T^*) - \EV(T_i)| \le w_{3-i} \cdot \varepsilon.
+\]
+Equal weights $w_1 = w_2 = 1/2$ recover $\varepsilon/2$.
+\end{corollary}
+
+\begin{corollary}[Iterated Merges]
+When $k$ trees $T_1, \ldots, T_k$ are merged into a single $T^*$ via
+successive pairwise merges:
+\[
+  |\EV(T^*) - \EV(T_i)| \le \max_j d(T_i, T_j) \le \varepsilon_{\mathrm{diam}},
+\]
+where $\varepsilon_{\mathrm{diam}}$ is the cluster diameter.
+\end{corollary}
+
+% ====================================================================
+% 4. THE LOCATION PROBLEM
+% ====================================================================
+\section{The Location Problem}
+\label{sec:location}
+
+Building the EV graph offline is one challenge; \emph{finding yourself
+in it during live play} is another.
+
+\subsection{Statement}
+
+Given a compressed EV graph $G$ and a game state $v$ (known: cards,
+history), find the corresponding node $\phi(v) \in G$.
+
+In flat abstraction, location is trivial: precompute a lookup table
+mapping each state to its bucket, $O(1)$ at query time. With tree-based
+abstraction, the equivalence class of $v$ depends on its \emph{entire
+continuation subtree}---the same non-local structure that makes the
+distance expressive.
+
+\subsection{Complexity Barrier}
+
+\begin{proposition}[Location Cost]
+\label{prop:location}
+Let $b$ be the branching factor, $h$ the remaining depth, $K$ the
+number of clusters. Naive location requires $O(K \cdot b^{2h})$ time
+per game step, since each distance computation $T(h)$ satisfies $T(h) =
+b^2 \cdot T(h-1) + O(b^3)$, giving $T(h) = O(b^{2h})$.
+\end{proposition}
+
+Over a full game of $d$ steps, the total cost is $O(d \cdot K \cdot
+n^2)$ where $n = b^h$ is the number of leaves. This can exceed the cost
+of solving the uncompressed game, defeating the purpose of compression.
+The location problem likely admits a lower bound of $\Omega(n)$ per
+step, because the equivalence classes depend on global subtree
+structure defined by optimal (Hungarian) matchings.
+
+This reveals a fundamental tradeoff in game abstraction: \emph{the more
+structurally faithful the abstraction, the harder it is to navigate at
+runtime.}
+
+% ====================================================================
+% 5. ONLINE LEARNING WITH BOUNDED REGRET
+% ====================================================================
+\section{Online Learning with Bounded Regret}
+\label{sec:online}
+
+The offline approach---enumerate, cluster, then look up---hits the
+location problem wall. We propose a more natural formulation: build the
+EV graph \emph{dynamically through play}.
+
+\subsection{The Online EV Graph Learner}
+
+\begin{algorithm}[t]
+\caption{Online EV Graph Construction via Self-Play}
+\label{alg:online}
+\begin{algorithmic}[1]
+\STATE Initialize EV graph $G \leftarrow \emptyset$, threshold
+  $\varepsilon > 0$
+\FOR{each game $t = 1, 2, \ldots, T$}
+  \FOR{each decision point in game $t$}
+    \STATE Observe game state $s$; build partial subtree $T_s$
+    \STATE Find nearest cluster: $c^* = \argmin_c d(T_s, \rep(c))$
+    \IF{$d(T_s, \rep(c^*)) \le \varepsilon$ \textbf{(cache hit)}}
+      \STATE Use cluster $c^*$'s strategy; record outcome
+    \ELSE[\textbf{(cache miss)}]
+      \STATE Create new cluster from $T_s$; explore
+    \ENDIF
+  \ENDFOR
+  \STATE Update cluster representatives with observed payoffs
+  \STATE Merge clusters where $d(\rep(c_i), \rep(c_j)) <
+    \varepsilon_{\mathrm{merge}}$
+  \STATE Optionally anneal $\varepsilon$ downward
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:online} resolves the core tensions:
+
+\paragraph{The location problem dissolves.} The learner never needs to
+locate itself in a precomputed graph because it built the graph
+\emph{from} its own positions. Each cluster knows its game states
+because it was born from one.
+
+\paragraph{The enumeration problem dissolves.} Only states actually
+encountered are represented. The graph concentrates resolution where it
+matters---the same insight behind MCTS~\citep{coulom2006efficient}.
+
+\paragraph{The error bound becomes a regret bound.}  When the learner
+uses cluster $c^*$'s strategy on a state at distance $\le \varepsilon$,
+the EV loss is bounded by $\varepsilon/2$ (Theorem~\ref{thm:ev-error}).
+
+\subsection{Regret Bound}
+
+\begin{theorem}[Online Regret Bound]
+\label{thm:regret}
+Consider the online EV graph learner (Algorithm~\ref{alg:online}) with
+threshold $\varepsilon > 0$, playing $T$ games against a stationary
+environment. Let $K$ be the number of distinct strategic equivalence
+classes (game trees up to $\varepsilon$-distance), and $V_{\max} =
+\max_t |\EV(T_t)|$. Then:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Exploration bound:} Total cache misses $\le K$.
+  \item \textbf{Per-step exploitation error:} At most $\varepsilon/2$
+    per cache hit.
+  \item \textbf{Cumulative regret:}
+    \[
+      R(T) \le K \cdot V_{\max} + (T - K) \cdot
+      \frac{\varepsilon}{2}.
+    \]
+  \item \textbf{Average regret:} $R(T)/T \to \varepsilon/2$ as $T \to
+    \infty$.
+  \item \textbf{$\varepsilon$-annealing:} With $\varepsilon(t) =
+    \varepsilon_0 / \sqrt{t}$, $R(T) = O(\sqrt{T})$ and $R(T)/T \to 0$.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+\emph{Part~1:} Each equivalence class triggers at most one cache miss.
+Once representative $T_t$ is created, all future trees in the same class
+satisfy $d(T_{t'}, T_t) \le \varepsilon$, producing cache hits.
+
+\emph{Parts~2--3:} Cache hits incur error $\le \varepsilon/2$
+(Theorem~\ref{thm:ev-error}). Cache misses incur at most $V_{\max}$.
+Summing: $R(T) \le K V_{\max} + (T-K)\varepsilon/2$.
+
+\emph{Part~5:} With $\varepsilon(t) = \varepsilon_0/\sqrt{t}$,
+exploitation regret sums to $\sum_{t=1}^T \varepsilon_0/(2\sqrt{t}) \le
+\varepsilon_0 \sqrt{T}$. Exploration cost is at most $N \cdot V_{\max}$
+(constant). Total: $R(T) = O(\sqrt{T})$.
+
+The full proof appears in Appendix~\ref{app:regret}.
+\end{proof}
+
+\subsection{Connection to Lipschitz Bandits}
+
+The $O(\sqrt{T})$ rate matches the minimax-optimal rate for multi-armed
+bandits~\citep{auer2002finite}. The structural advantage over generic
+bandits is that RBM provides a \emph{geometry} on the arm space: nearby
+clusters have similar payoffs by the EV error bound. This is analogous
+to Lipschitz bandits or continuum-armed bandits~\citep{kleinberg2005nearly},
+where metric structure enables faster learning. In the EV graph setting,
+the metric is not assumed but \emph{derived} from the game structure via
+recursive bipartite matching.
+
+% ====================================================================
+% 6. EXPERIMENTS
+% ====================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate on Rhode Island Hold'em~\citep{gilpin2005rhode}, a
+simplified poker variant designed for AI research: 2 players, 1 hole
+card each, 2 community cards (flop + turn), 3 betting rounds with limit
+betting, and 3-card hand rankings (trips $>$ straight $>$ flush $>$
+pair $>$ high card).
+
+All experiments use a configurable deck (2--4 ranks, 4 suits). The
+implementation is in OCaml using Jane Street Core libraries, with an
+$O(n^3)$ Hungarian algorithm for bipartite matching.
+
+\subsection{RBM vs EMD Comparison}
+
+We compare three distance metrics for game abstraction:
+\begin{itemize}[nosep]
+  \item \textbf{RBM}: recursive bipartite matching on full game trees
+    ($\sim$1141 nodes per deal),
+  \item \textbf{EMD}: Earth Mover's Distance on showdown outcome
+    distributions (win/draw/lose probabilities), the standard poker AI
+    metric~\citep{gilpin2007potential},
+  \item \textbf{Scalar EV}: absolute difference in expected values.
+\end{itemize}
+
+For each metric, we compute pairwise distances on 25 sampled deals
+(3-rank deck, fixed P1 card, varied opponent/community), then perform
+agglomerative clustering at multiple $\varepsilon$ thresholds. At each
+compression level (cluster count), we measure the maximum EV error
+across clusters.
+
+\begin{table}[t]
+\centering
+\caption{RBM vs EMD vs Scalar EV: maximum EV error at matched cluster
+counts (3-rank Rhode Island Hold'em, 25 sampled deals). Lower is
+better. RBM wins at every non-trivial compression level.}
+\label{tab:rbm-vs-emd}
+\begin{tabular}{rccccl}
+\toprule
+Clusters & Compress & RBM Error & EMD Error & EV Error & Winner \\
+\midrule
+25 & 1.0$\times$ & 0.0000 & 0.0000 & 0.0000 & tie \\
+20 & 1.2$\times$ & 0.3571 & 6.1548 & 3.2143 & RBM \\
+15 & 1.7$\times$ & 0.7143 & 10.5357 & 6.4286 & RBM \\
+10 & 2.5$\times$ & 2.0536 & 12.6786 & 9.6429 & RBM \\
+ 7 & 3.6$\times$ & 4.2857 & 17.7976 & 14.6429 & RBM \\
+ 5 & 5.0$\times$ & 7.1429 & 25.3571 & 18.9286 & RBM \\
+ 3 & 8.3$\times$ & 12.1429 & 33.9286 & 21.4286 & RBM \\
+ 2 & 12.5$\times$ & 17.1429 & 37.5000 & 28.2143 & RBM \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:rbm-vs-emd} shows results. \textbf{RBM wins 7--0}
+across all non-trivial compression levels. At moderate compression
+(5~clusters, 5$\times$), EMD produces roughly 3.5$\times$ more EV error
+than RBM; at aggressive compression (2~clusters, 12.5$\times$), EMD
+error is 2.2$\times$ higher. The key insight: boards with similar
+showdown distributions can have very different optimal play when the
+game tree structure differs, and RBM captures these structural
+differences.
+
+\subsection{CFR on Compressed Games}
+
+We run counterfactual regret minimization (CFR)~\citep{zinkevich2007regret}
+on both the full game and RBM-compressed abstractions to measure
+exploitability---the gap between the computed strategy and Nash
+equilibrium.
+
+\begin{table}[t]
+\centering
+\caption{CFR exploitability on full vs.\ RBM-compressed Rhode Island
+Hold'em (3-rank, 2 betting rounds, 1000 CFR iterations). Zero
+exploitability at natural cluster boundaries confirms that RBM
+identifies strategically equivalent states.}
+\label{tab:cfr}
+\begin{tabular}{rrrr}
+\toprule
+$\varepsilon$ & Clusters & EV Error & Exploitability \\
+\midrule
+(full) & 10 & --- & 0.000034 \\
+0 & 10 & 0.0000 & 0.000034 \\
+50 & 8 & 0.0000 & 0.000000 \\
+100 & 7 & 0.0000 & 0.000000 \\
+200 & 5 & 18.75 & 3.125000 \\
+500 & 3 & 26.25 & 6.041667 \\
+1000 & 1 & 40.00 & 10.833333 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:cfr} reveals a striking pattern. At $\varepsilon = 50$
+and $\varepsilon = 100$, compression is nontrivial (8 and 7 clusters
+from 10 original information sets) yet exploitability is \emph{exactly
+zero}---the RBM distance has identified genuinely equivalent strategic
+states. Exploitability increases only when compression begins merging
+strategically distinct hands ($\varepsilon \ge 200$), consistent with
+the EV error bound.
+
+\subsection{Metric Property Verification}
+
+We verify RBM metric properties exhaustively on the 4-rank game
+(91~deal trees, 753,571 triples for the triangle inequality):
+
+\begin{itemize}[nosep]
+  \item \textbf{Identity}: $d(T, T) = 0$ for all 91 trees. \checkmark
+  \item \textbf{Symmetry}: $d(T_i, T_j) = d(T_j, T_i)$ for all 4095
+    pairs. \checkmark
+  \item \textbf{Triangle inequality}: verified on all 753,571 triples.
+    \checkmark
+\end{itemize}
+
+\subsection{Online Learner Convergence}
+
+We run the online self-play learner (Algorithm~\ref{alg:online}) on
+2-rank Rhode Island Hold'em with $\varepsilon = 50$ and random community
+cards.
+
+\begin{table}[t]
+\centering
+\caption{Online learner convergence on 2-rank Rhode Island Hold'em.
+With random community cards, the learner discovers the natural cluster
+structure by game~100 and achieves near-perfect cache hit rates by
+game~600.}
+\label{tab:online}
+\begin{tabular}{rrr}
+\toprule
+Games & Clusters & Cache Hit Rate \\
+\midrule
+100 & 3 & 95.0\% \\
+200 & 3 & 97.5\% \\
+400 & 3 & 98.8\% \\
+600 & 3 & 99.5\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:online} shows rapid convergence: the learner discovers
+all 3 natural clusters by game~100 (from 100 games with random
+community cards), and cache hit rate reaches 99.5\% by game~600. With
+fixed community cards, convergence is even faster (same 3 clusters by
+game~50), confirming that the smaller strategic space is easier to
+learn.
+
+\subsection{Distance Memoization}
+
+The recursive structure of RBM creates many redundant subtree
+comparisons. Memoizing subtree distances yields significant speedups.
+
+On an 8-tree benchmark (2-rank deck, 28 pairwise comparisons), memoized
+distance computation achieves a \textbf{94$\times$ speedup} over the
+naive implementation, with a memo cache hit rate of approximately 97\%.
+This demonstrates that game trees share substantial subtree structure
+that memoization exploits.
+
+% ====================================================================
+% 7. RELATED WORK
+% ====================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Tree edit distance.}
+\citet{zhang1994simple} and \citet{zhang1996constrained} established
+that unrestricted edit distance on unordered labeled trees is MAX
+SNP-hard, motivating constrained variants computable in polynomial time.
+\citet{kuboyama2007matching} developed tractable variations using maximum
+weighted bipartite matching---essentially the same core operation as
+RBM. These works establish that matching-based tree distances are
+tractable and metrizable but do not consider game-theoretic
+applications.
+
+\paragraph{Optimal transport on trees.}
+\citet{memoli2011gromov} defines distances between metric measure spaces
+using optimal couplings; RBM can be viewed as a discrete,
+tree-structured specialization of the Gromov-Wasserstein framework.
+The Tree Mover's Distance~\citep{chuang2022tree} extends EMD to
+multisets of trees for GNN analysis. \citet{yamada2018emd} formulate EMD
+on rooted labeled unordered trees built from complete subtrees. These
+works share the recursive optimal transport flavor but target different
+applications.
+
+\paragraph{Game abstraction in poker.}
+\citet{gilpin2007potential} introduced automated abstraction using
+$k$-means clustering with EMD on hand-strength histograms---flat
+abstraction that clusters on scalar distributions at each decision
+point. \citet{ganzfried2014potential} extended this with
+potential-aware EMD accounting for future card draws.
+\citet{kroer2014extensive,kroer2018unified} provide the most
+theoretically rigorous bounds on exploitability introduced by
+abstraction, proving that level-by-level distance metrics control
+solution quality. However, their distance operates level-by-level, not
+recursively through the full subtree. RBM is strictly more expressive
+but comes with the location problem as additional overhead.
+
+\paragraph{Online learning in games.}
+CFR~\citep{zinkevich2007regret} and its variants (CFR+, Monte Carlo CFR)
+achieve regret bounds for extensive-form games.
+AlphaZero~\citep{silver2018general} uses self-play with neural function
+approximation but lacks formal error bounds on the learned abstraction.
+MCTS~\citep{coulom2006efficient,kocsis2006bandit} samples continuations
+to estimate node values---our online learner samples continuations to
+estimate node \emph{identity} (location in the compressed graph).
+Lipschitz bandits~\citep{kleinberg2005nearly,bubeck2011lipschitz}
+exploit metric structure for faster learning; our setting derives the
+metric from game structure rather than assuming it.
+
+\paragraph{The gap filled by this work.}
+The existing literature has (1)~matching-based tree distances with
+metric proofs, and (2)~game tree abstraction with exploitability bounds.
+What was missing is the bridge: using a full recursive tree distance as
+the abstraction metric, proving that the distance bounds EV error,
+identifying the location problem as the fundamental complexity barrier,
+and the online learning formulation that dissolves it.
+
+% ====================================================================
+% 8. CONCLUSION
+% ====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have introduced the recursive bipartite matching distance, a metric
+on game trees that captures structural similarity---not just expected
+values, but the shape of the decision landscape. The metric induces a
+natural compression (the EV graph) with provable EV error bounds, and
+an online learner that builds this compression incrementally through
+self-play with bounded regret.
+
+The 7--0 victory of RBM over EMD on Rhode Island Hold'em validates the
+central thesis: structural tree distance is a better abstraction metric
+than scalar hand-strength distributions. The zero-exploitability results
+at natural cluster boundaries confirm that RBM identifies genuinely
+equivalent strategic states.
+
+Several directions remain open. \emph{Scalability:} the $O(n^2)$
+distance computation limits application to large games; approximate
+matching via Sinkhorn distances~\citep{cuturi2013sinkhorn} or learned
+embeddings could help while potentially preserving error bounds.
+\emph{Per-level palettes:} different game stages may benefit from
+different clustering thresholds. \emph{Beyond poker:} the framework
+applies to any extensive-form game with tree-structured state spaces,
+including Stratego, Magic: The Gathering, and negotiation games.
+\emph{Opponent modeling:} building an RBM-based EV graph of the
+opponent's play patterns could enable principled exploitation.
+
+\paragraph{Acknowledgments.} To be added.
+
+% ====================================================================
+% REFERENCES
+% ====================================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{30}
+
+\bibitem[Auer et~al.(2002)]{auer2002finite}
+Peter Auer, Nicol{\`o} Cesa-Bianchi, and Paul Fischer.
+\newblock Finite-time analysis of the multiarmed bandit problem.
+\newblock \emph{Machine Learning}, 47(2-3):235--256, 2002.
+
+\bibitem[Bowling et~al.(2015)]{bowling2015solving}
+Michael Bowling, Neil Burch, Michael Johanson, and Oskari Tammelin.
+\newblock Heads-up limit hold'em poker is solved.
+\newblock \emph{Science}, 347(6218):145--149, 2015.
+
+\bibitem[Brown and Sandholm(2018)]{brown2018superhuman}
+Noam Brown and Tuomas Sandholm.
+\newblock Superhuman AI for heads-up no-limit poker: {Libratus} beats top
+  professionals.
+\newblock \emph{Science}, 359(6374):418--424, 2018.
+
+\bibitem[Bubeck et~al.(2011)]{bubeck2011lipschitz}
+S{\'e}bastien Bubeck, R{\'e}mi Munos, Gilles Stoltz, and Csaba
+  Szepesv{\'a}ri.
+\newblock {$\mathcal{X}$}-armed bandits.
+\newblock \emph{Journal of Machine Learning Research}, 12:1655--1695, 2011.
+
+\bibitem[Chuang et~al.(2022)]{chuang2022tree}
+Ching-Yao Chuang, Stefanie Jegelka, and David Alvarez-Melis.
+\newblock Tree {M}over's distance: Bridging graph metrics and stability of
+  graph neural networks.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  2022.
+
+\bibitem[Coulom(2006)]{coulom2006efficient}
+R{\'e}mi Coulom.
+\newblock Efficient selectivity and backup operators in {Monte-Carlo} tree
+  search.
+\newblock In \emph{Computers and Games}, pages 72--83, 2006.
+
+\bibitem[Cuturi(2013)]{cuturi2013sinkhorn}
+Marco Cuturi.
+\newblock Sinkhorn distances: Lightspeed computation of optimal transport.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  pages 2292--2300, 2013.
+
+\bibitem[Ganzfried and Sandholm(2014)]{ganzfried2014potential}
+Sam Ganzfried and Tuomas Sandholm.
+\newblock Potential-aware imperfect-recall abstraction with earth mover's
+  distance in imperfect-information games.
+\newblock In \emph{Proceedings of AAAI}, 2014.
+
+\bibitem[Gilpin and Sandholm(2005)]{gilpin2005rhode}
+Andrew Gilpin and Tuomas Sandholm.
+\newblock Optimal {Rhode Island Hold'em} poker.
+\newblock In \emph{Proceedings of AAMAS Workshop on Game Theoretic and Decision
+  Theoretic Agents}, 2005.
+
+\bibitem[Gilpin and Sandholm(2007)]{gilpin2007potential}
+Andrew Gilpin and Tuomas Sandholm.
+\newblock Lossless abstraction of imperfect information games.
+\newblock \emph{Journal of the ACM}, 54(5), 2007.
+
+\bibitem[Kleinberg(2005)]{kleinberg2005nearly}
+Robert Kleinberg.
+\newblock Nearly tight bounds for the continuum-armed bandit problem.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  2005.
+
+\bibitem[Kocsis and Szepesv{\'a}ri(2006)]{kocsis2006bandit}
+Levente Kocsis and Csaba Szepesv{\'a}ri.
+\newblock Bandit based {Monte-Carlo} planning.
+\newblock In \emph{European Conference on Machine Learning}, pages 282--293,
+  2006.
+
+\bibitem[Kroer and Sandholm(2014)]{kroer2014extensive}
+Christian Kroer and Tuomas Sandholm.
+\newblock Extensive-form game abstraction with bounds.
+\newblock In \emph{Proceedings of EC}, 2014.
+
+\bibitem[Kroer and Sandholm(2018)]{kroer2018unified}
+Christian Kroer and Tuomas Sandholm.
+\newblock A unified framework for extensive-form game abstraction with bounds.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  2018.
+
+\bibitem[Kuboyama(2007)]{kuboyama2007matching}
+Tetsuji Kuboyama.
+\newblock \emph{Matching and Learning in Trees}.
+\newblock PhD thesis, University of Tokyo, 2007.
+
+\bibitem[Kuhn(1955)]{kuhn1955hungarian}
+Harold~W. Kuhn.
+\newblock The {Hungarian} method for the assignment problem.
+\newblock \emph{Naval Research Logistics Quarterly}, 2(1-2):83--97, 1955.
+
+\bibitem[M{\'e}moli(2011)]{memoli2011gromov}
+Facundo M{\'e}moli.
+\newblock Gromov-{Wasserstein} distances and the metric approach to object
+  matching.
+\newblock \emph{Foundations of Computational Mathematics}, 11(4):417--487, 2011.
+
+\bibitem[Morav{\v{c}}{\'i}k et~al.(2017)]{moravvcik2017deepstack}
+Matej Morav{\v{c}}{\'i}k, Martin Schmid, Neil Burch, Viliam Lis{\'y}, Dustin
+  Morrill, Nolan Bard, Trevor Davis, Kevin Waugh, Michael Johanson, and Michael
+  Bowling.
+\newblock {DeepStack}: Expert-level artificial intelligence in heads-up no-limit
+  poker.
+\newblock \emph{Science}, 356(6337):508--513, 2017.
+
+\bibitem[Silver et~al.(2018)]{silver2018general}
+David Silver, Thomas Hubert, Julian Schrittwieser, Ioannis Antonoglou, Matthew
+  Lai, Arthur Guez, Marc Lanctot, Laurent Sifre, Dharshan Kumaran, Thore
+  Graepel, Timothy Lillicrap, Karen Simonyan, and Demis Hassabis.
+\newblock A general reinforcement learning algorithm that masters chess, shogi,
+  and {Go} through self-play.
+\newblock \emph{Science}, 362(6419):1140--1144, 2018.
+
+\bibitem[Yamada et~al.(2018)]{yamada2018emd}
+Eizo Yamada, Kaiichiro Ota, and Kazuhisa Makino.
+\newblock Earth mover's distance on rooted labeled unordered trees.
+\newblock In \emph{Proceedings of COCOA}, pages 420--434, 2018.
+
+\bibitem[Zhang(1996)]{zhang1996constrained}
+Kaizhong Zhang.
+\newblock A constrained edit distance between unordered labeled trees.
+\newblock \emph{Algorithmica}, 15(3):205--222, 1996.
+
+\bibitem[Zhang and Jiang(1994)]{zhang1994simple}
+Kaizhong Zhang and Tao Jiang.
+\newblock Some {MAX SNP}-hard results concerning unordered labeled trees.
+\newblock \emph{Information Processing Letters}, 49(5):249--254, 1994.
+
+\bibitem[Zinkevich et~al.(2007)]{zinkevich2007regret}
+Martin Zinkevich, Michael Johanson, Michael Bowling, and Carmelo Piccione.
+\newblock Regret minimization in games with incomplete information.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  pages 1729--1736, 2007.
+
+\end{thebibliography}
+
+% ====================================================================
+% APPENDIX
+% ====================================================================
+\clearpage
+\appendix
+
+\section{Full Proof: RBM Distance Is a Metric (Theorem~\ref{thm:metric})}
+\label{app:metric}
+
+\begin{theorem*}[Restated]
+Let $\calT$ be the space of rooted trees with real-valued leaves. Define
+$d : \calT \times \calT \to \R_{\ge 0}$ as in Definition~\ref{def:rbm},
+with leaf distance $d_L$ and phantom penalty $\delta$. Suppose:
+\begin{enumerate}[nosep]
+  \item $d_L$ is a metric on the leaf value space.
+  \item $\delta(S) \ge 0$ for all subtrees $S$.
+  \item \textbf{Phantom triangle property:} for any subtrees $S_1, S_2$,
+    $d(S_1, S_2) \le \delta(S_1) + \delta(S_2)$.
+\end{enumerate}
+Then $d$ is a metric on $\calT$.
+\end{theorem*}
+
+\begin{proof}
+We verify each axiom by structural induction on the maximum depth $k$ of
+the trees involved. The inductive hypothesis is that $d$ restricted to
+trees of depth ${<}\,k$ satisfies all three metric axioms. The base case
+($k = 0$, both trees are leaves) is immediate because $d$ reduces to
+$d_L$, which is a metric by assumption.
+
+\paragraph{Axiom 1: Identity of indiscernibles --- $d(T, T) = 0$.}
+
+Let $T$ have children $\{c_1, \ldots, c_m\}$. The cost matrix $W$ for
+matching $T$ against itself has entries $W[i,j] = d(\sub(c_i),
+\sub(c_j))$. The child sets are identical and have the same cardinality,
+so no phantom padding is needed. The identity matching $M^* = \{(c_i,
+c_i)\}_{i=1}^{m}$ has cost:
+\[
+  \cost(M^*) = \sum_{i=1}^m d(\sub(c_i), \sub(c_i)) = 0,
+\]
+where each term vanishes by the inductive hypothesis. Since the Hungarian
+method finds the minimum-cost matching and $\cost(M^*) = 0$ with all
+costs nonneg, $d(T, T) = 0$.
+
+Conversely, if $d(T_1, T_2) = 0$, then every matched pair $(c_1^i,
+c_2^j)$ has $d(\sub(c_1^i), \sub(c_2^j)) = 0$ (nonneg terms summing to
+zero), and there are no phantom-matched children (since $\delta(S) \ge
+0$ and any phantom match would force the sum above zero, unless
+$\delta(S) = 0$, corresponding to an empty subtree). By induction, each
+matched pair of subtrees is identical, so $T_1 = T_2$. \qed
+
+\paragraph{Axiom 2: Symmetry --- $d(T_1, T_2) = d(T_2, T_1)$.}
+
+The cost matrix $W'$ for $d(T_2, T_1)$ is the transpose of $W$ for
+$d(T_1, T_2)$:
+\begin{itemize}[nosep]
+  \item Real-real entries: $d(\sub(c_2^j), \sub(c_1^i)) = d(\sub(c_1^i),
+    \sub(c_2^j))$ by inductive symmetry.
+  \item Phantom entries: $\delta$ depends only on the real subtree, not
+    which side it appears on.
+\end{itemize}
+The minimum-cost perfect matching is invariant under transposition. \qed
+
+\paragraph{Axiom 3: Triangle inequality --- $d(T_1, T_3) \le d(T_1, T_2)
++ d(T_2, T_3)$.}
+
+Fix three trees $T_1, T_2, T_3$ with children $\{a_1, \ldots, a_p\}$,
+$\{b_1, \ldots, b_q\}$, $\{c_1, \ldots, c_r\}$. Let $M_{12}$ achieve
+cost $d(T_1, T_2)$ and $M_{23}$ achieve cost $d(T_2, T_3)$.
+
+\emph{Step 1: Construct a feasible matching $M_{13}$.} Compose through
+$T_2$. Each $b_j$ appears once in $M_{12}$ and once in $M_{23}$. This
+creates:
+\begin{itemize}[nosep]
+  \item \emph{Through-matched:} $a_i \xrightarrow{M_{12}} b_j
+    \xrightarrow{M_{23}} c_k$. Assign $(a_i, c_k) \in M_{13}$.
+  \item \emph{Left-dangling:} $a_i \to b_j$ but $b_j \to \phi$. Assign
+    $a_i \to \phi$ in $M_{13}$.
+  \item \emph{Right-dangling:} $\phi \to b_j \to c_k$. Assign $c_k \to
+    \phi$ in $M_{13}$.
+  \item \emph{Both-phantom:} $a_i \to \phi$ in $M_{12}$ (not through
+    any $b_j$). Assign $a_i \to \phi$ in $M_{13}$. Symmetrically for
+    $\phi \to c_k$ in $M_{23}$.
+\end{itemize}
+
+\emph{Step 2: Bound cost.} For through-matched pairs, by the inductive
+triangle inequality:
+\[
+  d(\sub(a_i), \sub(c_k)) \le d(\sub(a_i), \sub(b_j)) + d(\sub(b_j),
+  \sub(c_k)).
+\]
+For left-dangling $a_i$ (via $b_j$ matched to phantom in $M_{23}$): the
+cost in $M_{13}$ is $\delta(\sub(a_i))$. The corresponding costs in
+$M_{12}$ and $M_{23}$ are $d(\sub(a_i), \sub(b_j))$ and
+$\delta(\sub(b_j))$. The 1-Lipschitz condition $\delta(\sub(a_i)) \le
+d(\sub(a_i), \sub(b_j)) + \delta(\sub(b_j))$ ensures the bound holds.
+Right-dangling and both-phantom cases are symmetric.
+
+\emph{Step 3: Sum.} Every edge of $M_{12}$ and $M_{23}$ appears exactly
+once on the right-hand side:
+\[
+  \cost(M_{13}) \le \cost(M_{12}) + \cost(M_{23}) = d(T_1, T_2) +
+  d(T_2, T_3).
+\]
+Since $d(T_1, T_3) \le \cost(M_{13})$ by optimality of the Hungarian
+matching:
+\[
+  d(T_1, T_3) \le d(T_1, T_2) + d(T_2, T_3). \qed
+\]
+\end{proof}
+
+\begin{remark}
+With $\delta(S) = d(S, \emptyset)$, the phantom triangle property and
+1-Lipschitz condition are both instances of the triangle inequality:
+$d(S_1, S_2) \le d(S_1, \emptyset) + d(\emptyset, S_2) = \delta(S_1) +
+\delta(S_2)$ and $d(S_1, \emptyset) \le d(S_1, S_2) + d(S_2,
+\emptyset)$. The theorem is self-contained.
+\end{remark}
+
+% ====================================================================
+\section{Full Proof: EV Error Bound (Theorem~\ref{thm:ev-error})}
+\label{app:ev-error}
+
+\begin{theorem*}[Restated]
+Let $T_1, T_2$ be rooted trees with real-valued leaves, $d(T_1, T_2) =
+\varepsilon$. Let $T^* = \mathrm{merge}(T_1, T_2)$ with equal-weight
+leaf averaging. Then $|\EV(T^*) - \EV(T_i)| \le \varepsilon/2$ for
+$i \in \{1, 2\}$.
+\end{theorem*}
+
+\begin{proof}
+By structural induction on tree depth.
+
+\paragraph{Base case: leaves.} $T_1 = \mathrm{leaf}(v_1)$, $T_2 =
+\mathrm{leaf}(v_2)$, $d(T_1, T_2) = |v_1 - v_2| = \varepsilon$. The
+merge is $T^* = \mathrm{leaf}((v_1 + v_2)/2)$, so:
+\[
+  |\EV(T^*) - \EV(T_1)| = \left|\frac{v_1 + v_2}{2} - v_1\right| =
+  \frac{|v_2 - v_1|}{2} = \frac{\varepsilon}{2}. \quad\checkmark
+\]
+
+\paragraph{Inductive case: internal nodes.} Let $T_1$ have children
+$\{a_1, \ldots, a_m\}$ and $T_2$ have children $\{b_1, \ldots, b_n\}$
+with $m \le n$. Let $M^*$ be the optimal matching with matched-pair
+costs $d_i = d(\sub(a_i), \sub(b_{\sigma(i)}))$ and phantom costs
+$\delta(b_j)$ for $j \notin \mathrm{im}(\sigma)$:
+\[
+  \varepsilon = \sum_{i=1}^m d_i + \sum_{j \notin \mathrm{im}(\sigma)}
+  \delta(b_j).
+\]
+
+\textbf{Case 1: Phantom children dropped (lossy merge).} With uniform
+weighting:
+\begin{align*}
+  |\EV(T^*) - \EV(T_1)| &= \left|\frac{1}{m}\sum_{i=1}^m \EV(c_i^*)
+  - \frac{1}{m}\sum_{i=1}^m \EV(\sub(a_i))\right| \\
+  &\le \frac{1}{m}\sum_{i=1}^m |\EV(c_i^*) - \EV(\sub(a_i))| \\
+  &\le \frac{1}{m}\sum_{i=1}^m \frac{d_i}{2} \\
+  &= \frac{1}{2m}\sum_{i=1}^m d_i \le \frac{\varepsilon}{2},
+\end{align*}
+where the third line uses the inductive hypothesis on each matched pair,
+and the last step uses $\sum_i d_i \le \varepsilon$.
+
+\textbf{Equal-structure case ($m = n$, no phantoms).} The bound
+tightens:
+\[
+  |\EV(T^*) - \EV(T_1)| \le \frac{1}{2m}\sum_{i=1}^m d_i =
+  \frac{\varepsilon}{2m}.
+\]
+For $m \ge 2$, this is at most $\varepsilon/4$, strictly better than
+the stated bound.
+
+The bound $\varepsilon/2$ is tight only at leaves ($m = 0$) or
+degenerate single-child chains ($m = 1$ at every internal node).
+\end{proof}
+
+\begin{corollary*}[Weighted Merges]
+For weights $w_1, w_2$ with $w_1 + w_2 = 1$, merged leaf values are
+$v^* = w_1 v_1 + w_2 v_2$. The error bound generalizes to:
+\[
+  |\EV(T^*) - \EV(T_i)| \le w_{3-i} \cdot \varepsilon.
+\]
+For $w_1 = w_2 = 1/2$, this recovers $\varepsilon/2$. For $w_1 \to 1$,
+the error for $T_1$ vanishes while that for $T_2$ approaches
+$\varepsilon$.
+\end{corollary*}
+
+% ====================================================================
+\section{Full Proof: Online Regret Bound (Theorem~\ref{thm:regret})}
+\label{app:regret}
+
+\begin{theorem*}[Restated]
+Consider the online EV graph learner with threshold $\varepsilon > 0$,
+playing $T$ games against a stationary environment. Let $K$ be the
+number of strategic equivalence classes and $V_{\max} = \max_t
+|\EV(T_t)|$. Then:
+\begin{enumerate}[nosep]
+  \item Exploration bound: total cache misses $\le K$.
+  \item Per-step exploitation error: at most $\varepsilon/2$.
+  \item Cumulative regret: $R(T) \le K V_{\max} + (T-K)\varepsilon/2$.
+  \item Average regret: $R(T)/T \to \varepsilon/2$ as $T \to \infty$.
+  \item With $\varepsilon(t) = \varepsilon_0/\sqrt{t}$: $R(T) =
+    O(\sqrt{T})$.
+\end{enumerate}
+\end{theorem*}
+
+\begin{proof}
+
+\paragraph{Part 1: Exploration bound.}
+Define a strategic equivalence class as a maximal set $\{T : d(T, T')
+\le \varepsilon\}$ centered at some $T'$. Since the game is finite, the
+number of such classes under fixed $\varepsilon > 0$ is some finite $K$.
+
+A cache miss occurs when $T_t$ lies outside all existing clusters:
+$d(T_t, \rep(c)) > \varepsilon$ for every cluster $c$. A new cluster is
+created with $T_t$ as representative.
+
+Each equivalence class generates at most one miss: once $T_t \in \calC$
+triggers a miss, the new cluster covers all future $T_{t'} \in \calC$
+since $d(T_{t'}, T_t) \le \varepsilon$ by definition. Therefore total
+misses $\le K$. \qed$_1$
+
+\paragraph{Part 2: Per-step exploitation error.}
+When exploiting cluster $c^*$ on game tree $T_t$ with $d(T_t, \rep(c^*))
+\le \varepsilon$, the cluster representative serves the role of the
+merged tree. By Theorem~\ref{thm:ev-error}:
+\[
+  r_t = |\EV(\rep(c^*)) - \EV(T_t)| \le \frac{d(T_t, \rep(c^*))}{2}
+  \le \frac{\varepsilon}{2}. \qed_2
+\]
+
+\paragraph{Part 3: Cumulative regret bound.}
+Partition the $T$ games into exploration games $\calE$ (cache misses,
+$|\calE| \le K$) and exploitation games $\calX$ (cache hits, $|\calX|
+\ge T - K$).
+
+Exploration: worst-case per-game regret is $V_{\max}$. Summing:
+$\sum_{t \in \calE} r_t \le K V_{\max}$.
+
+Exploitation: per-game regret $\le \varepsilon/2$. Summing:
+$\sum_{t \in \calX} r_t \le (T - K)\varepsilon/2$.
+
+Total:
+\[
+  R(T) = \sum_{t \in \calE} r_t + \sum_{t \in \calX} r_t \le K V_{\max}
+  + (T - K)\frac{\varepsilon}{2}. \qed_3
+\]
+
+\paragraph{Part 4: Average regret convergence.}
+\[
+  \frac{R(T)}{T} \le \frac{K V_{\max}}{T} + \frac{(T-K)}{T} \cdot
+  \frac{\varepsilon}{2} \xrightarrow{T \to \infty} \frac{\varepsilon}{2}.
+\]
+The exploration cost $K V_{\max}$ is a one-time overhead amortized over
+all future games. After all $K$ classes are discovered, every subsequent
+game is pure exploitation with per-game regret at most
+$\varepsilon/2$. \qed$_4$
+
+\paragraph{Part 5: Sublinear regret via $\varepsilon$-annealing.}
+Let $\varepsilon(t) = \varepsilon_0 / \sqrt{t}$. Let $K(\varepsilon)$
+denote the number of equivalence classes at threshold $\varepsilon$,
+bounded by $N$ (total distinct game trees).
+
+Total exploration events across all $T$ rounds is at most
+$K(\varepsilon(T)) \le N$, since each decrease in $\varepsilon$ that
+splits a class triggers at most one new exploration event.
+
+Exploitation regret at time $t$ is at most $\varepsilon(t)/2 =
+\varepsilon_0/(2\sqrt{t})$. Summing:
+\[
+  \sum_{t \in \calX} \frac{\varepsilon_0}{2\sqrt{t}} \le
+  \sum_{t=1}^T \frac{\varepsilon_0}{2\sqrt{t}} \le
+  \frac{\varepsilon_0}{2} \cdot 2\sqrt{T} = \varepsilon_0\sqrt{T},
+\]
+using the standard bound $\sum_{t=1}^T t^{-1/2} \le 2\sqrt{T}$.
+
+Adding exploration cost:
+\[
+  R(T) \le N V_{\max} + \varepsilon_0\sqrt{T} = O(\sqrt{T}).
+\]
+Average regret:
+\[
+  \frac{R(T)}{T} \le \frac{N V_{\max}}{T} +
+  \frac{\varepsilon_0}{\sqrt{T}} \to 0 \quad\text{as } T \to \infty.
+  \qed_5
+\]
+\end{proof}
+
+\begin{remark}[Comparison with Standard Bandit Bounds]
+The $O(\sqrt{T})$ rate under $\varepsilon$-annealing matches the
+minimax-optimal rate for multi-armed bandits with $K$
+arms~\citep{auer2002finite}. The EV graph learner is effectively a
+bandit over clusters, with the RBM distance providing a geometry on the
+arm space: nearby arms have similar payoffs by the EV error bound. This
+is analogous to Lipschitz bandits~\citep{kleinberg2005nearly}, where
+metric structure enables faster learning. In the EV graph setting, the
+metric is not assumed but derived from the game structure.
+\end{remark}
+
+\begin{remark}[Tightness]
+The exploration term $K V_{\max}$ is tight when each class is first
+encountered at a worst-case game with adversarial exploration (zero
+payoff). In practice, heuristic strategies achieve reasonable EV, so
+the effective exploration cost is much lower. The exploitation term
+$(T-K)\varepsilon/2$ is tight at leaves; for trees with branching
+factor $m > 1$, Theorem~\ref{thm:ev-error} gives a tighter per-step
+bound of $\varepsilon/(2m)$.
+\end{remark}
+
+\end{document}
