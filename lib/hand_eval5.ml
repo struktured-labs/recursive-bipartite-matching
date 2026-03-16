@@ -41,7 +41,7 @@ module Hand_rank = struct
     | Straight_flush -> "straight_flush"
 end
 
-(** Count occurrences of each rank. Returns list of (count, rank_int)
+(** Count occurrences of each rank. Returns list of (rank_int, count)
     sorted by count descending, then rank descending. *)
 let rank_counts ranks =
   let tbl = Hashtbl.create (module Int) in

@@ -49,5 +49,5 @@ val information_set_tree
 (** Remove cards from a deck *)
 val remove_cards : Card.t list -> Card.t list -> Card.t list
 
-(** All ordered 2-card combinations from a list *)
+(** All unordered 2-card combinations from a list *)
 val all_pairs : Card.t list -> (Card.t * Card.t) list

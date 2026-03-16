@@ -14,3 +14,6 @@ module Emd_baseline = Emd_baseline
 module Online_learner = Online_learner
 module Parallel = Parallel
 module Cfr = Cfr
+module Hand_eval5 = Hand_eval5
+module Mini_holdem = Mini_holdem
+module Emd_baseline_holdem = Emd_baseline_holdem
