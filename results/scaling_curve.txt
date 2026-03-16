@@ -1,0 +1,43 @@
+================================================================
+  Scaling Curve Experiment Results
+  Date: 2026-03-16 18:18:29
+  Mode: MOCK (local check/call bot)
+================================================================
+
+Parameters:
+  Buckets: 10
+  Hands per checkpoint: 20
+  Game: HUNL 50/100 blinds, 20000 stack (200bb)
+  Bet fractions: 0.5x, 1.0x, 2.0x pot
+  RBM abstraction time: 0.31s
+  EMD abstraction time: 0.66s
+  Total wall time: 9.2s
+
+=== RBM Training Scaling Curve ===
+
+  Iterations    Info Sets   Train Time  bb/hand             Improvement
+  -------------------------------------------------------------------------
+  1,000         121K        1s          +23.95              baseline   
+  2,000         206K        2s          -0.35               68.4x      
+
+=== EMD Training Scaling Curve ===
+
+  Iterations    Info Sets   Train Time  bb/hand             Improvement
+  -------------------------------------------------------------------------
+  1,000         114K        1s          +6.20               baseline   
+  2,000         240K        3s          -14.80              0.4x       
+
+=== RBM vs EMD Comparison ===
+
+  Iterations    RBM bb/hand   EMD bb/hand   Winner  
+  --------------------------------------------------------
+  1,000         +23.95        +6.20         RBM     
+  2,000         -0.35         -14.80        RBM     
+
+=== Raw Data (CSV) ===
+
+method,iterations,info_sets_p0,info_sets_p1,train_time_s,total_winnings_chips,num_hands,play_time_s,bb_per_hand
+RBM,1000,44912,75857,1.23,47900,20,0.00,23.9500
+RBM,2000,78216,128117,2.23,-700,20,0.00,-0.3500
+EMD,1000,43458,70047,1.19,12400,20,0.00,6.2000
+EMD,2000,89352,150901,2.64,-29600,20,0.00,-14.8000

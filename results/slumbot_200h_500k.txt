@@ -1,0 +1,38 @@
+[slumbot] Building 10-bucket preflop abstraction...
+[slumbot] Abstraction built in 162.86s
+[slumbot] Loading NL strategy from strategy_nl_500k.dat
+[slumbot] Starting session: LIVE (slumbot.com), 200 hands
+[slumbot] Hand 10/200: won=-50 total=-10650 (-10650.00 mbb/hand)
+[slumbot] Hand 20/200: won=400 total=-9950 (-4975.00 mbb/hand)
+[slumbot] Hand 30/200: won=100 total=-9775 (-3258.33 mbb/hand)
+[slumbot] Hand 40/200: won=100 total=-9675 (-2418.75 mbb/hand)
+[slumbot] Hand 50/200: won=-50 total=-7775 (-1555.00 mbb/hand)
+[slumbot] Hand 60/200: won=100 total=-8075 (-1345.83 mbb/hand)
+[slumbot] Hand 70/200: won=-50 total=-7900 (-1128.57 mbb/hand)
+[slumbot] Hand 80/200: won=-50 total=-6500 (-812.50 mbb/hand)
+[slumbot] Hand 90/200: won=-50 total=-10950 (-1216.67 mbb/hand)
+[slumbot] Hand 100/200: won=-50 total=-31050 (-3105.00 mbb/hand)
+[slumbot] Hand 110/200: won=-50 total=-31500 (-2863.64 mbb/hand)
+[slumbot] Hand 120/200: won=-50 total=-30600 (-2550.00 mbb/hand)
+[slumbot] Hand 130/200: won=-50 total=-30300 (-2330.77 mbb/hand)
+[slumbot] Hand 140/200: won=-50 total=-25700 (-1835.71 mbb/hand)
+[slumbot] Hand 150/200: won=-50 total=-24425 (-1628.33 mbb/hand)
+[slumbot] Hand 160/200: won=100 total=-24375 (-1523.44 mbb/hand)
+[slumbot] Hand 170/200: won=-50 total=-24525 (-1442.65 mbb/hand)
+[slumbot] Hand 180/200: won=400 total=-24375 (-1354.17 mbb/hand)
+[slumbot] Hand 190/200: won=100 total=-21750 (-1144.74 mbb/hand)
+[slumbot] Hand 200/200: won=-50 total=-25950 (-1297.50 mbb/hand)
+
+================================================================
+  Slumbot Session Results (LIVE (slumbot.com))
+================================================================
+
+  Hands played:    200
+  Total winnings:  -25950 chips
+  Average:         -1297.50 mbb/hand
+  Average:         -1.2975 bb/hand
+  Time:            19.7 seconds (10.17 hands/sec)
+
+  Game: HUNL 50/100 blinds, 20000 stack (200bb)
+  Strategy: NL MCCFR, P0=2788771 P1=3711455 info sets
+================================================================

@@ -1,0 +1,70 @@
+[slumbot] Building 10-bucket preflop abstraction...
+[slumbot] Abstraction built in 161.96s
+[slumbot] Training NL MCCFR for 500000 iterations (10 buckets)...
+  [MCCFR-NL] iter 10000/500000  avg_util=-79.1402  infosets=(315826, 489865)
+  [MCCFR-NL] iter 20000/500000  avg_util=-8.9492  infosets=(492067, 744434)
+  [MCCFR-NL] iter 30000/500000  avg_util=-31.6361  infosets=(625637, 938159)
+  [MCCFR-NL] iter 40000/500000  avg_util=-26.7805  infosets=(749817, 1109780)
+  [MCCFR-NL] iter 50000/500000  avg_util=-31.3657  infosets=(860217, 1263400)
+  [MCCFR-NL] iter 60000/500000  avg_util=-19.8446  infosets=(960905, 1400190)
+  [MCCFR-NL] iter 70000/500000  avg_util=-16.2559  infosets=(1041997, 1506084)
+  [MCCFR-NL] iter 80000/500000  avg_util=-15.1507  infosets=(1115855, 1602557)
+  [MCCFR-NL] iter 90000/500000  avg_util=-4.9591  infosets=(1186830, 1700592)
+  [MCCFR-NL] iter 100000/500000  avg_util=-2.8911  infosets=(1257066, 1793232)
+  [MCCFR-NL] iter 110000/500000  avg_util=-1.0539  infosets=(1321989, 1877536)
+  [MCCFR-NL] iter 120000/500000  avg_util=2.3874  infosets=(1383807, 1956373)
+  [MCCFR-NL] iter 130000/500000  avg_util=1.7923  infosets=(1443477, 2033448)
+  [MCCFR-NL] iter 140000/500000  avg_util=0.7286  infosets=(1496954, 2103628)
+  [MCCFR-NL] iter 150000/500000  avg_util=1.2439  infosets=(1550948, 2174317)
+  [MCCFR-NL] iter 160000/500000  avg_util=-1.4234  infosets=(1600960, 2239907)
+  [MCCFR-NL] iter 170000/500000  avg_util=-4.2722  infosets=(1650207, 2303018)
+  [MCCFR-NL] iter 180000/500000  avg_util=-5.1020  infosets=(1696325, 2360365)
+  [MCCFR-NL] iter 190000/500000  avg_util=-5.3938  infosets=(1739387, 2414250)
+  [MCCFR-NL] iter 200000/500000  avg_util=-5.2721  infosets=(1780898, 2467521)
+  [MCCFR-NL] iter 210000/500000  avg_util=-4.6302  infosets=(1820100, 2514971)
+  [MCCFR-NL] iter 220000/500000  avg_util=-4.0246  infosets=(1859160, 2564264)
+  [MCCFR-NL] iter 230000/500000  avg_util=-4.3623  infosets=(1898061, 2614031)
+  [MCCFR-NL] iter 240000/500000  avg_util=-2.5802  infosets=(1935006, 2661734)
+  [MCCFR-NL] iter 250000/500000  avg_util=-0.9694  infosets=(1970246, 2706903)
+  [MCCFR-NL] iter 260000/500000  avg_util=-0.9919  infosets=(2006355, 2753768)
+  [MCCFR-NL] iter 270000/500000  avg_util=-1.4757  infosets=(2041409, 2796965)
+  [MCCFR-NL] iter 280000/500000  avg_util=-1.6342  infosets=(2077329, 2838302)
+  [MCCFR-NL] iter 290000/500000  avg_util=-1.7338  infosets=(2111411, 2882503)
+  [MCCFR-NL] iter 300000/500000  avg_util=-2.2617  infosets=(2143959, 2921519)
+  [MCCFR-NL] iter 310000/500000  avg_util=-3.3483  infosets=(2175894, 2960754)
+  [MCCFR-NL] iter 320000/500000  avg_util=-1.0297  infosets=(2206981, 2999247)
+  [MCCFR-NL] iter 330000/500000  avg_util=-1.9202  infosets=(2239226, 3039239)
+  [MCCFR-NL] iter 340000/500000  avg_util=-1.4184  infosets=(2271801, 3077222)
+  [MCCFR-NL] iter 350000/500000  avg_util=-0.9713  infosets=(2307399, 3119396)
+  [MCCFR-NL] iter 360000/500000  avg_util=-0.9629  infosets=(2337378, 3157519)
+  [MCCFR-NL] iter 370000/500000  avg_util=-1.1847  infosets=(2370436, 3196811)
+  [MCCFR-NL] iter 380000/500000  avg_util=-0.8886  infosets=(2403918, 3238508)
+  [MCCFR-NL] iter 390000/500000  avg_util=-0.3571  infosets=(2437183, 3280248)
+  [MCCFR-NL] iter 400000/500000  avg_util=-0.7066  infosets=(2471988, 3322157)
+  [MCCFR-NL] iter 410000/500000  avg_util=0.1379  infosets=(2505761, 3363264)
+  [MCCFR-NL] iter 420000/500000  avg_util=1.3691  infosets=(2540715, 3407406)
+  [MCCFR-NL] iter 430000/500000  avg_util=0.2282  infosets=(2575702, 3451237)
+  [MCCFR-NL] iter 440000/500000  avg_util=-0.9184  infosets=(2607182, 3490169)
+  [MCCFR-NL] iter 450000/500000  avg_util=-0.9665  infosets=(2639021, 3528846)
+  [MCCFR-NL] iter 460000/500000  avg_util=-1.5499  infosets=(2669576, 3568411)
+  [MCCFR-NL] iter 470000/500000  avg_util=-2.1953  infosets=(2699812, 3607017)
+  [MCCFR-NL] iter 480000/500000  avg_util=-2.0938  infosets=(2730564, 3643699)
+  [MCCFR-NL] iter 490000/500000  avg_util=-2.4504  infosets=(2759831, 3678396)
+  [MCCFR-NL] iter 500000/500000  avg_util=-2.3804  infosets=(2788771, 3711455)
+[slumbot] Training complete in 299.09s. P0: 2788771, P1: 3711455 info sets
+[slumbot] Strategy saved to strategy_nl_500k.dat
+[slumbot] Starting session: LIVE (slumbot.com), 0 hands
+
+================================================================
+  Slumbot Session Results (LIVE (slumbot.com))
+================================================================
+
+  Hands played:    0
+  Total winnings:  0 chips
+  Average:         -nan mbb/hand
+  Average:         -nan bb/hand
+  Time:            0.0 seconds (0.00 hands/sec)
+
+  Game: HUNL 50/100 blinds, 20000 stack (200bb)
+  Strategy: NL MCCFR, P0=2788771 P1=3711455 info sets
+================================================================
