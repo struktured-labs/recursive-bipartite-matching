@@ -1,0 +1,39 @@
+[slumbot] Building 10-bucket preflop abstraction...
+[slumbot] Abstraction built in 161.83s
+[slumbot] Training NL MCCFR for 100000 iterations (10 buckets)...
+  [MCCFR-NL] iter 10000/100000  avg_util=99.1249  infosets=(304815, 486150)
+  [MCCFR-NL] iter 20000/100000  avg_util=41.9659  infosets=(472599, 729901)
+  [MCCFR-NL] iter 30000/100000  avg_util=30.9368  infosets=(612003, 929229)
+  [MCCFR-NL] iter 40000/100000  avg_util=14.4923  infosets=(728784, 1092572)
+  [MCCFR-NL] iter 50000/100000  avg_util=14.9671  infosets=(833006, 1237237)
+  [MCCFR-NL] iter 60000/100000  avg_util=13.3030  infosets=(916632, 1348743)
+  [MCCFR-NL] iter 70000/100000  avg_util=0.4685  infosets=(991699, 1450039)
+  [MCCFR-NL] iter 80000/100000  avg_util=7.5116  infosets=(1060770, 1544477)
+  [MCCFR-NL] iter 90000/100000  avg_util=3.3018  infosets=(1128214, 1635036)
+  [MCCFR-NL] iter 100000/100000  avg_util=0.8082  infosets=(1192515, 1721414)
+[slumbot] Training complete in 71.73s. P0: 1192515, P1: 1721414 info sets
+[slumbot] Starting session: LIVE (slumbot.com), 100 hands
+[slumbot] Hand 10/100: won=100 total=-18150 (-18150.00 mbb/hand)
+[slumbot] Hand 20/100: won=1000 total=-16600 (-8300.00 mbb/hand)
+[slumbot] Hand 30/100: won=100 total=-15475 (-5158.33 mbb/hand)
+[slumbot] Hand 40/100: won=-275 total=-16900 (-4225.00 mbb/hand)
+[slumbot] Hand 50/100: won=100 total=-14775 (-2955.00 mbb/hand)
+[slumbot] Hand 60/100: won=-50 total=-14275 (-2379.17 mbb/hand)
+[slumbot] Hand 70/100: won=-50 total=-12025 (-1717.86 mbb/hand)
+[slumbot] Hand 80/100: won=100 total=-9075 (-1134.38 mbb/hand)
+[slumbot] Hand 90/100: won=-50 total=-8125 (-902.78 mbb/hand)
+[slumbot] Hand 100/100: won=100 total=-5513 (-551.30 mbb/hand)
+
+================================================================
+  Slumbot Session Results (LIVE (slumbot.com))
+================================================================
+
+  Hands played:    100
+  Total winnings:  -5513 chips
+  Average:         -551.30 mbb/hand
+  Average:         -0.5513 bb/hand
+  Time:            10.3 seconds (9.68 hands/sec)
+
+  Game: HUNL 50/100 blinds, 20000 stack (200bb)
+  Strategy: NL MCCFR, P0=1192515 P1=1721414 info sets
+================================================================
