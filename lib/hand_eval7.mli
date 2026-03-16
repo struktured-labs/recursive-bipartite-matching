@@ -8,6 +8,13 @@
     Returns (hand_rank, tiebreaker_ranks) for the strongest subset. *)
 val evaluate7 : Card.t list -> Hand_eval5.Hand_rank.t * int list
 
+(** Compare two already-evaluated hands (rank, tiebreaker) pairs.
+    Returns positive if first wins, negative if second wins, 0 for tie. *)
+val compare_evaluated
+  :  Hand_eval5.Hand_rank.t * int list
+  -> Hand_eval5.Hand_rank.t * int list
+  -> int
+
 (** Compare two 7-card hands.  Returns positive if hand1 wins,
     negative if hand2 wins, 0 for a tie. *)
 val compare_hands7 : Card.t list -> Card.t list -> int
