@@ -333,108 +333,151 @@ Hold'em bot created by Eric Jackson.  It provides a REST API for playing
 hands programmatically -- one of the few publicly available NL Hold'em
 opponents.
 
+**Status**: WORKING -- `bin/slumbot_client.ml` connects and plays.
+
 ### 3.1 API Overview
 
-| Endpoint          | Method | Description                     |
-|-------------------|--------|---------------------------------|
-| `/api/new_hand`   | POST   | Start a new hand                |
-| `/api/act`        | POST   | Take an action in current hand  |
+| Endpoint                    | Method | Description                     |
+|-----------------------------|--------|---------------------------------|
+| `/slumbot/api/login`        | POST   | Authenticate (optional)         |
+| `/slumbot/api/new_hand`     | POST   | Start a new hand                |
+| `/slumbot/api/act`          | POST   | Take an action in current hand  |
 
 **Base URL**: `https://slumbot.com`
+
+**Game parameters**: 50/100 blinds, 20,000 chip stack (200 BB), heads-up NL.
 
 ### 3.2 Starting a Hand
 
 ```bash
-curl -X POST https://slumbot.com/api/new_hand \
-    -H "Content-Type: application/json"
+curl -X POST https://slumbot.com/slumbot/api/new_hand \
+    -H "Content-Type: application/json" \
+    -d '{}'
 ```
 
 **Response**:
 
 ```json
 {
-    "token": "abc123...",
-    "action": "",
+    "token": "57b08c4b-daae-43fd-aa1a-2c6a908cebc3",
+    "action": "b200",
     "client_pos": 0,
-    "hole_cards": [14, 37],
+    "hole_cards": ["8s", "5c"],
     "board": [],
     "winnings": null
 }
 ```
 
-Cards are encoded as integers 0-51:
-- `card_id = rank * 4 + suit`
-- Ranks: 2=0, 3=1, ..., A=12
-- Suits: 0=clubs, 1=diamonds, 2=hearts, 3=spades
+**Token**: pass into every subsequent request.  The token may change between
+responses; always use the latest one.
+
+**client_pos**: 0 = big blind (first to act postflop, second preflop),
+1 = small blind (first to act preflop, second postflop).
+
+**Cards**: standard ACPC format strings (e.g., "Ac" = Ace of clubs).
+
+**action**: the Slumbot bot's action so far.  If the bot acts first (client
+is BB and bot opens), this will already contain the bot's preflop action.
 
 ### 3.3 Taking an Action
 
 ```bash
-curl -X POST https://slumbot.com/api/act \
+curl -X POST https://slumbot.com/slumbot/api/act \
     -H "Content-Type: application/json" \
-    -d '{"token": "abc123...", "incr": "c"}'
+    -d '{"token": "57b08c4b-...", "incr": "c"}'
 ```
 
-Actions use the same encoding as ACPC but with bet sizes for NL:
+**Action encoding**:
+- `k` -- check
+- `c` -- call
 - `f` -- fold
-- `c` -- call/check
-- `b200` -- bet/raise to 200 chips
+- `b{N}` -- bet/raise to N chips (street-relative; see below)
 
-**Response** includes updated game state, or `winnings` if the hand is
-complete.
+**Bet sizes** are the total amount a player has put in *on that street*.
+For example, `b200c/kb400` means: preflop bet 200, called; flop check,
+bet 400 (pot-sized since pot = 400 after preflop).
 
-### 3.4 OCaml Client Sketch
+**Response** has the same shape as `new_hand`, with `winnings` set to an
+integer when the hand is complete.  Response also includes `bot_hole_cards`
+at showdown.
 
-A Slumbot client would use HTTP requests rather than raw TCP.  Since our
-current bot is Limit Hold'em and Slumbot plays No-Limit, we would need
-either:
+### 3.4 OCaml Client
 
-1. **Adapt the limit strategy** to NL by mapping limit actions to fixed bet
-   sizes (e.g., raise = bet 2x pot).
-2. **Train a NL strategy** using `Cfr_nolimit` (currently `.mli` only --
-   implementation pending) and `Nolimit_holdem`.
+**Binary**: `bin/slumbot_client.ml` (`rbm-slumbot-client`)
 
-A minimal client using `curl` via `Core_unix.open_process_full`:
+This is a fully working client that:
+1. Trains an NL MCCFR strategy (or loads from file)
+2. Connects to Slumbot's REST API via curl subprocess
+3. Plays configurable hands, mapping strategy actions to Slumbot bet sizes
+4. Reports results in mbb/hand
 
-```ocaml
-(** Minimal Slumbot API client.
+```bash
+# Train and play 100 hands against real Slumbot
+opam exec -- dune exec -- rbm-slumbot-client --train 50000 --hands 100
 
-    This is a sketch -- a real implementation would use cohttp or
-    piaf for proper HTTP/JSON handling. *)
+# Save strategy for reuse
+opam exec -- dune exec -- rbm-slumbot-client --train 50000 --save strat_nl.bin --hands 200
 
-let slumbot_new_hand () =
-  let cmd = "curl -s -X POST https://slumbot.com/api/new_hand" in
-  let stdout = Core_unix.open_process_in cmd in
-  let body = In_channel.input_all stdout in
-  let _ = Core_unix.close_process_in stdout in
-  body  (* Parse JSON to extract token, hole_cards, etc. *)
+# Load saved strategy
+opam exec -- dune exec -- rbm-slumbot-client --strategy strat_nl.bin --hands 500
 
-let slumbot_act ~token ~action =
-  let cmd = sprintf
-    "curl -s -X POST https://slumbot.com/api/act \
-     -H 'Content-Type: application/json' \
-     -d '{\"token\": \"%s\", \"incr\": \"%s\"}'"
-    token action
-  in
-  let stdout = Core_unix.open_process_in cmd in
-  let body = In_channel.input_all stdout in
-  let _ = Core_unix.close_process_in stdout in
-  body
+# Mock mode (local check/call bot, no network)
+opam exec -- dune exec -- rbm-slumbot-client --mock --train 5000 --hands 50
+
+# Verbose mode
+opam exec -- dune exec -- rbm-slumbot-client --train 10000 --hands 20 --verbose
+
+# With Slumbot account (for tracked sessions)
+opam exec -- dune exec -- rbm-slumbot-client --strategy strat_nl.bin \
+    --username myuser --password mypass --hands 1000
 ```
 
-For a production client, add `cohttp-lwt-unix` and `yojson` (or
-`ppx_yojson_conv`) to the opam dependencies and implement proper
-HTTP + JSON parsing.
+**Command-line options**:
+
+| Flag          | Default | Description                                    |
+|---------------|---------|------------------------------------------------|
+| `--train`     | 0       | NL MCCFR iterations before playing             |
+| `--strategy`  | (none)  | Load serialized NL strategy from file          |
+| `--save`      | (none)  | Save trained strategy to file                  |
+| `--buckets`   | 10      | Preflop abstraction bucket count               |
+| `--hands`     | 100     | Number of hands to play                        |
+| `--mock`      | false   | Use local mock bot instead of real API         |
+| `--verbose`   | false   | Log every action to stderr                     |
+| `--username`  | (none)  | Slumbot account username                       |
+| `--password`  | (none)  | Slumbot account password                       |
+
+**Strategy mapping**: Since Slumbot uses continuous bet sizes and our MCCFR
+uses bucketed fractions (0.5x, 1.0x, 2.0x pot), the client maps between them:
+- Internal `h` (half-pot) -> `b{N}` where N = 0.5 * pot
+- Internal `p` (pot) -> `b{N}` where N = pot
+- Internal `d` (double-pot) -> `b{N}` where N = 2 * pot
+- Internal `a` (all-in) -> `b{stack_remaining}`
+- Slumbot bets are mapped to nearest fraction for info-set lookup
 
 ### 3.5 Testing Against Slumbot
 
-Slumbot is rate-limited and plays HUNL (heads-up no-limit).  A useful test
-pipeline:
+Recommended pipeline:
 
-1. Train NL strategy: `Cfr_nolimit.train_mccfr` (once implemented)
-2. Play 1000+ hands against Slumbot via the REST API
-3. Track cumulative winnings in mbb/hand (milli-big-blinds per hand)
-4. Compare against Slumbot's published performance metrics
+```bash
+# 1. Train a strong strategy (more iterations = stronger)
+opam exec -- dune exec -- rbm-slumbot-client \
+    --train 200000 --buckets 15 --save strategy_200k.bin --mock --hands 1
+
+# 2. Play against Slumbot
+opam exec -- dune exec -- rbm-slumbot-client \
+    --strategy strategy_200k.bin --hands 1000
+
+# 3. Compare different bucket counts
+for b in 5 10 15 20; do
+  opam exec -- dune exec -- rbm-slumbot-client \
+      --train 100000 --buckets $b --hands 200
+done
+```
+
+**Expected performance**: With limited training (5-50K iterations) and
+coarse abstraction (10 buckets), the bot will likely lose to Slumbot
+(a near-optimal HUNL solver).  The value is in measuring the loss rate
+and comparing abstraction methods.
 
 ---
 
@@ -498,10 +541,12 @@ test binary `rbm-test-equity` already exercises this.
 | Platform                | Variant     | Bot-Friendly | Notes                               |
 |-------------------------|-------------|:------------:|---------------------------------------|
 | ACPC Dealer (local)     | Limit/NL    | Yes          | Research standard, fully open        |
-| Slumbot                 | HUNL        | Yes          | Public API, rate-limited             |
+| Slumbot                 | HUNL        | **WORKING**  | REST API, free, rate-limited         |
 | OpenSpiel               | Any         | Yes          | Framework, not a platform            |
 | PokerRL                 | NL          | Yes          | Reinforcement learning framework     |
 | Poker Academy           | Limit/NL    | Yes          | Commercial, has bot API (Meerkat)    |
+| CleverPiggy NL Bot      | HUNL        | Partial      | Web-based, no documented API         |
+| DecisionHoldem          | HUNL        | Yes          | Open source, depth-limited solving   |
 
 ### 5.2 Platforms That Ban Bots
 

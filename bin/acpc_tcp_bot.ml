@@ -273,7 +273,7 @@ let () =
   Arg.parse args (fun _ -> ())
     "acpc_tcp_bot.exe --host HOST --port PORT [--train N | --strategy FILE]";
 
-  let _config = Limit_holdem.standard_config in
+  let config = Limit_holdem.standard_config in
 
   eprintf "[tcp-bot] Building %d-bucket preflop abstraction...\n%!" !n_buckets;
   let (preflop_abs, abs_wall) = time (fun () ->
@@ -293,7 +293,7 @@ let () =
           !train_iters !n_buckets;
         let ((p0, p1), wall) =
           time (fun () ->
-            Cfr_abstract.train_mccfr ~config:_config ~abstraction:preflop_abs
+            Cfr_abstract.train_mccfr ~config ~abstraction:preflop_abs
               ~iterations:!train_iters ~report_every:10_000 ())
         in
         eprintf "[tcp-bot] Training complete in %.2fs. P0: %d infosets, P1: %d infosets\n%!"
