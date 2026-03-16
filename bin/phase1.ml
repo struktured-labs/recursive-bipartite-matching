@@ -161,7 +161,7 @@ let hand_category p1_card flop turn =
 
 let () =
   let t_start = Core_unix.gettimeofday () in
-  let n_samples = 100 in
+  let n_samples = 30 in
   let seed = 42 in
 
   printf "################################################################\n";
