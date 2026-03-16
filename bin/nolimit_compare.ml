@@ -1,20 +1,26 @@
-(** RBM vs EMD comparison on heads-up No-Limit Hold'em (20bb short-stack).
+(** RBM vs EMD comparison on heads-up No-Limit Hold'em.
 
-    Part 1: Preflop abstraction quality comparison
+    Part 1: Preflop abstraction quality (20bb short-stack)
       - Sample 50 canonical starting hands (from the 169)
       - Build showdown distribution trees
       - RBM: pairwise distance matrix with EV pruning (parallel)
       - EMD: equity distribution distance
       - Cluster at multiple k, compare max EV error
 
-    Part 2: MCCFR-NL head-to-head
+    Part 2: MCCFR-NL head-to-head (20bb short-stack)
       - Train 50K iterations with RBM-based bucketing (10 buckets)
       - Train 50K iterations with equity-based bucketing (10 buckets)
       - Self-play 10K hands, report bb/hand
 
+    Part 3: Deep-stack comparison (200bb)
+      - Same pipeline as Parts 1+2 but with standard_config (3 bet fractions)
+      - Showdown distribution trees for tractable RBM distance
+      - Hypothesis: RBM advantage grows with tree complexity
+
     Usage:
       ./nolimit_compare.exe [--n-hands 50] [--mccfr-iters 50000]
-                             [--play-hands 10000] [--buckets 10] *)
+                             [--play-hands 10000] [--buckets 10]
+                             [--deep-mccfr-iters 50000] *)
 
 open Rbm
 
@@ -475,6 +481,9 @@ let () =
   let max_board_samples = ref 10 in
   let eq_mc_samples = ref 2_000 in
 
+  let deep_mccfr_iters = ref 50_000 in
+  let deep_play_hands = ref 10_000 in
+
   let args = [
     ("--n-hands", Arg.Set_int n_hands,
      "N  Number of canonical hands to sample (default: 50)");
@@ -490,6 +499,10 @@ let () =
      "N  Max board completions per IS tree (default: 10)");
     ("--eq-mc-samples", Arg.Set_int eq_mc_samples,
      "N  MC samples for preflop equity (default: 2000)");
+    ("--deep-mccfr-iters", Arg.Set_int deep_mccfr_iters,
+     "N  MCCFR training iterations for 200bb deep-stack (default: 50000)");
+    ("--deep-play-hands", Arg.Set_int deep_play_hands,
+     "N  Self-play hands for 200bb deep-stack (default: 10000)");
   ] in
   Arg.parse args (fun _ -> ()) "nolimit_compare.exe [options]";
 
@@ -909,13 +922,10 @@ let () =
   printf "  Self-play completed in %.2fs\n\n%!" play_time;
 
   (* ================================================================ *)
-  (* FINAL REPORT                                                     *)
+  (* 20bb INTERIM REPORT                                              *)
   (* ================================================================ *)
-  let t_end = Core_unix.gettimeofday () in
-  let total_time = t_end -. t_start in
-
   printf "================================================================\n%!";
-  printf "  FINAL REPORT: RBM vs EMD on NL Hold'em (20bb HU)\n%!";
+  printf "  20bb REPORT: RBM vs EMD on NL Hold'em (20bb HU)\n%!";
   printf "================================================================\n\n%!";
 
   printf "Preflop Abstraction Quality (max EV error, lower is better):\n\n%!";
@@ -951,7 +961,7 @@ let () =
      /. Float.of_int config.big_blind);
   printf "  RBM total profit:  %+.1f\n%!" total_rbm_profit;
   printf "  RBM avg profit:    %+.4f bb/hand\n%!" avg_bb_per_hand;
-  let winner_str =
+  let winner_str_20bb =
     match Float.( > ) avg_bb_per_hand 0.01 with
     | true -> "RBM"
     | false ->
@@ -959,18 +969,412 @@ let () =
       | true -> "EMD"
       | false -> "DRAW (within noise)"
   in
-  printf "  Winner:            %s\n%!" winner_str;
+  printf "  Winner:            %s\n\n%!" winner_str_20bb;
+
+  (* ================================================================ *)
+  (* PART 3: Deep-Stack 200bb Comparison                              *)
+  (* ================================================================ *)
+  let deep_config = Nolimit_holdem.standard_config in
+  printf "================================================================\n%!";
+  printf "  PART 3: Deep-Stack 200bb Comparison\n%!";
+  printf "================================================================\n\n%!";
+  printf "Game: 2-player heads-up No-Limit Hold'em (DEEP STACK)\n%!";
+  printf "  SB=%d BB=%d starting_stack=%d (%dbb) bet_fractions=%s max_raises=%d\n%!"
+    deep_config.small_blind deep_config.big_blind deep_config.starting_stack
+    (deep_config.starting_stack / deep_config.big_blind)
+    (String.concat ~sep:"," (List.map deep_config.bet_fractions ~f:(sprintf "%.1f")))
+    deep_config.max_raises_per_round;
+  printf "  Full game tree: 186,174 nodes (vs 2,988 at 20bb)\n%!";
+  printf "  Using showdown distribution trees for tractable RBM distance\n\n%!";
+
+  (* Part 3a: Build showdown distribution trees for 200bb
+     We reuse sampled_hands and preflop_eq from Part 1 since preflop
+     equity is stack-independent. *)
+  let deep_n_board_samples = !max_board_samples in
+  let deep_n_opps = !max_opponents in
+  printf "[3a] Building showdown distribution trees for %d hands (200bb)...\n%!" n;
+  printf "  (%d board samples x %d opponents = %d leaves/tree)\n%!"
+    deep_n_board_samples deep_n_opps
+    (deep_n_board_samples * deep_n_opps);
+  let (deep_trees, deep_tree_time) = time (fun () ->
+    Array.map sampled_hands ~f:(fun (h, _eq) ->
+      let hole_cards = concrete_hole_cards h in
+      let (h1, h2) = hole_cards in
+      let dealt = [ h1; h2 ] in
+      let remaining =
+        List.filter Card.full_deck ~f:(fun c ->
+          not (List.exists dealt ~f:(fun cc -> Card.equal c cc)))
+      in
+      let rem_arr = Array.of_list remaining in
+      let n_rem = Array.length rem_arr in
+      let board_children =
+        List.init deep_n_board_samples ~f:(fun _ ->
+          for i = 0 to Int.min 6 (n_rem - 1) do
+            let j = i + Random.int (n_rem - i) in
+            let tmp = rem_arr.(i) in
+            rem_arr.(i) <- rem_arr.(j);
+            rem_arr.(j) <- tmp
+          done;
+          let board = [
+            rem_arr.(0); rem_arr.(1); rem_arr.(2);
+            rem_arr.(3); rem_arr.(4)
+          ] in
+          let opp_start = 5 in
+          let n_opp_avail = (n_rem - opp_start) / 2 in
+          let n_opps = Int.min deep_n_opps n_opp_avail in
+          for i = opp_start to Int.min (opp_start + n_opps * 2 - 1) (n_rem - 1) do
+            let j = i + Random.int (n_rem - i) in
+            let tmp = rem_arr.(i) in
+            rem_arr.(i) <- rem_arr.(j);
+            rem_arr.(j) <- tmp
+          done;
+          let opp_leaves =
+            List.init n_opps ~f:(fun k ->
+              let o1 = rem_arr.(opp_start + k * 2) in
+              let o2 = rem_arr.(opp_start + k * 2 + 1) in
+              let p1h = [ h1; h2 ] @ board in
+              let p2h = [ o1; o2 ] @ board in
+              let cmp = Hand_eval7.compare_hands7 p1h p2h in
+              let value =
+                match cmp > 0 with
+                | true -> 1.0
+                | false ->
+                  match cmp = 0 with
+                  | true -> 0.0
+                  | false -> -1.0
+              in
+              Tree.leaf
+                ~label:(Rhode_island.Node_label.Terminal
+                          { winner = None; pot = 0 })
+                ~value)
+          in
+          Tree.node
+            ~label:(Rhode_island.Node_label.Chance
+                      { description = "board" })
+            ~children:opp_leaves)
+      in
+      Tree.node
+        ~label:(Rhode_island.Node_label.Chance {
+          description = sprintf "p1=%s%s preflop (200bb)"
+            (Card.to_string h1) (Card.to_string h2)
+        })
+        ~children:board_children))
+  in
+  printf "  Built %d distribution trees in %.2fs\n%!" n deep_tree_time;
+  let deep_sample = deep_trees.(0) in
+  printf "  Sample tree: %d nodes, %d leaves, depth %d\n%!"
+    (Tree.size deep_sample) (Tree.num_leaves deep_sample)
+    (Tree.depth deep_sample);
+  let deep_tree_list = Array.to_list deep_trees in
+  let deep_tree_evs = Array.map deep_trees ~f:Tree.ev in
+
+  (* Part 3b: RBM pairwise distance matrix for 200bb *)
+  printf "\n[3b] Computing RBM pairwise distances (%d pairs, parallel)...\n%!"
+    (n * (n - 1) / 2);
+  let ((deep_rbm_matrix, deep_rbm_computed, deep_rbm_skipped), deep_rbm_time) =
+    time (fun () ->
+      Parallel.precompute_distances_parallel_pruned
+        ~threshold:5.0 deep_tree_list)
+  in
+  printf "  RBM matrix: %dx%d in %.2fs (computed=%d, ev_pruned=%d)\n%!"
+    n n deep_rbm_time deep_rbm_computed deep_rbm_skipped;
+
+  (* Part 3c: EMD pairwise distance matrix for 200bb
+     Reuses emd_histograms from Part 1 — EMD equity distributions are
+     stack-independent (only showdown outcomes matter). *)
+  printf "\n[3c] Reusing EMD equity distributions from 20bb (stack-independent)\n%!";
+  printf "  EMD matrix: %dx%d (reused from Part 1)\n%!" n n;
+
+  (* Part 3d: Scalar EV distance matrix — also stack-independent *)
+  printf "  EV matrix: %dx%d (reused from Part 1)\n\n%!" n n;
+
+  (* Part 3e: Cluster at exact k values for 200bb *)
+  printf "[3e] Clustering at exact k values (200bb trees)...\n%!";
+  let (deep_cluster_results, deep_cluster_time) = time (fun () ->
+    List.map target_ks ~f:(fun k ->
+      let rbm_clusters = cluster_to_k ~target_k:k deep_rbm_matrix n in
+      let emd_clusters = cluster_to_k ~target_k:k emd_matrix n in
+      let ev_clusters = cluster_to_k ~target_k:k ev_matrix n in
+      let rbm_err = max_ev_error_from_evs deep_tree_evs rbm_clusters in
+      let emd_err = max_ev_error_from_evs deep_tree_evs emd_clusters in
+      let ev_err = max_ev_error_from_evs deep_tree_evs ev_clusters in
+      (k, rbm_err, emd_err, ev_err)))
+  in
+  printf "  Clustering completed in %.3fs\n\n%!" deep_cluster_time;
+
+  printf "=== Preflop Abstraction Quality (200bb) ===\n\n%!";
+  printf "  %-5s  %-10s  %-10s  %-10s  %-8s\n%!"
+    "k" "RBM_err" "EMD_err" "EV_err" "Winner";
+  printf "  %s\n%!" (String.make 53 '-');
+
+  let deep_rbm_wins = ref 0 in
+  let deep_emd_wins = ref 0 in
+  let deep_ev_wins = ref 0 in
+  let deep_ties = ref 0 in
+
+  List.iter deep_cluster_results ~f:(fun (k, rbm_err, emd_err, ev_err) ->
+    let min_err = Float.min rbm_err (Float.min emd_err ev_err) in
+    let tol = 0.0001 in
+    let winner =
+      let rbm_best = Float.( < ) (Float.abs (rbm_err -. min_err)) tol in
+      let emd_best = Float.( < ) (Float.abs (emd_err -. min_err)) tol in
+      let ev_best = Float.( < ) (Float.abs (ev_err -. min_err)) tol in
+      match rbm_best && emd_best && ev_best with
+      | true -> Int.incr deep_ties; "tie"
+      | false ->
+        match rbm_best with
+        | true -> Int.incr deep_rbm_wins; "RBM"
+        | false ->
+          match emd_best with
+          | true -> Int.incr deep_emd_wins; "EMD"
+          | false ->
+            match ev_best with
+            | true -> Int.incr deep_ev_wins; "EV"
+            | false -> Int.incr deep_ties; "tie"
+    in
+    printf "  %-5d  %-10.4f  %-10.4f  %-10.4f  %-8s\n%!"
+      k rbm_err emd_err ev_err winner);
+
+  printf "\n  Abstraction quality wins (200bb): RBM=%d EMD=%d EV=%d Tie=%d\n\n%!"
+    !deep_rbm_wins !deep_emd_wins !deep_ev_wins !deep_ties;
+
+  (* Part 3f: MCCFR training and head-to-head at 200bb *)
+  printf "[3f] Building %d-bucket preflop abstractions for 200bb...\n%!" !n_buckets;
+  let (deep_rbm_abs, deep_rbm_abs_time) = time (fun () ->
+    let all_hands = Array.of_list Equity.all_canonical_hands in
+    let small_trees = Array.map all_hands
+        ~f:(fun (h : Equity.canonical_hand) ->
+          let (h1, h2) = concrete_hole_cards h in
+          let dealt = [ h1; h2 ] in
+          let rem =
+            List.filter Card.full_deck ~f:(fun c ->
+              not (List.exists dealt ~f:(fun cc -> Card.equal c cc)))
+          in
+          let rem_arr = Array.of_list rem in
+          let n_rem = Array.length rem_arr in
+          let children =
+            List.init 10 ~f:(fun _ ->
+              for i = 0 to Int.min 6 (n_rem - 1) do
+                let j = i + Random.int (n_rem - i) in
+                let tmp = rem_arr.(i) in
+                rem_arr.(i) <- rem_arr.(j);
+                rem_arr.(j) <- tmp
+              done;
+              let n_opps = Int.min 10 ((n_rem - 5) / 2) in
+              for i = 5 to Int.min (5 + n_opps * 2 - 1) (n_rem - 1) do
+                let j = i + Random.int (n_rem - i) in
+                let tmp = rem_arr.(i) in
+                rem_arr.(i) <- rem_arr.(j);
+                rem_arr.(j) <- tmp
+              done;
+              let leaves =
+                List.init n_opps ~f:(fun k ->
+                  let o1 = rem_arr.(5 + k * 2) in
+                  let o2 = rem_arr.(5 + k * 2 + 1) in
+                  let cmp = Hand_eval7.compare_hands7
+                      [ h1; h2; rem_arr.(0); rem_arr.(1); rem_arr.(2);
+                        rem_arr.(3); rem_arr.(4) ]
+                      [ o1; o2; rem_arr.(0); rem_arr.(1); rem_arr.(2);
+                        rem_arr.(3); rem_arr.(4) ]
+                  in
+                  let v = match cmp > 0 with
+                    | true -> 1.0
+                    | false -> match cmp = 0 with
+                      | true -> 0.0
+                      | false -> -1.0
+                  in
+                  Tree.leaf
+                    ~label:(Rhode_island.Node_label.Terminal
+                              { winner = None; pot = 0 })
+                    ~value:v)
+              in
+              Tree.node
+                ~label:(Rhode_island.Node_label.Chance
+                          { description = "b" })
+                ~children:leaves)
+          in
+          Tree.node
+            ~label:(Rhode_island.Node_label.Chance
+                      { description = "root" })
+            ~children)
+    in
+    let small_evs = Array.map small_trees ~f:Tree.ev in
+    let assignments, centroids =
+      Abstraction.quantile_bucketing ~n_buckets:!n_buckets small_evs
+    in
+    ({ Abstraction.street = Preflop
+     ; n_buckets = !n_buckets
+     ; assignments
+     ; centroids
+     } : Abstraction.abstraction_partial))
+  in
+  printf "  RBM abstraction built in %.2fs\n%!" deep_rbm_abs_time;
+
+  let (deep_emd_abs, deep_emd_abs_time) = time (fun () ->
+    fast_preflop_abstraction ~n_buckets:!n_buckets ~n_samples:!eq_mc_samples)
+  in
+  printf "  EMD abstraction built in %.2fs\n\n%!" deep_emd_abs_time;
+
+  printf "[3g] Training RBM bot (%d iters, %d buckets, NL 200bb)...\n%!"
+    !deep_mccfr_iters !n_buckets;
+  let ((deep_rbm_p0, deep_rbm_p1), deep_rbm_train_time) = time (fun () ->
+    Cfr_nolimit.train_mccfr ~config:deep_config ~abstraction:deep_rbm_abs
+      ~iterations:!deep_mccfr_iters ~report_every:10_000 ())
+  in
+  printf "  RBM training: %.2fs, P0=%d P1=%d info sets\n%!"
+    deep_rbm_train_time
+    (Hashtbl.length deep_rbm_p0) (Hashtbl.length deep_rbm_p1);
+
+  printf "\n[3h] Training EMD bot (%d iters, %d buckets, NL 200bb)...\n%!"
+    !deep_mccfr_iters !n_buckets;
+  let ((deep_emd_p0, deep_emd_p1), deep_emd_train_time) = time (fun () ->
+    Cfr_nolimit.train_mccfr ~config:deep_config ~abstraction:deep_emd_abs
+      ~iterations:!deep_mccfr_iters ~report_every:10_000 ())
+  in
+  printf "  EMD training: %.2fs, P0=%d P1=%d info sets\n\n%!"
+    deep_emd_train_time
+    (Hashtbl.length deep_emd_p0) (Hashtbl.length deep_emd_p1);
+
+  printf "[3i] Self-play: RBM bot vs EMD bot (%d hands, NL 200bb)...\n%!"
+    !deep_play_hands;
+
+  let deep_rbm_as_p0_profit = ref 0.0 in
+  let deep_rbm_as_p1_profit = ref 0.0 in
+
+  let ((), deep_play_time) = time (fun () ->
+    for _ = 1 to !deep_play_hands do
+      let (p1_cards, p2_cards, board) = sample_deal () in
+      (* RBM as P0 (SB), EMD as P1 (BB) *)
+      let profit_1 = play_nl_hand ~config:deep_config
+          ~p0_strat:deep_rbm_p0 ~p1_strat:deep_emd_p1
+          ~p0_abs:deep_rbm_abs ~p1_abs:deep_emd_abs
+          ~p1_cards ~p2_cards ~board
+      in
+      deep_rbm_as_p0_profit := !deep_rbm_as_p0_profit +. profit_1;
+      (* EMD as P0 (SB), RBM as P1 (BB) *)
+      let profit_2 = play_nl_hand ~config:deep_config
+          ~p0_strat:deep_emd_p0 ~p1_strat:deep_rbm_p1
+          ~p0_abs:deep_emd_abs ~p1_abs:deep_rbm_abs
+          ~p1_cards ~p2_cards ~board
+      in
+      deep_rbm_as_p1_profit := !deep_rbm_as_p1_profit -. profit_2
+    done)
+  in
+
+  let deep_total_rbm_profit =
+    !deep_rbm_as_p0_profit +. !deep_rbm_as_p1_profit
+  in
+  let deep_total_hands = 2 * !deep_play_hands in
+  let deep_avg_bb_per_hand =
+    deep_total_rbm_profit /. Float.of_int deep_total_hands
+      /. Float.of_int deep_config.big_blind
+  in
+
+  printf "  Self-play completed in %.2fs\n\n%!" deep_play_time;
+
+  let deep_winner_str =
+    match Float.( > ) deep_avg_bb_per_hand 0.01 with
+    | true -> "RBM"
+    | false ->
+      match Float.( < ) deep_avg_bb_per_hand (-0.01) with
+      | true -> "EMD"
+      | false -> "DRAW (within noise)"
+  in
+
+  (* ================================================================ *)
+  (* COMBINED FINAL REPORT                                            *)
+  (* ================================================================ *)
+  let t_end = Core_unix.gettimeofday () in
+  let total_time = t_end -. t_start in
+
+  printf "================================================================\n%!";
+  printf "  FINAL REPORT: RBM vs EMD on NL Hold'em (20bb + 200bb)\n%!";
+  printf "================================================================\n\n%!";
+
+  printf "--- 20bb Short-Stack (2,988 nodes, push/fold) ---\n\n%!";
+  printf "Preflop Abstraction Quality (max EV error, lower is better):\n\n%!";
+  printf "  %-5s  %-10s  %-10s  %-10s  %-8s\n%!"
+    "k" "RBM_err" "EMD_err" "EV_err" "Winner";
+  printf "  %s\n%!" (String.make 53 '-');
+
+  List.iter cluster_results ~f:(fun (k, rbm_err, emd_err, ev_err) ->
+    let min_err = Float.min rbm_err (Float.min emd_err ev_err) in
+    let tol = 0.0001 in
+    let winner =
+      match Float.( < ) (Float.abs (rbm_err -. min_err)) tol with
+      | true -> "RBM"
+      | false ->
+        match Float.( < ) (Float.abs (emd_err -. min_err)) tol with
+        | true -> "EMD"
+        | false -> "EV"
+    in
+    printf "  %-5d  %-10.4f  %-10.4f  %-10.4f  %-8s\n%!"
+      k rbm_err emd_err ev_err winner);
+
+  printf "\nMCCFR Head-to-Head (20bb, %d hands): RBM %+.4f bb/hand -> %s\n\n%!"
+    total_hands avg_bb_per_hand winner_str_20bb;
+
+  printf "--- 200bb Deep-Stack (186,174 nodes, post-flop rich) ---\n\n%!";
+  printf "Preflop Abstraction Quality (max EV error, lower is better):\n\n%!";
+  printf "  %-5s  %-10s  %-10s  %-10s  %-8s\n%!"
+    "k" "RBM_err" "EMD_err" "EV_err" "Winner";
+  printf "  %s\n%!" (String.make 53 '-');
+
+  List.iter deep_cluster_results ~f:(fun (k, rbm_err, emd_err, ev_err) ->
+    let min_err = Float.min rbm_err (Float.min emd_err ev_err) in
+    let tol = 0.0001 in
+    let winner =
+      match Float.( < ) (Float.abs (rbm_err -. min_err)) tol with
+      | true -> "RBM"
+      | false ->
+        match Float.( < ) (Float.abs (emd_err -. min_err)) tol with
+        | true -> "EMD"
+        | false -> "EV"
+    in
+    printf "  %-5d  %-10.4f  %-10.4f  %-10.4f  %-8s\n%!"
+      k rbm_err emd_err ev_err winner);
+
+  printf "\nMCCFR Head-to-Head (200bb, %d hands): RBM %+.4f bb/hand -> %s\n%!"
+    deep_total_hands deep_avg_bb_per_hand deep_winner_str;
+  printf "  RBM as P0: %+.1f (%.4f bb/hand)\n%!"
+    !deep_rbm_as_p0_profit
+    (!deep_rbm_as_p0_profit /. Float.of_int !deep_play_hands
+     /. Float.of_int deep_config.big_blind);
+  printf "  RBM as P1: %+.1f (%.4f bb/hand)\n%!"
+    !deep_rbm_as_p1_profit
+    (!deep_rbm_as_p1_profit /. Float.of_int !deep_play_hands
+     /. Float.of_int deep_config.big_blind);
+  printf "  P0 info sets: RBM=%d EMD=%d\n%!"
+    (Hashtbl.length deep_rbm_p0) (Hashtbl.length deep_emd_p0);
+  printf "  P1 info sets: RBM=%d EMD=%d\n\n%!"
+    (Hashtbl.length deep_rbm_p1) (Hashtbl.length deep_emd_p1);
+
+  printf "--- Comparison: Structural advantage vs stack depth ---\n\n%!";
+  printf "  %-8s  %-12s  %-20s  %-15s\n%!"
+    "Depth" "Abstraction" "Head-to-Head" "Hypothesis";
+  printf "  %s\n%!" (String.make 65 '-');
+  printf "  %-8s  %-12s  %-20s  %-15s\n%!"
+    "20bb" (sprintf "RBM %d-%d" !rbm_wins !emd_wins)
+    (sprintf "%-6s %+.2f bb/h" winner_str_20bb avg_bb_per_hand)
+    "push/fold";
+  printf "  %-8s  %-12s  %-20s  %-15s\n%!"
+    "200bb" (sprintf "RBM %d-%d" !deep_rbm_wins !deep_emd_wins)
+    (sprintf "%-6s %+.2f bb/h" deep_winner_str deep_avg_bb_per_hand)
+    "deep-stack";
 
   printf "\nTiming:\n%!";
-  printf "  IS tree construction:  %.2fs\n%!" tree_time;
-  printf "  RBM distance matrix:   %.2fs\n%!" rbm_time;
-  printf "  EMD distributions:     %.2fs\n%!" emd_hist_time;
-  printf "  RBM MCCFR training:    %.2fs\n%!" rbm_train_time;
-  printf "  EMD MCCFR training:    %.2fs\n%!" emd_train_time;
-  printf "  Self-play:             %.2fs\n%!" play_time;
+  printf "  20bb IS trees:         %.2fs\n%!" tree_time;
+  printf "  20bb RBM distances:    %.2fs\n%!" rbm_time;
+  printf "  20bb MCCFR (RBM+EMD):  %.2fs\n%!" (rbm_train_time +. emd_train_time);
+  printf "  20bb self-play:        %.2fs\n%!" play_time;
+  printf "  200bb IS trees:        %.2fs\n%!" deep_tree_time;
+  printf "  200bb RBM distances:   %.2fs\n%!" deep_rbm_time;
+  printf "  200bb MCCFR (RBM+EMD): %.2fs\n%!" (deep_rbm_train_time +. deep_emd_train_time);
+  printf "  200bb self-play:       %.2fs\n%!" deep_play_time;
   printf "  Total wall time:       %.2fs\n\n%!" total_time;
 
   printf "================================================================\n%!";
-  printf "  NL Hold'em 20bb HU: only 2,988 nodes (smaller than limit!)\n%!";
+  printf "  NL Hold'em: 20bb (2,988 nodes) vs 200bb (186,174 nodes)\n%!";
   printf "  RBM captures game-tree structure; EMD sees only equity.\n%!";
+  printf "  Deeper stacks = more decisions = more structural variation.\n%!";
   printf "================================================================\n%!"

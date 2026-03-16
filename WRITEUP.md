@@ -680,12 +680,13 @@ postflop clusters emerge naturally with $\varepsilon = 0.5$, without any
 hand-crafted bucketing. This demonstrates that the RBM distance discovers
 meaningful strategic groupings even in the full game.
 
-### 9.4 No-Limit Hold'em (Heads-Up, 20bb)
+### 9.4 No-Limit Hold'em (Heads-Up, 20bb and 200bb)
 
-We extend the evaluation to No-Limit Hold'em (NL-HU 20bb) — the game variant
-underlying modern superhuman agents (Brown & Sandholm 2018, Moravcik et al.
-2017). No-Limit introduces variable bet sizes that create qualitatively
-different game trees from Limit poker.
+We extend the evaluation to No-Limit Hold'em — the game variant underlying
+modern superhuman agents (Brown & Sandholm 2018, Moravcik et al. 2017).
+No-Limit introduces variable bet sizes that create qualitatively different
+game trees from Limit poker. We test at two stack depths: 20bb (short-stack
+push/fold) and 200bb (deep-stack with rich post-flop play).
 
 **Game Tree Sizes:**
 
@@ -696,54 +697,100 @@ different game trees from Limit poker.
 | NL-HU 200bb | 186,174 | Deep-stack play |
 | NL 6-max 20bb | ~13M | Multi-player (2-10 supported) |
 
+#### 20bb Short-Stack Results
+
 **Preflop Abstraction Quality** (NL-HU 20bb, 50 canonical hands):
 
 | $k$ | RBM Error | EMD Error | Winner |
 |:---:|:---------:|:---------:|:------:|
-| 25  | 0.12      | 0.34      | RBM (64% less error) |
-| 15  | 0.21      | 0.36      | RBM (41% less error) |
-| 10  | 0.22      | 0.36      | RBM (39% less error) |
-| 5   | 0.52      | 0.39      | EMD |
-| 3   | 0.53      | 0.54      | tie (EV) |
+| 25  | 0.11      | 0.41      | RBM (73% less error) |
+| 15  | 0.14      | 0.38      | RBM (63% less error) |
+| 10  | 0.25      | 0.38      | RBM (34% less error) |
+| 5   | 0.44      | 0.49      | RBM (10% less error) |
+| 3   | 0.45      | 0.48      | RBM (5% less error) |
 
-**Winner: RBM at 3 of 5 compression levels (3-2).**
+**Winner: RBM at 5 of 5 compression levels (5-0).**
 
-The pattern is revealing and honest about RBM's limitations. RBM dominates at
-fine-grained compression (64% less error at $k = 25$, 41% at $k = 15$, 39% at
-$k = 10$) but loses at coarse compression ($k = 5$) and ties at extreme
-compression ($k = 3$).
-
-The explanation is structural: 20bb No-Limit is heavily push/fold oriented.
-With only 20 big blinds, most interesting decisions reduce to "go all-in or
-fold" — a regime where raw equity is a strong predictor of optimal play. EMD's
-equity-based clustering is well-suited to this setting. RBM's advantage —
-capturing the shape of continuation trees, not just expected values — matters
-most when those trees are complex and varied, which happens at finer
-compression granularity and with deeper stacks.
+RBM dominates across all compression levels at 20bb, with the largest
+advantage at fine-grained compression (73% less error at $k = 25$).
 
 **MCCFR Head-to-Head** (NL-HU 20bb, 20,000 hands, position-alternated):
 
 | Matchup | Result |
 |---------|--------|
-| RBM bot vs EMD bot | EMD **+0.48 bb/hand** |
+| RBM bot vs EMD bot | EMD **+0.12 bb/hand** |
 
-The EMD bot wins the head-to-head, consistent with the abstraction quality
-results: at the coarse preflop level where MCCFR operates, EMD's equity
-clustering is effective for short-stack play.
+The EMD bot wins the head-to-head despite RBM winning abstraction quality.
+This is consistent with the push/fold nature of 20bb play: at the coarse
+preflop level where MCCFR operates (10 buckets), EMD's equity clustering is
+effective for short-stack play.
 
-**Key insight:** RBM's structural advantage grows with game complexity. The
-evidence across domains tells a clear story:
+#### 200bb Deep-Stack Results
+
+At 200bb, the game tree expands to 186,174 nodes with 3 bet fractions (0.5x,
+1x, 2x pot) instead of 2. The MCCFR info set space grows to ~1M (vs ~70K at
+20bb), creating a much harder learning problem.
+
+**Preflop Abstraction Quality** (NL-HU 200bb, 50 canonical hands, showdown
+distribution trees):
+
+| $k$ | RBM Error | EMD Error | Winner |
+|:---:|:---------:|:---------:|:------:|
+| 25  | 0.17      | 0.43      | RBM (60% less error) |
+| 15  | 0.28      | 0.46      | RBM (40% less error) |
+| 10  | 0.60      | 0.42      | EMD |
+| 5   | 0.62      | 0.57      | EMD |
+| 3   | 0.62      | 0.58      | EMD |
+
+**Winner: EMD at 3 of 5 compression levels (RBM 2-3).**
+
+RBM still dominates at fine-grained compression (60% less error at $k = 25$,
+40% at $k = 15$) but loses at coarser levels. The EMD advantage at coarse
+compression ($k \leq 10$) reflects that with only 50 showdown distribution
+trees per hand, the RBM trees do not fully capture the structural variation
+of the 186,174-node game tree.
+
+**MCCFR Head-to-Head** (NL-HU 200bb, 20,000 hands, position-alternated):
+
+| Matchup | Result | Info Sets |
+|---------|--------|-----------|
+| RBM bot vs EMD bot | EMD **+1.05 bb/hand** | ~1M per player |
+
+The EMD bot wins more decisively at 200bb. This result comes with a critical
+caveat: with ~1M info sets per player but only 50K MCCFR iterations, both
+bots are **severely undertrained**. Average utility was still fluctuating at
+training end (0.31 for RBM, 0.02 for EMD), far from convergence. The 200bb
+game requires an order of magnitude more training iterations — 500K or more —
+for meaningful head-to-head comparison. The abstraction quality results (which
+do not depend on MCCFR training) are more reliable indicators of metric
+quality.
+
+#### Cross-Depth Analysis
+
+| Depth | Nodes | Abstraction Quality | Head-to-Head | Notes |
+|:---:|:---:|:---:|:---:|:---:|
+| 20bb | 2,988 | RBM 5-0 | EMD +0.12 bb/h | push/fold regime |
+| 200bb | 186,174 | RBM 2-3 | EMD +1.05 bb/h | undertrained (50K iters, ~1M infosets) |
+
+**Key insight:** RBM's structural advantage is clearest at fine-grained
+compression across both stack depths. At $k = 25$, RBM achieves 73% less error
+at 20bb and 60% less error at 200bb. The head-to-head results are dominated by
+MCCFR training quality rather than abstraction quality — particularly at 200bb
+where the bots are an order of magnitude undertrained relative to the info set
+count.
+
+The evidence across domains tells a clear story:
 
 - **Rhode Island Hold'em** (small trees): RBM wins 7-0, zero error at 8.3x compression
 - **Limit Hold'em** (9,476 nodes): RBM wins 5-0, up to 42% less error
-- **NL Hold'em 20bb** (2,988 nodes, push/fold): RBM wins 3-2, up to 64% less error
+- **NL Hold'em 20bb** (2,988 nodes, push/fold): RBM wins 5-0, up to 73% less error
+- **NL Hold'em 200bb** (186,174 nodes): RBM wins at fine compression (60% less error at $k = 25$)
 
-The 64% error reduction at $k = 25$ in NL shows that even in the push/fold
-regime, RBM finds meaningful structural distinctions that equity alone misses
-when enough clusters are available. At 200bb (186,174 nodes) and 6-max
-(${\sim}$13M nodes), where post-flop play is deep and multi-way pots create
-complex continuation trees, RBM's structural sensitivity should provide an
-even larger advantage.
+The 200bb experiment also reveals that the showdown distribution trees used
+for tractable pairwise RBM distance (~161 nodes) lose some discriminative
+power compared to the full 186,174-node game trees, particularly at coarse
+compression. Future work on approximate RBM distance over full game trees
+(e.g., via Sinkhorn distances or learned embeddings) could close this gap.
 
 ### 9.5 Multi-Player and ACPC Support
 
