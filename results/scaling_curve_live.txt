@@ -99,3 +99,61 @@
   [EMD] Trained in 77.7s. P0=1.2M P1=1.7M info sets
   [EMD] Strategy saved to results/strategies/strat_emd_100k.sexp
   [EMD] Playing 200 hands vs Slumbot...
+  [EMD] 100,000 iters: 0.46 bb/hand (+9275 chips in 21.2s)
+  [EMD] Training 200,000 iterations...
+  [MCCFR-NL] iter 25000/200000  avg_util=2.2221  infosets=(545062, 821962)
+  [MCCFR-NL] iter 50000/200000  avg_util=12.6029  infosets=(836056, 1226915)
+  [MCCFR-NL] iter 75000/200000  avg_util=14.6934  infosets=(1061612, 1533753)
+  [MCCFR-NL] iter 100000/200000  avg_util=7.1337  infosets=(1239924, 1767187)
+  [MCCFR-NL] iter 125000/200000  avg_util=4.9217  infosets=(1390684, 1958499)
+  [MCCFR-NL] iter 150000/200000  avg_util=-1.5538  infosets=(1521046, 2122506)
+  [MCCFR-NL] iter 175000/200000  avg_util=-2.2081  infosets=(1645001, 2276011)
+  [MCCFR-NL] iter 200000/200000  avg_util=-1.9429  infosets=(1762721, 2422509)
+  [EMD] Trained in 136.2s. P0=1.8M P1=2.4M info sets
+  [EMD] Strategy saved to results/strategies/strat_emd_200k.sexp
+  [EMD] Playing 200 hands vs Slumbot...
+  [EMD] 200,000 iters: -0.25 bb/hand (-5000 chips in 20.3s)
+
+================================================================
+  FINAL RESULTS
+================================================================
+
+=== RBM Training Scaling Curve vs Slumbot ===
+
+  Iterations    Info Sets   Train Time  bb/hand vs Slumbot  Improvement
+  -------------------------------------------------------------------------
+  10,000        782K        11s         +3.87               baseline   
+  25,000        1.6M        27s         -3.89               1.0x       
+  50,000        2.2M        47s         -0.96               4.1x       
+  100,000       3.2M        1.4m        -2.45               1.6x       
+  200,000       4.4M        2.4m        -1.07               3.6x       
+
+=== EMD Training Scaling Curve vs Slumbot ===
+
+  Iterations    Info Sets   Train Time  bb/hand vs Slumbot  Improvement
+  -------------------------------------------------------------------------
+  10,000        780K        11s         -7.05               baseline   
+  25,000        1.4M        25s         -1.38               5.1x       
+  50,000        2.1M        46s         -0.87               8.1x       
+  100,000       2.9M        1.3m        +0.46               15.2x      
+  200,000       4.2M        2.3m        -0.25               28.2x      
+
+=== RBM vs EMD Abstraction Comparison ===
+
+  Iterations    RBM bb/hand   EMD bb/hand   Winner  
+  --------------------------------------------------------
+  10,000        +3.87         -7.05         RBM     
+  25,000        -3.89         -1.38         EMD     
+  50,000        -0.96         -0.87         EMD     
+  100,000       -2.45         +0.46         EMD     
+  200,000       -1.07         -0.25         EMD     
+  --------------------------------------------------------
+  Average       -0.90         -1.82         RBM     
+
+  Score: RBM=1 EMD=4 (of 5 checkpoints)
+
+  Total wall time: 861.4s
+  Abstraction overhead: RBM=0.3s EMD=6.5s
+
+================================================================
+[results] Saved to results/scaling_curve.txt
