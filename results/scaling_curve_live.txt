@@ -1,0 +1,101 @@
+================================================================
+  Scaling Curve Experiment: MCCFR vs Slumbot
+================================================================
+
+  Mode:             LIVE (slumbot.com)
+  Buckets:          10
+  Checkpoints:      10,000, 25,000, 50,000, 100,000, 200,000
+  Hands/checkpoint: 200
+  Game:             HUNL 50/100 blinds, 20000 stack (200bb)
+  Bet fractions:    0.5x, 1.0x, 2.0x pot
+  Abstractions:     RBM (showdown tree) vs EMD (equity quantile)
+
+[1/4] Building 10-bucket RBM abstraction (showdown distribution trees)...
+  RBM abstraction built in 0.31s
+[2/4] Building 10-bucket EMD abstraction (equity quantile)...
+  EMD abstraction built in 6.50s
+
+  Bucket assignments for key hands:
+  Hand    RBM    EMD  
+  --------------------
+  AA      9      9    
+  KK      9      9    
+  AKs     8      9    
+  QJs     5      8    
+  TT      9      9    
+  55      9      8    
+  72o     1      0    
+
+[3/4] Running RBM scaling curve...
+
+[RBM] Running scaling curve: 5 checkpoints, 200 hands each
+  [RBM] Training 10,000 iterations...
+  [RBM] Trained in 11.1s. P0=302K P1=479K info sets
+  [RBM] Strategy saved to results/strategies/strat_rbm_10k.sexp
+  [RBM] Playing 200 hands vs Slumbot...
+  [RBM] 10,000 iters: 3.87 bb/hand (+77475 chips in 22.9s)
+  [RBM] Training 25,000 iterations...
+  [MCCFR-NL] iter 25000/25000  avg_util=-5.1134  infosets=(619523, 945399)
+  [RBM] Trained in 27.2s. P0=620K P1=945K info sets
+  [RBM] Strategy saved to results/strategies/strat_rbm_25k.sexp
+  [RBM] Playing 200 hands vs Slumbot...
+  [RBM] 25,000 iters: -3.89 bb/hand (-77875 chips in 20.8s)
+  [RBM] Training 50,000 iterations...
+  [MCCFR-NL] iter 25000/50000  avg_util=3.8423  infosets=(593456, 899914)
+  [MCCFR-NL] iter 50000/50000  avg_util=25.4868  infosets=(893709, 1321877)
+  [RBM] Trained in 46.7s. P0=894K P1=1.3M info sets
+  [RBM] Strategy saved to results/strategies/strat_rbm_50k.sexp
+  [RBM] Playing 200 hands vs Slumbot...
+  [RBM] 50,000 iters: -0.96 bb/hand (-19110 chips in 20.6s)
+  [RBM] Training 100,000 iterations...
+  [MCCFR-NL] iter 25000/100000  avg_util=-28.6574  infosets=(578474, 873775)
+  [MCCFR-NL] iter 50000/100000  avg_util=-14.3449  infosets=(880149, 1297482)
+  [MCCFR-NL] iter 75000/100000  avg_util=-27.0181  infosets=(1099658, 1606183)
+  [MCCFR-NL] iter 100000/100000  avg_util=-12.6716  infosets=(1297427, 1872787)
+  [RBM] Trained in 83.7s. P0=1.3M P1=1.9M info sets
+  [RBM] Strategy saved to results/strategies/strat_rbm_100k.sexp
+  [RBM] Playing 200 hands vs Slumbot...
+  [RBM] 100,000 iters: -2.45 bb/hand (-48975 chips in 19.8s)
+  [RBM] Training 200,000 iterations...
+  [MCCFR-NL] iter 25000/200000  avg_util=-52.2953  infosets=(582925, 884083)
+  [MCCFR-NL] iter 50000/200000  avg_util=-27.3560  infosets=(876367, 1289225)
+  [MCCFR-NL] iter 75000/200000  avg_util=-41.6768  infosets=(1103106, 1595560)
+  [MCCFR-NL] iter 100000/200000  avg_util=-26.2958  infosets=(1275210, 1831791)
+  [MCCFR-NL] iter 125000/200000  avg_util=-11.2480  infosets=(1442594, 2050668)
+  [MCCFR-NL] iter 150000/200000  avg_util=-5.6762  infosets=(1584122, 2241211)
+  [MCCFR-NL] iter 175000/200000  avg_util=-5.7774  infosets=(1710536, 2402012)
+  [MCCFR-NL] iter 200000/200000  avg_util=0.2902  infosets=(1819665, 2541574)
+  [RBM] Trained in 142.5s. P0=1.8M P1=2.5M info sets
+  [RBM] Strategy saved to results/strategies/strat_rbm_200k.sexp
+  [RBM] Playing 200 hands vs Slumbot...
+  [RBM] 200,000 iters: -1.07 bb/hand (-21475 chips in 20.4s)
+
+[4/4] Running EMD scaling curve...
+
+[EMD] Running scaling curve: 5 checkpoints, 200 hands each
+  [EMD] Training 10,000 iterations...
+  [EMD] Trained in 11.5s. P0=306K P1=474K info sets
+  [EMD] Strategy saved to results/strategies/strat_emd_10k.sexp
+  [EMD] Playing 200 hands vs Slumbot...
+  [EMD] 10,000 iters: -7.05 bb/hand (-141050 chips in 21.1s)
+  [EMD] Training 25,000 iterations...
+  [MCCFR-NL] iter 25000/25000  avg_util=-2.1486  infosets=(568041, 855547)
+  [EMD] Trained in 24.9s. P0=568K P1=856K info sets
+  [EMD] Strategy saved to results/strategies/strat_emd_25k.sexp
+  [EMD] Playing 200 hands vs Slumbot...
+  [EMD] 25,000 iters: -1.38 bb/hand (-27550 chips in 21.6s)
+  [EMD] Training 50,000 iterations...
+  [MCCFR-NL] iter 25000/50000  avg_util=25.0016  infosets=(587495, 898846)
+  [MCCFR-NL] iter 50000/50000  avg_util=-11.4257  infosets=(863672, 1274049)
+  [EMD] Trained in 45.5s. P0=864K P1=1.3M info sets
+  [EMD] Strategy saved to results/strategies/strat_emd_50k.sexp
+  [EMD] Playing 200 hands vs Slumbot...
+  [EMD] 50,000 iters: -0.87 bb/hand (-17363 chips in 21.0s)
+  [EMD] Training 100,000 iterations...
+  [MCCFR-NL] iter 25000/100000  avg_util=-11.6771  infosets=(574227, 865565)
+  [MCCFR-NL] iter 50000/100000  avg_util=-23.4938  infosets=(833689, 1221290)
+  [MCCFR-NL] iter 75000/100000  avg_util=-14.7074  infosets=(1040597, 1496476)
+  [MCCFR-NL] iter 100000/100000  avg_util=-11.1026  infosets=(1211756, 1725479)
+  [EMD] Trained in 77.7s. P0=1.2M P1=1.7M info sets
+  [EMD] Strategy saved to results/strategies/strat_emd_100k.sexp
+  [EMD] Playing 200 hands vs Slumbot...
