@@ -15,18 +15,44 @@ let time f =
   let t1 = Core_unix.gettimeofday () in
   (result, t1 -. t0)
 
-(** Serialize a strategy pair to file using Marshal. *)
+(** Serialize a strategy table to a list of sexp lines. *)
+let strategy_to_sexp (strat : Cfr_abstract.strategy) : Sexp.t =
+  let entries =
+    Hashtbl.fold strat ~init:[] ~f:(fun ~key ~data acc ->
+      let probs = List.map (Array.to_list data) ~f:(fun f -> Sexp.Atom (Float.to_string f)) in
+      Sexp.List [ Sexp.Atom key; Sexp.List probs ] :: acc)
+  in
+  Sexp.List entries
+
+let strategy_of_sexp (sexp : Sexp.t) : Cfr_abstract.strategy =
+  let table = Hashtbl.Poly.create () in
+  (match sexp with
+   | Sexp.List entries ->
+     List.iter entries ~f:(fun entry ->
+       match entry with
+       | Sexp.List [ Sexp.Atom key; Sexp.List probs ] ->
+         let arr = Array.of_list
+           (List.map probs ~f:(fun p ->
+              match p with
+              | Sexp.Atom s -> Float.of_string s
+              | _ -> failwith "strategy_of_sexp: expected float")) in
+         Hashtbl.set table ~key ~data:arr
+       | _ -> failwith "strategy_of_sexp: malformed entry")
+   | _ -> failwith "strategy_of_sexp: expected list");
+  table
+
+(** Serialize a strategy pair to file. *)
 let save_strategy ~filename (p0 : Cfr_abstract.strategy) (p1 : Cfr_abstract.strategy) =
-  let oc = Out_channel.create filename in
-  Marshal.to_channel oc (p0, p1) [ Marshal.Closures ];
-  Out_channel.close oc
+  let sexp = Sexp.List [ strategy_to_sexp p0; strategy_to_sexp p1 ] in
+  Out_channel.write_all filename ~data:(Sexp.to_string sexp)
 
 (** Deserialize a strategy pair from file. *)
 let load_strategy ~filename : Cfr_abstract.strategy * Cfr_abstract.strategy =
-  let ic = In_channel.create filename in
-  let result = Marshal.from_channel ic in
-  In_channel.close ic;
-  result
+  let sexp = Sexp.load_sexp filename in
+  match sexp with
+  | Sexp.List [ p0_sexp; p1_sexp ] ->
+    (strategy_of_sexp p0_sexp, strategy_of_sexp p1_sexp)
+  | _ -> failwith "load_strategy: expected pair of tables"
 
 (** Run the bot in stdin/stdout mode.
 
@@ -112,7 +138,11 @@ let () =
 
   let config = Limit_holdem.standard_config in
 
-  let preflop_abs = Abstraction.abstract_preflop_equity ~n_buckets:!n_buckets in
+  eprintf "[bot] Building %d-bucket preflop abstraction...\n%!" !n_buckets;
+  let (preflop_abs, abs_wall) = time (fun () ->
+    Abstraction.abstract_preflop_equity ~n_buckets:!n_buckets)
+  in
+  eprintf "[bot] Abstraction built in %.2fs\n%!" abs_wall;
 
   let (p0_strat, p1_strat) =
     match String.length !strategy_file > 0 with

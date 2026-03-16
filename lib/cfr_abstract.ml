@@ -265,8 +265,9 @@ let create_postflop_state () =
 
 (** Find the nearest cluster for a tree among the existing clusters for
     a given street.  Uses EV pre-filtering: skip any cluster whose
-    |EV difference| > epsilon.  Returns [(cluster_index, distance)] or
-    [None] if no clusters exist. *)
+    |EV difference| > epsilon.  Uses progressive distance computation
+    (depth 2 -> 4 -> full) with early-out to keep comparisons fast.
+    Returns [(cluster_index, distance)] or [None] if no clusters exist. *)
 let find_nearest_postflop_cluster ~epsilon ~distance_config clusters tree =
   match clusters with
   | [] -> None
@@ -282,9 +283,11 @@ let find_nearest_postflop_cluster ~epsilon ~distance_config clusters tree =
             match Float.( >= ) ev_diff best_d with
             | true -> (best_i, best_d)
             | false ->
-              let d =
-                Distance.compute_with_config ~config:distance_config
-                  tree oc.representative
+              (* Use progressive distance: cheap depth-2 first, then deeper
+                 only if the shallow lower bound is within epsilon *)
+              let (d, _depth) =
+                Distance.compute_progressive ~config:distance_config
+                  ~threshold:epsilon tree oc.representative
               in
               match Float.( < ) d best_d with
               | true -> (i, d)
@@ -314,18 +317,14 @@ let compute_bucket_rbm_postflop
     | 2 -> List.take board 4
     | _ -> board
   in
-  (* Estimate pot at this street: blinds + small_bet rounds for prior streets *)
-  let pot_so_far =
-    let base = game_config.small_blind + game_config.big_blind in
-    match round_idx with
-    | 1 -> base + 2 * game_config.small_bet     (* after preflop call *)
-    | 2 -> base + 4 * game_config.small_bet      (* after flop call *)
-    | _ -> base + 4 * game_config.small_bet + 2 * game_config.big_bet
-  in
-  (* Build information set tree for this hand + visible board *)
+  (* Build a compact showdown distribution tree for this hand + visible board.
+     Uses sampled opponent hands + board completions to create a small tree
+     (~12 nodes) capturing the hand's strategic strength distribution.
+     5 opponents x 2 board completions = 10 showdown evaluations per call. *)
   let is_tree =
-    Limit_holdem.information_set_tree ~max_opponents:30 ~config:game_config
-      ~player ~hole_cards ~board_visible ~round_idx ~pot_so_far ()
+    Limit_holdem.showdown_distribution_tree ~max_opponents:5
+      ~max_board_samples:2 ~config:game_config
+      ~player ~hole_cards ~board_visible ()
   in
   (* Get or create the cluster list for this street *)
   let clusters_ref =

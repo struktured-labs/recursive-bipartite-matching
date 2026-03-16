@@ -1,6 +1,6 @@
 (executables
- (names main self_play compare cfr_demo scale_experiment phase1 phase2 test_holdem test_equity train_bot acpc_bot bot_vs_bot test_acpc play tournament)
- (public_names rbm-demo rbm-self-play rbm-compare rbm-cfr-demo rbm-scale-experiment rbm-phase1 rbm-phase2 rbm-test-holdem rbm-test-equity rbm-train-bot rbm-acpc-bot rbm-bot-vs-bot rbm-test-acpc rbm-play rbm-tournament)
+ (names main self_play compare cfr_demo scale_experiment phase1 phase2 test_holdem test_equity train_bot acpc_bot bot_vs_bot test_acpc play tournament bench_is holdem_compare)
+ (public_names rbm-demo rbm-self-play rbm-compare rbm-cfr-demo rbm-scale-experiment rbm-phase1 rbm-phase2 rbm-test-holdem rbm-test-equity rbm-train-bot rbm-acpc-bot rbm-bot-vs-bot rbm-test-acpc rbm-play rbm-tournament rbm-bench-is rbm-holdem-compare)
  (libraries core core_unix rbm)
  (preprocess (pps ppx_jane))
  (flags :standard -open Core))

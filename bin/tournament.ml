@@ -42,18 +42,98 @@ let sample_deal () =
   (p1, p2, board)
 
 (* ------------------------------------------------------------------ *)
-(* Bot type: a strategy is just a function from info-key to probs      *)
+(* Fast preflop equities (tournament-optimised)                        *)
+(* ------------------------------------------------------------------ *)
+
+(** Fast Monte Carlo preflop equity for a single canonical hand.
+    Uses [n_samples] random boards + opponents (much faster than the
+    library's 50K-sample version; 5K is sufficient for bucketing). *)
+let fast_equity_for_canonical ~n_samples (hand : Equity.canonical_hand) : float =
+  let hole_cards =
+    match Card.Rank.equal hand.rank1 hand.rank2 with
+    | true ->
+      ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
+       { Card.rank = hand.rank2; suit = Card.Suit.Spades })
+    | false ->
+      match hand.suited with
+      | true ->
+        ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
+         { Card.rank = hand.rank2; suit = Card.Suit.Hearts })
+      | false ->
+        ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
+         { Card.rank = hand.rank2; suit = Card.Suit.Diamonds })
+  in
+  let (h1, h2) = hole_cards in
+  let dealt = [ h1; h2 ] in
+  let remaining =
+    List.filter Card.full_deck ~f:(fun c ->
+      not (List.exists dealt ~f:(fun cc -> Card.equal c cc)))
+  in
+  let remaining_arr = Array.of_list remaining in
+  let wins = ref 0.0 in
+  let total = ref 0 in
+  for _ = 1 to n_samples do
+    shuffle_array remaining_arr;
+    (* 5 board cards + 2 opponent cards = 7 cards needed *)
+    let b0 = remaining_arr.(0) in
+    let b1 = remaining_arr.(1) in
+    let b2 = remaining_arr.(2) in
+    let b3 = remaining_arr.(3) in
+    let b4 = remaining_arr.(4) in
+    let o1 = remaining_arr.(5) in
+    let o2 = remaining_arr.(6) in
+    let hand1 = [ h1; h2; b0; b1; b2; b3; b4 ] in
+    let hand2 = [ o1; o2; b0; b1; b2; b3; b4 ] in
+    let cmp = Hand_eval7.compare_hands7 hand1 hand2 in
+    Int.incr total;
+    (match cmp > 0 with
+     | true -> wins := !wins +. 1.0
+     | false ->
+       match cmp = 0 with
+       | true -> wins := !wins +. 0.5
+       | false -> ())
+  done;
+  (match !total with
+   | 0 -> 0.5
+   | n -> !wins /. Float.of_int n)
+
+(** Compute preflop equities once with fast MC and cache them. *)
+let cached_preflop_equities : float array Lazy.t =
+  lazy (
+    printf "Computing preflop equities (fast MC, cached)...\n%!";
+    let n_hands = List.length Equity.all_canonical_hands in
+    let (equities, wall) = time (fun () ->
+      let eq = Array.create ~len:n_hands 0.0 in
+      List.iter Equity.all_canonical_hands ~f:(fun hand ->
+        eq.(hand.id) <- fast_equity_for_canonical ~n_samples:5_000 hand);
+      eq)
+    in
+    printf "  Preflop equities computed in %.1fs (%d canonical hands)\n%!"
+      wall n_hands;
+    equities
+  )
+
+(** Build a preflop abstraction from cached equities. *)
+let cached_abstract_preflop ~n_buckets : Abstraction.abstraction_partial =
+  let equities = Lazy.force cached_preflop_equities in
+  let assignments, centroids =
+    Abstraction.quantile_bucketing ~n_buckets equities
+  in
+  { street = Preflop; n_buckets; assignments; centroids }
+
+(* ------------------------------------------------------------------ *)
+(* Bot type                                                            *)
 (* ------------------------------------------------------------------ *)
 
 (** A bot is a named entity that can produce action probabilities
     given an info-set key and number of available actions. *)
 type bot = {
   name : string;
-  (** Return action probabilities for [num_actions] actions at [key]. *)
-  get_probs : key:Cfr_abstract.info_key -> num_actions:int -> float array;
-  (** The abstraction used for bucket computation.  Baseline bots
-      still need one to form info-set keys for the opponent lookup;
-      we give them a trivial 1-bucket abstraction. *)
+  (** Return action probabilities for [num_actions] actions at [key].
+      The [facing_bet] flag disambiguates the 2-action case. *)
+  get_probs : key:Cfr_abstract.info_key -> num_actions:int
+    -> facing_bet:bool -> float array;
+  (** The abstraction used for bucket computation. *)
   abstraction : Abstraction.abstraction_partial;
 }
 
@@ -64,7 +144,7 @@ type bot = {
 let make_mccfr_bot ~config ~n_buckets ~iterations : bot =
   let name = sprintf "%d-bucket" n_buckets in
   printf "Training %s bot (%d iterations)...\n%!" name iterations;
-  let abstraction = Abstraction.abstract_preflop_equity ~n_buckets in
+  let abstraction = cached_abstract_preflop ~n_buckets in
   let ((p0_strat, p1_strat), wall) = time (fun () ->
     Cfr_abstract.train_mccfr ~config ~abstraction
       ~iterations ~report_every:25_000 ())
@@ -72,7 +152,7 @@ let make_mccfr_bot ~config ~n_buckets ~iterations : bot =
   printf "  %s trained in %.1fs  (P0 infosets=%d, P1 infosets=%d)\n%!"
     name wall (Hashtbl.length p0_strat) (Hashtbl.length p1_strat);
   (* Merge both positional strategies into a single lookup.
-     During play, the bot may sit in either seat. The info-key
+     During play, the bot may sit in either seat.  The info-key
      encodes the bucket + history which already disambiguates
      position, so merging is safe. *)
   let merged = Hashtbl.Poly.create () in
@@ -83,7 +163,7 @@ let make_mccfr_bot ~config ~n_buckets ~iterations : bot =
     | true -> ()  (* keep p0's version for shared keys *)
     | false -> Hashtbl.set merged ~key ~data);
   { name
-  ; get_probs = (fun ~key ~num_actions ->
+  ; get_probs = (fun ~key ~num_actions ~facing_bet:_ ->
       match Hashtbl.find merged key with
       | Some p ->
         (match Array.length p = num_actions with
@@ -99,74 +179,43 @@ let make_mccfr_bot ~config ~n_buckets ~iterations : bot =
 (* Baseline bots                                                       *)
 (* ------------------------------------------------------------------ *)
 
-let baseline_abstraction =
-  Abstraction.abstract_preflop_equity ~n_buckets:1
+(** Trivial 1-bucket abstraction for baselines.  Since baseline bots
+    ignore their info-key, the actual bucket assignment is irrelevant.
+    We build a minimal abstraction that maps every hand to bucket 0. *)
+let make_trivial_abstraction () : Abstraction.abstraction_partial =
+  let assignments = Hashtbl.Poly.create () in
+  (* Map all 169 canonical hand ids to bucket 0 *)
+  List.iter Equity.all_canonical_hands ~f:(fun (hand : Equity.canonical_hand) ->
+    Hashtbl.set assignments ~key:hand.id ~data:0);
+  { street = Preflop
+  ; n_buckets = 1
+  ; assignments
+  ; centroids = [| 0.5 |]
+  }
 
 let make_random_bot () : bot =
   { name = "random"
-  ; get_probs = (fun ~key:_ ~num_actions ->
+  ; get_probs = (fun ~key:_ ~num_actions ~facing_bet:_ ->
       Array.create ~len:num_actions (1.0 /. Float.of_int num_actions))
-  ; abstraction = baseline_abstraction
+  ; abstraction = make_trivial_abstraction ()
   }
 
 (** Always-call bot: never folds, never raises, always calls or checks.
-    When facing a bet (actions = fold/call or fold/call/raise),
-    always picks call (index 1).
-    When no bet outstanding (actions = check or check/bet),
-    always picks check (index 0). *)
+    When facing a bet: picks call.
+    When not facing a bet: picks check. *)
 let make_always_call_bot () : bot =
   { name = "always-call"
-  ; get_probs = (fun ~key:_ ~num_actions ->
-      (* We encode the policy as a probability distribution.
-         The key insight: when bet_outstanding=true, action 0 = fold,
-         1 = call, 2 = raise.  We want all mass on call.
-         When bet_outstanding=false, action 0 = check, 1 = bet.
-         We want all mass on check.
-
-         Since we cannot tell which situation from num_actions alone
-         (2 actions could be fold/call OR check/bet), we look at the key.
-         If the key's last action before '|' was a bet/raise character,
-         then there's a bet outstanding.  But simpler: for the always-call
-         bot, we always pick action 0 when num_actions <= 2 with no bet
-         outstanding, action 1 when facing a bet.
-
-         Actually, we can distinguish by key content. But the simplest
-         correct approach: always put mass on the "passive" action.
-         - num_actions=1: only check available -> [1.0]
-         - num_actions=2: could be fold/call or check/bet
-           * fold/call: want call (idx 1) -> [0.0, 1.0]
-           * check/bet: want check (idx 0) -> [1.0, 0.0]
-         - num_actions=3: fold/call/raise -> want call (idx 1) -> [0.0, 1.0, 0.0]
-
-         To distinguish the 2-action case, we check the info key.
-         But we don't have access to the betting state here directly.
-         Workaround: encode it in the key.
-
-         Simpler approach: the play engine tells us whether bet_outstanding
-         via the action count context.  Actually, looking at the play
-         engine, the 2-action case is ambiguous.
-
-         Best approach: encode "facing bet" in the key parsing.
-         But for a baseline bot, let's use a different mechanism:
-         check the key for bet-outstanding indicator. *)
+  ; get_probs = (fun ~key:_ ~num_actions ~facing_bet ->
       let probs = Array.create ~len:num_actions 0.0 in
-      (match num_actions with
-       | 1 ->
-         (* Only check available *)
-         probs.(0) <- 1.0
-       | 3 ->
-         (* fold/call/raise -> pick call *)
-         probs.(1) <- 1.0
-       | 2 ->
-         (* Ambiguous: fold/call or check/bet.
-            We'll handle this in the play engine by passing context.
-            For now, we default to action 0 (check in check/bet case).
-            The play engine for this bot will use a special path. *)
-         probs.(0) <- 1.0
-       | _ ->
+      (match facing_bet with
+       | true ->
+         (* fold/call or fold/call/raise -> pick call (idx 1) *)
+         probs.(Int.min 1 (num_actions - 1)) <- 1.0
+       | false ->
+         (* check or check/bet -> pick check (idx 0) *)
          probs.(0) <- 1.0);
       probs)
-  ; abstraction = baseline_abstraction
+  ; abstraction = make_trivial_abstraction ()
   }
 
 (* ------------------------------------------------------------------ *)
@@ -257,20 +306,7 @@ let play_hand
     | true ->
       let can_raise = state.num_raises < config.max_raises in
       let num_actions = match can_raise with true -> 3 | false -> 2 in
-      (* Special handling for always-call bot facing a bet:
-         In the 2-action case with bet outstanding, actions are fold/call.
-         The always-call bot's get_probs returns [1.0, 0.0] for 2 actions
-         (always picks idx 0), but here idx 0 = fold.  We need idx 1 = call.
-         Fix: override for always-call when facing bet. *)
-      let probs =
-        match String.equal current_bot.name "always-call" with
-        | true ->
-          let p = Array.create ~len:num_actions 0.0 in
-          p.(1) <- 1.0;  (* always call *)
-          p
-        | false ->
-          current_bot.get_probs ~key ~num_actions
-      in
+      let probs = current_bot.get_probs ~key ~num_actions ~facing_bet:true in
       let action_idx = sample_action probs ~n_actions:num_actions in
       (match action_idx with
        | 0 ->
@@ -312,7 +348,7 @@ let play_hand
     | false ->
       let can_bet = state.num_raises < config.max_raises in
       let num_actions = match can_bet with true -> 2 | false -> 1 in
-      let probs = current_bot.get_probs ~key ~num_actions in
+      let probs = current_bot.get_probs ~key ~num_actions ~facing_bet:false in
       let action_idx = sample_action probs ~n_actions:num_actions in
       (match action_idx with
        | 0 ->
@@ -498,7 +534,7 @@ let () =
   printf "=== Tournament Results (%d hands each matchup) ===\n\n%!" !n_hands;
 
   (* Compute column width: max of name lengths + padding *)
-  let col_width = List.fold bot_names ~init:11 ~f:(fun acc name ->
+  let col_width = List.fold bot_names ~init:13 ~f:(fun acc name ->
     Int.max acc (String.length name + 2))
   in
 

@@ -209,6 +209,94 @@ let game_tree_for_deal ~config ~p1_cards ~p2_cards ~board =
   } in
   betting_round ~config ~p1_cards ~p2_cards ~board ~state
 
+(** Build a compact showdown distribution tree for RBM distance computation.
+
+    For a given hand and visible board, samples opponent hands and board
+    completions, evaluates showdown outcomes, and returns a flat tree of
+    showdown values.  This is MUCH cheaper than a full game tree
+    (microseconds vs milliseconds) while still capturing the strategic
+    distribution needed for RBM distance.
+
+    The tree has one level of chance nodes (board completions) each
+    containing opponent-outcome leaves.  Two hands with similar showdown
+    distributions will have small RBM distance.
+
+    [max_opponents]: opponent hands to sample per board completion (default 15).
+    [max_board_samples]: board completions to sample (default 5). *)
+let showdown_distribution_tree ?(max_opponents = 15) ?(max_board_samples = 5)
+    ~config:_ ~player ~hole_cards ~board_visible () =
+  let (h1, h2) = hole_cards in
+  let dealt = [ h1; h2 ] @ board_visible in
+  let remaining =
+    List.filter Card.full_deck ~f:(fun c ->
+      not (List.exists dealt ~f:(fun cc -> Card.equal c cc)))
+  in
+  let n_board_needed = 5 - List.length board_visible in
+  let remaining_arr = Array.of_list remaining in
+  let n_rem = Array.length remaining_arr in
+  let children = ref [] in
+  let n_boards_sampled = ref 0 in
+  while !n_boards_sampled < max_board_samples do
+    (* Sample board completion via Fisher-Yates partial shuffle *)
+    for i = 0 to Int.min (n_board_needed + 2 - 1) (n_rem - 1) do
+      let j = i + Random.int (n_rem - i) in
+      let tmp = remaining_arr.(i) in
+      remaining_arr.(i) <- remaining_arr.(j);
+      remaining_arr.(j) <- tmp
+    done;
+    let extra_board =
+      match n_board_needed with
+      | 0 -> []
+      | 1 -> [ remaining_arr.(0) ]
+      | 2 -> [ remaining_arr.(0); remaining_arr.(1) ]
+      | _ -> []
+    in
+    let full_board = board_visible @ extra_board in
+    (* Sample opponents from remaining cards after board *)
+    let opp_start = n_board_needed in
+    let n_opp_available = (n_rem - opp_start) / 2 in
+    let n_opps = Int.min max_opponents n_opp_available in
+    (* Partial shuffle for opponents *)
+    for i = opp_start to Int.min (opp_start + n_opps * 2 - 1) (n_rem - 1) do
+      let j = i + Random.int (n_rem - i) in
+      let tmp = remaining_arr.(i) in
+      remaining_arr.(i) <- remaining_arr.(j);
+      remaining_arr.(j) <- tmp
+    done;
+    let opp_leaves = ref [] in
+    for k = 0 to n_opps - 1 do
+      let o1 = remaining_arr.(opp_start + k * 2) in
+      let o2 = remaining_arr.(opp_start + k * 2 + 1) in
+      let p1h = [ h1; h2 ] @ full_board in
+      let p2h = [ o1; o2 ] @ full_board in
+      let cmp = Hand_eval7.compare_hands7 p1h p2h in
+      let value =
+        match player with
+        | 0 ->
+          (match cmp > 0 with true -> 1.0 | false ->
+           match cmp = 0 with true -> 0.0 | false -> -1.0)
+        | _ ->
+          (match cmp > 0 with true -> -1.0 | false ->
+           match cmp = 0 with true -> 0.0 | false -> 1.0)
+      in
+      opp_leaves :=
+        Tree.leaf ~label:(Node_label.Terminal { winner = None; pot = 0 })
+          ~value
+        :: !opp_leaves
+    done;
+    children :=
+      Tree.node
+        ~label:(Node_label.Chance { description = "board_sample" })
+        ~children:(List.rev !opp_leaves)
+      :: !children;
+    Int.incr n_boards_sampled
+  done;
+  Tree.node
+    ~label:(Node_label.Chance {
+      description = sprintf "showdown_dist p%d" (player + 1)
+    })
+    ~children:(List.rev !children)
+
 (** Build a game tree starting from a specific betting round.
 
     Unlike [game_tree_for_deal] which always starts from preflop,
@@ -231,9 +319,22 @@ let game_tree_from_street ~config ~p1_cards ~p2_cards ~board
   } in
   betting_round ~config ~p1_cards ~p2_cards ~board ~state
 
+(** Subsample up to [k] elements from an array via Fisher-Yates partial
+    shuffle.  Returns a list of the first [min k n] elements after shuffle. *)
+let subsample_array arr k =
+  let n = Array.length arr in
+  let take = Int.min k n in
+  for i = 0 to take - 1 do
+    let j = i + Random.int (n - i) in
+    let tmp = arr.(i) in
+    arr.(i) <- arr.(j);
+    arr.(j) <- tmp
+  done;
+  Array.to_list (Array.sub arr ~pos:0 ~len:take)
+
 (** Build an information set tree for [player] at a given street.
 
-    Aggregates over all possible opponent hole-card pairs AND remaining
+    Aggregates over sampled opponent hole-card pairs AND sampled remaining
     board cards from the remaining deck.
 
     [hole_cards] is the player's hand.
@@ -242,56 +343,52 @@ let game_tree_from_street ~config ~p1_cards ~p2_cards ~board
     [round_idx] is the current street (1=flop, 2=turn, 3=river).
     [pot_so_far] is the total chips invested before this street.
 
-    For flop/turn, samples remaining board cards to complete the 5-card
-    board.  For each (opponent_hand, board_completion) pair, generates a
-    game subtree from [round_idx] onward.
-
-    To keep tree size manageable, we sample a subset of opponent hands
-    when the combination count exceeds [max_opponents] (default 50). *)
-let information_set_tree ?(max_opponents = 50) ~config ~player ~hole_cards
-    ~board_visible ~round_idx ~pot_so_far () =
+    To keep IS tree construction fast, we sample at most [max_opponents]
+    (default 20) opponent hands and at most [max_board_samples] (default 10)
+    board completions.  This gives trees with at most
+    max_board_samples * max_opponents = 200 children -- enough to capture
+    the strategic distribution while keeping construction sub-millisecond. *)
+let information_set_tree ?(max_opponents = 20) ?(max_board_samples = 10)
+    ~config ~player ~hole_cards ~board_visible ~round_idx ~pot_so_far () =
   let (h1, h2) = hole_cards in
   let dealt = [ h1; h2 ] @ board_visible in
   let remaining = remove_cards config.deck dealt in
   let n_board_needed = 5 - List.length board_visible in
-  (* Generate all possible board completions *)
+  (* Sample board completions *)
   let board_completions =
     match n_board_needed with
     | 0 -> [ [] ]
     | 1 ->
-      List.map remaining ~f:(fun c -> [ c ])
+      let arr = Array.of_list remaining in
+      let sampled = subsample_array arr max_board_samples in
+      List.map sampled ~f:(fun c -> [ c ])
     | 2 ->
+      (* Build all pairs, then subsample *)
       let arr = Array.of_list remaining in
       let n = Array.length arr in
-      let pairs = ref [] in
+      let all_pairs_arr = Array.init (n * (n - 1) / 2) ~f:(fun _ -> (arr.(0), arr.(1))) in
+      let idx = ref 0 in
       for i = 0 to n - 2 do
         for j = i + 1 to n - 1 do
-          pairs := [ arr.(i); arr.(j) ] :: !pairs
+          all_pairs_arr.(!idx) <- (arr.(i), arr.(j));
+          Int.incr idx
         done
       done;
-      List.rev !pairs
-    | _ -> [ [] ]  (* shouldn't happen *)
+      let sampled = subsample_array all_pairs_arr max_board_samples in
+      List.map sampled ~f:(fun (c1, c2) -> [ c1; c2 ])
+    | _ -> [ [] ]
   in
-  (* For each board completion, generate opponent-aggregated subtrees *)
+  (* For each board completion, sample opponent hands *)
   let children =
     List.concat_map board_completions ~f:(fun extra_board ->
       let full_board = board_visible @ extra_board in
       let remaining_after_board = remove_cards remaining extra_board in
       let all_opps = all_pairs remaining_after_board in
-      (* Subsample opponent hands if too many *)
       let opponent_hands =
         match List.length all_opps > max_opponents with
         | true ->
           let arr = Array.of_list all_opps in
-          let n = Array.length arr in
-          (* Fisher-Yates partial shuffle for first max_opponents *)
-          for i = 0 to Int.min (max_opponents - 1) (n - 1) do
-            let j = i + Random.int (n - i) in
-            let tmp = arr.(i) in
-            arr.(i) <- arr.(j);
-            arr.(j) <- tmp
-          done;
-          Array.to_list (Array.sub arr ~pos:0 ~len:(Int.min max_opponents n))
+          subsample_array arr max_opponents
         | false -> all_opps
       in
       List.map opponent_hands ~f:(fun (opp1, opp2) ->
@@ -306,9 +403,8 @@ let information_set_tree ?(max_opponents = 50) ~config ~player ~hole_cards
         in
         Tree.node
           ~label:(Node_label.Chance {
-            description = sprintf "opp=%s,%s board=%s"
+            description = sprintf "opp=%s,%s"
               (Card.to_string opp1) (Card.to_string opp2)
-              (String.concat ~sep:"," (List.map extra_board ~f:Card.to_string))
           })
           ~children:[ subtree ]))
   in

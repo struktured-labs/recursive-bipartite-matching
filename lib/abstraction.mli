@@ -80,3 +80,10 @@ val build_abstraction
 (** Compute EMD between two equity distributions.
     1D Wasserstein distance on histogram bins. *)
 val emd_histograms : float array -> float array -> float
+
+(** Sort values by magnitude and assign to buckets by quantile.
+    Returns (hand_id -> bucket) mapping and per-bucket centroids. *)
+val quantile_bucketing
+  :  n_buckets:int
+  -> float array
+  -> (int, int) Hashtbl.Poly.t * float array

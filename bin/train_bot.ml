@@ -150,17 +150,18 @@ let () =
     done
   in
 
-  let iterations = 100_000 in
+  let eq_iterations = 25_000 in
+  let rbm_iterations = 5_000 in
 
   (* -------------------------------------------------------------- *)
   (* 1. Train with EQUITY-based bucketing (baseline)                 *)
   (* -------------------------------------------------------------- *)
   printf "\n========================================\n%!";
-  printf "  Training with EQUITY-based post-flop bucketing\n%!";
+  printf "  Training with EQUITY-based post-flop bucketing (%dk iters)\n%!" (eq_iterations / 1000);
   printf "========================================\n%!";
   let t2 = Core_unix.gettimeofday () in
   let (eq_p0, eq_p1) =
-    Cfr_abstract.train_mccfr ~config ~abstraction ~iterations
+    Cfr_abstract.train_mccfr ~config ~abstraction ~iterations:eq_iterations
       ~report_every:25_000
       ~bucket_method:Equity_based ()
   in
@@ -169,17 +170,17 @@ let () =
   let eq_n0 = Hashtbl.length eq_p0 in
   let eq_n1 = Hashtbl.length eq_p1 in
   printf "\nEquity training: %.2fs (%.0f iter/s), P0=%d P1=%d infosets\n%!"
-    eq_time (Float.of_int iterations /. eq_time) eq_n0 eq_n1;
+    eq_time (Float.of_int eq_iterations /. eq_time) eq_n0 eq_n1;
   show_preflop_strategy "Equity" eq_p0;
 
   (* -------------------------------------------------------------- *)
   (* 2. Train with RBM-based bucketing (preserves error bounds)      *)
   (* -------------------------------------------------------------- *)
   printf "\n========================================\n%!";
-  printf "  Training with RBM-based post-flop bucketing\n%!";
+  printf "  Training with RBM-based post-flop bucketing (%dk iters)\n%!" (rbm_iterations / 1000);
   printf "  (preserves Theorem 9.2 error bounds)\n%!";
   printf "========================================\n%!";
-  let rbm_epsilon = 50.0 in
+  let rbm_epsilon = 0.5 in
   let rbm_bucket_method =
     Cfr_abstract.Rbm_based
       { epsilon = rbm_epsilon
@@ -188,8 +189,8 @@ let () =
   in
   let t4 = Core_unix.gettimeofday () in
   let (rbm_p0, rbm_p1) =
-    Cfr_abstract.train_mccfr ~config ~abstraction ~iterations
-      ~report_every:25_000
+    Cfr_abstract.train_mccfr ~config ~abstraction ~iterations:rbm_iterations
+      ~report_every:5_000
       ~bucket_method:rbm_bucket_method ()
   in
   let t5 = Core_unix.gettimeofday () in
@@ -197,7 +198,7 @@ let () =
   let rbm_n0 = Hashtbl.length rbm_p0 in
   let rbm_n1 = Hashtbl.length rbm_p1 in
   printf "\nRBM training: %.2fs (%.0f iter/s), P0=%d P1=%d infosets\n%!"
-    rbm_time (Float.of_int iterations /. rbm_time) rbm_n0 rbm_n1;
+    rbm_time (Float.of_int rbm_iterations /. rbm_time) rbm_n0 rbm_n1;
   show_preflop_strategy "RBM" rbm_p0;
 
   (* -------------------------------------------------------------- *)
@@ -206,17 +207,17 @@ let () =
   printf "\n========================================\n%!";
   printf "  COMPARISON SUMMARY\n%!";
   printf "========================================\n%!";
-  printf "  Equity postflop: P0=%d P1=%d infosets  (%.2fs)\n%!"
-    eq_n0 eq_n1 eq_time;
-  printf "  RBM postflop:    P0=%d P1=%d infosets  (%.2fs, eps=%.1f)\n%!"
-    rbm_n0 rbm_n1 rbm_time rbm_epsilon;
-  printf "  RBM/equity ratio: P0=%.2fx P1=%.2fx infosets, %.2fx time\n%!"
-    (Float.of_int rbm_n0 /. Float.of_int (Int.max 1 eq_n0))
-    (Float.of_int rbm_n1 /. Float.of_int (Int.max 1 eq_n1))
-    (rbm_time /. Float.max 0.001 eq_time);
+  printf "  Equity postflop: P0=%d P1=%d infosets  (%dk iters, %.2fs)\n%!"
+    eq_n0 eq_n1 (eq_iterations / 1000) eq_time;
+  printf "  RBM postflop:    P0=%d P1=%d infosets  (%dk iters, %.2fs, eps=%.2f)\n%!"
+    rbm_n0 rbm_n1 (rbm_iterations / 1000) rbm_time rbm_epsilon;
+  let eq_rate = Float.of_int eq_n0 /. Float.of_int (Int.max 1 eq_iterations) in
+  let rbm_rate = Float.of_int rbm_n0 /. Float.of_int (Int.max 1 rbm_iterations) in
+  printf "  Info-set growth rate: equity=%.2f/iter  rbm=%.2f/iter\n%!"
+    eq_rate rbm_rate;
 
-  (* Save equity strategy (primary output) *)
-  let out_file = "strategy_mccfr_100k.dat" in
+  (* Save equity strategy *)
+  let out_file = "strategy_mccfr_equity.dat" in
   printf "\nSaving equity strategies to %s...\n%!" out_file;
   let oc = Out_channel.create out_file in
   Marshal.to_channel oc (eq_p0, eq_p1) [ Marshal.Closures ];
@@ -225,7 +226,7 @@ let () =
     (Int64.to_int_exn (Core_unix.stat out_file).st_size);
 
   (* Save RBM strategy *)
-  let rbm_file = "strategy_mccfr_rbm_100k.dat" in
+  let rbm_file = "strategy_mccfr_rbm.dat" in
   printf "Saving RBM strategies to %s...\n%!" rbm_file;
   let oc2 = Out_channel.create rbm_file in
   Marshal.to_channel oc2 (rbm_p0, rbm_p1) [ Marshal.Closures ];
