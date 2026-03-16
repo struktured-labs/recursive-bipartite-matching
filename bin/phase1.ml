@@ -161,7 +161,7 @@ let hand_category p1_card flop turn =
 
 let () =
   let t_start = Core_unix.gettimeofday () in
-  let n_samples = 30 in
+  let n_samples = 100 in
   let seed = 42 in
 
   printf "################################################################\n";
@@ -346,28 +346,58 @@ let () =
   (* ================================================================ *)
   printf "\n--- [2b] Distance matrix optimization benchmarks ---\n\n%!";
 
-  (* Use the RBM mean distance as a reasonable threshold for pruning.
-     We compute it from the baseline matrix. *)
+  (* Compute baseline statistics for threshold selection *)
   let rbm_pw_baseline = collect_pairwise_distances rbm_matrix n in
-  let _rbm_min_b, _rbm_max_b, rbm_mean_b, _, _ = distance_stats rbm_pw_baseline in
-  let threshold = rbm_mean_b in
-  printf "Pruning threshold: %.2f (mean RBM distance from baseline)\n\n%!" threshold;
+  let rbm_sorted = Array.of_list rbm_pw_baseline in
 
-  (* 2b-i: EV-pruned (sequential) *)
-  printf "EV-pruned distance matrix (sequential)...\n%!";
-  let ((ev_pruned_matrix, ev_p_computed, ev_p_skipped), ev_pruned_time) = time (fun () ->
-    Ev_graph.precompute_distances_pruned ~threshold trees)
+  (* Test at multiple thresholds to show where each optimization helps.
+     EV pruning helps when threshold << EV range; progressive depth helps
+     when threshold << full RBM distance. *)
+  let thresholds =
+    let p25 = rbm_sorted.(n_pairs / 4) in
+    let p50 = rbm_sorted.(n_pairs / 2) in
+    [ ("p25", p25); ("p50 (median)", p50) ]
   in
-  printf "  Computed: %d pairs, Skipped: %d pairs (%.1f%% pruned)\n%!"
-    ev_p_computed ev_p_skipped
-    (100.0 *. Float.of_int ev_p_skipped /. Float.of_int (Int.max 1 (ev_p_computed + ev_p_skipped)));
-  printf "  Time: %.3fs (vs baseline seq %.3fs, speedup %.2fx)\n%!"
-    ev_pruned_time rbm_time_seq
-    (match Float.( > ) ev_pruned_time 0.0 with
-     | true -> rbm_time_seq /. ev_pruned_time
-     | false -> Float.infinity);
 
-  (* Verify: for non-infinity entries, they should match baseline *)
+  printf "  %-20s  %8s  %8s  %10s  %10s  %10s  %8s\n%!"
+    "Threshold" "Value" "Time(s)" "EV-pruned" "Shallow" "Full" "Speedup";
+  printf "  %s\n%!" (String.make 88 '-');
+  printf "  %-20s  %8s  %8.3f  %10s  %10s  %10d  %8s\n%!"
+    "Baseline (parallel)" "-" rbm_time "-" "-" n_pairs "1.00x";
+
+  (* Run the combined fast method at each threshold *)
+  List.iter thresholds ~f:(fun (label, threshold) ->
+    let ((_, (ev_pr, sh_pr, full)), t) = time (fun () ->
+      Parallel.precompute_distances_parallel_fast ~num_domains ~threshold trees)
+    in
+    let spd =
+      match Float.( > ) t 0.0 with
+      | true -> rbm_time /. t
+      | false -> Float.infinity
+    in
+    printf "  %-20s  %8.1f  %8.3f  %10d  %10d  %10d  %8.2fx\n%!"
+      (sprintf "Fast (%s)" label)
+      threshold t ev_pr sh_pr full spd);
+  printf "\n%!";
+
+  (* Run detailed verification at median threshold *)
+  let threshold =
+    let (_, p50) = List.nth_exn thresholds 1 in
+    p50
+  in
+  printf "Detailed verification at threshold=%.1f (median):\n\n%!" threshold;
+
+  (* EV-pruned (parallel only -- sequential is strictly slower) *)
+  printf "  EV-pruned (parallel, %d domains)...\n%!" num_domains;
+  let ((ev_pruned_matrix, ev_pp_computed, ev_pp_skipped), ev_pruned_par_time) = time (fun () ->
+    Parallel.precompute_distances_parallel_pruned ~num_domains ~threshold trees)
+  in
+  printf "    Computed: %d, Skipped: %d (%.1f%% pruned), Time: %.3fs\n%!"
+    ev_pp_computed ev_pp_skipped
+    (100.0 *. Float.of_int ev_pp_skipped /. Float.of_int (Int.max 1 (ev_pp_computed + ev_pp_skipped)))
+    ev_pruned_par_time;
+
+  (* Verify non-infinity entries match baseline exactly *)
   let ev_pruned_max_diff = ref 0.0 in
   let ev_pruned_mismatches = ref 0 in
   for i = 0 to n - 1 do
@@ -384,159 +414,50 @@ let () =
       | false -> ()
     done
   done;
-  printf "  Verification (finite entries): max diff = %.2e, mismatches = %d%s\n\n%!"
+  printf "    Verify (finite vs baseline): max diff = %.2e, mismatches = %d%s\n%!"
     !ev_pruned_max_diff !ev_pruned_mismatches
     (match !ev_pruned_mismatches with 0 -> " (PASS)" | _ -> " (FAIL)");
 
-  (* 2b-ii: EV-pruned (parallel) *)
-  printf "EV-pruned distance matrix (parallel, %d domains)...\n%!" num_domains;
-  let ((ev_pruned_par_matrix, ev_pp_computed, ev_pp_skipped), ev_pruned_par_time) = time (fun () ->
-    Parallel.precompute_distances_parallel_pruned ~num_domains ~threshold trees)
+  (* Combined fast (parallel) *)
+  printf "  Fast combined (parallel, %d domains)...\n%!" num_domains;
+  let ((fast_par_matrix, (fp_ev_pr, fp_shallow_pr, fp_full)), fast_par_time) = time (fun () ->
+    Parallel.precompute_distances_parallel_fast ~num_domains ~threshold trees)
   in
-  printf "  Computed: %d pairs, Skipped: %d pairs (%.1f%% pruned)\n%!"
-    ev_pp_computed ev_pp_skipped
-    (100.0 *. Float.of_int ev_pp_skipped /. Float.of_int (Int.max 1 (ev_pp_computed + ev_pp_skipped)));
-  printf "  Time: %.3fs (vs baseline par %.3fs, speedup %.2fx)\n%!"
-    ev_pruned_par_time rbm_time
-    (match Float.( > ) ev_pruned_par_time 0.0 with
-     | true -> rbm_time /. ev_pruned_par_time
-     | false -> Float.infinity);
+  let fp_total = fp_ev_pr + fp_shallow_pr + fp_full in
+  printf "    EV-pruned: %d, Shallow-pruned: %d, Full: %d (of %d)\n%!"
+    fp_ev_pr fp_shallow_pr fp_full fp_total;
+  printf "    Time: %.3fs, Speedup vs baseline par: %.2fx, vs seq: %.2fx\n%!"
+    fast_par_time
+    (match Float.( > ) fast_par_time 0.0 with true -> rbm_time /. fast_par_time | false -> Float.infinity)
+    (match Float.( > ) fast_par_time 0.0 with true -> rbm_time_seq /. fast_par_time | false -> Float.infinity);
 
-  (* Verify parallel pruned matches sequential pruned *)
-  let ev_pp_max_diff = ref 0.0 in
-  for i = 0 to n - 1 do
-    for j = i + 1 to n - 1 do
-      let a = ev_pruned_matrix.(i).(j) in
-      let b = ev_pruned_par_matrix.(i).(j) in
-      match Float.is_finite a && Float.is_finite b with
-      | true ->
-        let diff = Float.abs (a -. b) in
-        (match Float.( > ) diff !ev_pp_max_diff with
-         | true -> ev_pp_max_diff := diff
-         | false -> ())
-      | false -> ()
-    done
-  done;
-  printf "  Verification (par vs seq): max diff = %.2e%s\n\n%!"
-    !ev_pp_max_diff
-    (match Float.( < ) !ev_pp_max_diff 1e-10 with
-     | true -> " (PASS)"
-     | false -> " (MISMATCH!)");
-
-  (* 2b-iii: Combined fast (sequential) *)
-  printf "Combined fast distance matrix (EV pruning + progressive depth, sequential)...\n%!";
-  let ((fast_matrix, (fast_ev_pr, fast_shallow_pr, fast_full)), fast_time) = time (fun () ->
-    Ev_graph.precompute_distances_fast ~threshold trees)
-  in
-  let fast_total = fast_ev_pr + fast_shallow_pr + fast_full in
-  printf "  EV-pruned: %d, Shallow-pruned: %d, Full: %d (of %d pairs)\n%!"
-    fast_ev_pr fast_shallow_pr fast_full fast_total;
-  printf "  Time: %.3fs (vs baseline seq %.3fs, speedup %.2fx)\n%!"
-    fast_time rbm_time_seq
-    (match Float.( > ) fast_time 0.0 with
-     | true -> rbm_time_seq /. fast_time
-     | false -> Float.infinity);
-
-  (* Verify fast matrix: for pairs where both are finite, fast >= baseline (lower bound) *)
-  let fast_violations = ref 0 in
+  (* Verify: for non-infinity, non-shallow-pruned entries, should match baseline.
+     For shallow-pruned entries, fast_value is a lower bound (fast <= baseline). *)
+  let fast_false_prunings = ref 0 in
   let fast_max_undershoot = ref 0.0 in
   for i = 0 to n - 1 do
     for j = i + 1 to n - 1 do
-      match Float.is_finite fast_matrix.(i).(j) with
+      match Float.is_finite fast_par_matrix.(i).(j) with
       | true ->
-        (* For truncated distances that exceeded threshold, the value is a
-           lower bound -- so it might be less than baseline. For full
-           computations, it should match exactly. *)
-        let diff = rbm_matrix.(i).(j) -. fast_matrix.(i).(j) in
+        let diff = rbm_matrix.(i).(j) -. fast_par_matrix.(i).(j) in
         (match Float.( > ) diff 1e-6 with
          | true ->
-           (* fast_matrix < rbm_matrix is expected for shallow-pruned pairs
-              (truncated distance is a lower bound). Only count as violation
-              if the fast value was supposedly full-depth but doesn't match. *)
            (match Float.( > ) diff !fast_max_undershoot with
             | true -> fast_max_undershoot := diff
             | false -> ())
          | false -> ())
       | false ->
-        (* Pruned to infinity -- verify baseline also exceeds threshold *)
+        (* Pruned to infinity -- EV bound says dist > threshold.
+           Check: does baseline also exceed threshold? *)
         (match Float.( > ) rbm_matrix.(i).(j) threshold with
          | true -> ()
-         | false -> Int.incr fast_violations)
+         | false -> Int.incr fast_false_prunings)
     done
   done;
-  printf "  Verification: max undershoot = %.4f (expected for lower bounds)\n%!"
-    !fast_max_undershoot;
-  printf "  False prunings (infinity but baseline <= threshold): %d%s\n\n%!"
-    !fast_violations
-    (match !fast_violations with 0 -> " (PASS)" | _ -> " (WARN: EV bound was not tight)");
-
-  (* 2b-iv: Combined fast (parallel) *)
-  printf "Combined fast distance matrix (parallel, %d domains)...\n%!" num_domains;
-  let ((fast_par_matrix, (fp_ev_pr, fp_shallow_pr, fp_full)), fast_par_time) = time (fun () ->
-    Parallel.precompute_distances_parallel_fast ~num_domains ~threshold trees)
-  in
-  let fp_total = fp_ev_pr + fp_shallow_pr + fp_full in
-  printf "  EV-pruned: %d, Shallow-pruned: %d, Full: %d (of %d pairs)\n%!"
-    fp_ev_pr fp_shallow_pr fp_full fp_total;
-  printf "  Time: %.3fs (vs baseline par %.3fs, speedup %.2fx)\n%!"
-    fast_par_time rbm_time
-    (match Float.( > ) fast_par_time 0.0 with
-     | true -> rbm_time /. fast_par_time
-     | false -> Float.infinity);
-  printf "  Combined speedup vs sequential baseline: %.2fx\n%!"
-    (match Float.( > ) fast_par_time 0.0 with
-     | true -> rbm_time_seq /. fast_par_time
-     | false -> Float.infinity);
-
-  (* Verify parallel fast matches sequential fast *)
-  let fp_max_diff = ref 0.0 in
-  for i = 0 to n - 1 do
-    for j = i + 1 to n - 1 do
-      let a = fast_matrix.(i).(j) in
-      let b = fast_par_matrix.(i).(j) in
-      match Float.is_finite a && Float.is_finite b with
-      | true ->
-        let diff = Float.abs (a -. b) in
-        (match Float.( > ) diff !fp_max_diff with
-         | true -> fp_max_diff := diff
-         | false -> ())
-      | false -> ()
-    done
-  done;
-  printf "  Verification (par vs seq): max diff = %.2e%s\n\n%!"
-    !fp_max_diff
-    (match Float.( < ) !fp_max_diff 1e-10 with
-     | true -> " (PASS)"
-     | false -> " (MISMATCH!)");
-
-  (* Summary table *)
-  printf "  Optimization summary:\n%!";
-  printf "  %-35s  %8s  %8s  %8s\n%!"
-    "Method" "Time(s)" "Speedup" "Pairs";
-  printf "  %s\n%!" (String.make 67 '-');
-  printf "  %-35s  %8.3f  %8s  %8d\n%!"
-    "Baseline (sequential)" rbm_time_seq "1.00x" n_pairs;
-  printf "  %-35s  %8.3f  %8.2fx  %8d\n%!"
-    "Baseline (parallel)" rbm_time
-    (match Float.( > ) rbm_time 0.0 with true -> rbm_time_seq /. rbm_time | false -> Float.infinity)
-    n_pairs;
-  printf "  %-35s  %8.3f  %8.2fx  %8d\n%!"
-    "EV-pruned (sequential)" ev_pruned_time
-    (match Float.( > ) ev_pruned_time 0.0 with true -> rbm_time_seq /. ev_pruned_time | false -> Float.infinity)
-    ev_p_computed;
-  printf "  %-35s  %8.3f  %8.2fx  %8d\n%!"
-    "EV-pruned (parallel)" ev_pruned_par_time
-    (match Float.( > ) ev_pruned_par_time 0.0 with true -> rbm_time_seq /. ev_pruned_par_time | false -> Float.infinity)
-    ev_pp_computed;
-  printf "  %-35s  %8.3f  %8.2fx  %8d\n%!"
-    "Fast combined (sequential)" fast_time
-    (match Float.( > ) fast_time 0.0 with true -> rbm_time_seq /. fast_time | false -> Float.infinity)
-    fast_full;
-  printf "  %-35s  %8.3f  %8.2fx  %8d\n%!"
-    "Fast combined (parallel)" fast_par_time
-    (match Float.( > ) fast_par_time 0.0 with true -> rbm_time_seq /. fast_par_time | false -> Float.infinity)
-    fp_full;
-  printf "\n%!";
+  printf "    Lower-bound undershoot (truncated pairs): max=%.2f\n%!" !fast_max_undershoot;
+  printf "    False infinity prunings: %d%s\n\n%!"
+    !fast_false_prunings
+    (match !fast_false_prunings with 0 -> " (PASS)" | _ -> " (WARN)");
 
   let _ = fast_par_matrix in
 
