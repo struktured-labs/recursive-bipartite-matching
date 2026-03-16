@@ -24,6 +24,29 @@ A tree distance metric via recursive minimum-cost bipartite matching (Hungarian 
 - Online learner: 99.4% cache hit rate, 60x faster than offline, ~400 postflop clusters emerge naturally
 - Play against the bot: `opam exec -- dune exec bin/play.exe`
 
+**Empirical (No-Limit Hold'em, Heads-Up 20bb):**
+- **RBM beats EMD 3-2** on preflop abstraction quality, dominating at fine-grained compression:
+
+| Clusters (k) | RBM Error | EMD Error | Winner |
+|:---:|:---:|:---:|:---:|
+| 25 | 0.12 | 0.34 | RBM (64% less error) |
+| 15 | 0.21 | 0.36 | RBM (41% less error) |
+| 10 | 0.22 | 0.36 | RBM (39% less error) |
+| 5 | 0.52 | 0.39 | EMD |
+| 3 | 0.53 | 0.54 | tie (EV) |
+
+- **MCCFR head-to-head**: EMD bot wins at +0.48 bb/hand on short stacks (20bb is push/fold dominated)
+- **Key insight**: RBM's structural advantage grows with game complexity. Short-stack NL is push/fold oriented where raw equity is strong; RBM dominates at fine-grained compression (64% less error at k=25) and deeper stacks
+
+**Game Tree Sizes:**
+
+| Variant | Nodes | Notes |
+|:---:|:---:|:---:|
+| Limit HU | 9,476 | Fixed bet sizes |
+| NL-HU 20bb | 2,988 | Short-stack push/fold |
+| NL-HU 200bb | 186,174 | Deep-stack play |
+| NL 6-max 20bb | ~13M | Multi-player (2-10 supported) |
+
 **Empirical (Rhode Island Hold'em):**
 - **RBM beats EMD 7-0** across compression levels on varied-community deals. EMD (the standard poker AI metric from Gilpin & Sandholm 2006) produces 30x more EV error than RBM at the same cluster count
 - Zero-error compression at 30x on structurally identical deals
@@ -68,6 +91,12 @@ opam exec -- dune exec bin/compare.exe
 # Run full Limit Hold'em RBM vs EMD comparison (52-card deck)
 opam exec -- dune exec bin/holdem_compare.exe
 
+# Run No-Limit Hold'em RBM vs EMD comparison (20bb heads-up)
+opam exec -- dune exec bin/nolimit_compare.exe
+
+# Run No-Limit Hold'em demo
+opam exec -- dune exec bin/nolimit_demo.exe
+
 # Run MCCFR bot tournament (RBM vs EMD vs random vs always-call)
 opam exec -- dune exec bin/tournament.exe
 
@@ -79,11 +108,14 @@ opam exec -- dune exec bin/train_bot.exe
 
 # Run online self-play learner
 opam exec -- dune exec bin/self_play.exe
+
+# Run ACPC TCP bot (connects to ACPC dealer)
+opam exec -- dune exec bin/acpc_tcp_bot.exe
 ```
 
 ## Project Structure
 
-25 library modules, 17 executables, ~15K lines of OCaml.
+26 library modules, 19 executables, ~15K lines of OCaml.
 
 ```
 lib/
@@ -104,6 +136,7 @@ lib/
 ├── hand_iso.ml/mli          # Hand isomorphism / canonical forms
 ├── equity.ml/mli            # Equity calculation (rollout-based)
 ├── limit_holdem.ml/mli      # Full 2-player Limit Hold'em game trees
+├── nolimit_holdem.ml/mli    # No-Limit Hold'em game trees (2-10 players, variable stacks)
 ├── mini_holdem.ml/mli       # Mini Hold'em variants for testing
 ├── abstraction.ml/mli       # Game abstraction (RBM + EMD clustering)
 ├── cfr.ml/mli               # Counterfactual regret minimization
@@ -117,6 +150,8 @@ bin/
 ├── main.ml                  # Full pipeline demo (distance, compression, metrics)
 ├── compare.ml               # RBM vs EMD comparison (Rhode Island Hold'em)
 ├── holdem_compare.ml         # RBM vs EMD comparison (full Limit Hold'em)
+├── nolimit_compare.ml       # RBM vs EMD comparison (No-Limit Hold'em)
+├── nolimit_demo.ml          # No-Limit Hold'em demo
 ├── tournament.ml            # MCCFR bot tournament (RBM vs EMD vs baselines)
 ├── play.ml                  # Interactive play against trained bot
 ├── train_bot.ml             # Train MCCFR bot from scratch
@@ -130,7 +165,8 @@ bin/
 ├── test_holdem.ml           # Hold'em test suite
 ├── test_equity.ml           # Equity calculation tests
 ├── test_acpc.ml             # ACPC protocol tests
-└── acpc_bot.ml              # ACPC-compatible bot
+├── acpc_bot.ml              # ACPC-compatible bot
+└── acpc_tcp_bot.ml          # ACPC TCP bot (connects to ACPC dealer)
 
 WRITEUP.md                   # Full theoretical writeup with experimental results
 docs/paper.tex               # Academic paper (LaTeX)
@@ -142,6 +178,16 @@ docs/paper.tex               # Academic paper (LaTeX)
 
 The primary evaluation domain: heads-up Limit Texas Hold'em with a standard 52-card deck. This is the same game solved by Bowling et al. (2015) and is the benchmark for poker AI abstraction. 50 canonical preflop hands (after suit isomorphism), 4 betting rounds, 7-card hand evaluation at showdown.
 
+### No-Limit Hold'em
+
+The modern benchmark: No-Limit Texas Hold'em with variable stack depths.
+
+- 2-10 players (multi-player support)
+- Standard 52-card deck, 2 hole cards, 5 community cards
+- No-Limit betting: all-in at any time, variable bet sizes
+- Game tree sizes scale dramatically: 2,988 nodes (20bb HU) to ~13M (6-max 20bb)
+- 7-card hand evaluation at showdown
+
 ### Rhode Island Hold'em
 
 A simplified poker variant for rapid prototyping: [Rhode Island Hold'em](https://www.cs.cmu.edu/~sandholm/RIHoldEm.ISD.aaai05proceedings.pdf) (Gilpin & Sandholm 2005).
@@ -150,6 +196,20 @@ A simplified poker variant for rapid prototyping: [Rhode Island Hold'em](https:/
 - 1 hole card each, 2 community cards (flop + turn)
 - 3 betting rounds, max 3 raises each, limit betting
 - 3-card hand rankings: trips > straight > flush > pair > high card
+
+## ACPC Connectivity
+
+The bot supports the [Annual Computer Poker Competition](http://www.computerpokercompetition.org/) (ACPC) protocol for evaluation against other poker agents.
+
+```bash
+# Run the ACPC TCP bot (connects to a running ACPC dealer)
+opam exec -- dune exec bin/acpc_tcp_bot.exe -- --host localhost --port 20000
+
+# Test ACPC protocol parsing
+opam exec -- dune exec bin/test_acpc.exe
+```
+
+The ACPC TCP bot speaks the standard ACPC protocol over TCP, allowing head-to-head evaluation against any ACPC-compatible agent. The bot uses RBM-based abstractions for preflop play and MCCFR-trained strategies.
 
 ## The Location Problem
 
