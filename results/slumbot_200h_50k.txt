@@ -1,0 +1,44 @@
+[slumbot] Building 10-bucket preflop abstraction...
+[slumbot] Abstraction built in 158.47s
+[slumbot] Training NL MCCFR for 50000 iterations (10 buckets)...
+  [MCCFR-NL] iter 10000/50000  avg_util=-23.7398  infosets=(313330, 493646)
+  [MCCFR-NL] iter 20000/50000  avg_util=-14.8620  infosets=(494243, 760782)
+  [MCCFR-NL] iter 30000/50000  avg_util=7.1373  infosets=(641219, 969044)
+  [MCCFR-NL] iter 40000/50000  avg_util=5.2634  infosets=(766467, 1140637)
+  [MCCFR-NL] iter 50000/50000  avg_util=1.6869  infosets=(872040, 1283681)
+[slumbot] Training complete in 43.01s. P0: 872040, P1: 1283681 info sets
+[slumbot] Starting session: LIVE (slumbot.com), 200 hands
+[slumbot] Hand 10/200: won=-4650 total=-24100 (-24100.00 mbb/hand)
+[slumbot] Hand 20/200: won=1000 total=-22525 (-11262.50 mbb/hand)
+[slumbot] Hand 30/200: won=400 total=-1550 (-516.67 mbb/hand)
+[slumbot] Hand 40/200: won=-50 total=50 (12.50 mbb/hand)
+[slumbot] Hand 50/200: won=100 total=1025 (205.00 mbb/hand)
+[slumbot] Hand 60/200: won=-50 total=3425 (570.83 mbb/hand)
+[slumbot] Hand 70/200: won=-50 total=-15125 (-2160.71 mbb/hand)
+[slumbot] Hand 80/200: won=100 total=-4525 (-565.62 mbb/hand)
+[slumbot] Hand 90/200: won=-50 total=-3625 (-402.78 mbb/hand)
+[slumbot] Hand 100/200: won=-50 total=-2575 (-257.50 mbb/hand)
+[slumbot] Hand 110/200: won=-50 total=-2575 (-234.09 mbb/hand)
+[slumbot] Hand 120/200: won=275 total=1250 (104.17 mbb/hand)
+[slumbot] Hand 130/200: won=-50 total=1950 (150.00 mbb/hand)
+[slumbot] Hand 140/200: won=-50 total=-18400 (-1314.29 mbb/hand)
+[slumbot] Hand 150/200: won=-50 total=-20650 (-1376.67 mbb/hand)
+[slumbot] Hand 160/200: won=-50 total=-19700 (-1231.25 mbb/hand)
+[slumbot] Hand 170/200: won=-50 total=-38600 (-2270.59 mbb/hand)
+[slumbot] Hand 180/200: won=-50 total=-38437 (-2135.39 mbb/hand)
+[slumbot] Hand 190/200: won=-50 total=-32937 (-1733.53 mbb/hand)
+[slumbot] Hand 200/200: won=100 total=-50187 (-2509.35 mbb/hand)
+
+================================================================
+  Slumbot Session Results (LIVE (slumbot.com))
+================================================================
+
+  Hands played:    200
+  Total winnings:  -50187 chips
+  Average:         -2509.35 mbb/hand
+  Average:         -2.5093 bb/hand
+  Time:            19.5 seconds (10.23 hands/sec)
+
+  Game: HUNL 50/100 blinds, 20000 stack (200bb)
+  Strategy: NL MCCFR, P0=872040 P1=1283681 info sets
+================================================================
