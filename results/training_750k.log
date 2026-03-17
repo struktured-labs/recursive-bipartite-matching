@@ -64,3 +64,32 @@
   [MCCFR-NL] iter 610000/750000  avg_util=-5.2800  infosets=(2999295, 4029903)
   [MCCFR-NL] iter 620000/750000  avg_util=-5.6140  infosets=(3027580, 4066146)
   [MCCFR-NL] iter 630000/750000  avg_util=-5.3042  infosets=(3052148, 4097746)
+  [MCCFR-NL] iter 640000/750000  avg_util=-5.5245  infosets=(3078040, 4128599)
+  [MCCFR-NL] iter 650000/750000  avg_util=-5.3597  infosets=(3103651, 4158853)
+  [MCCFR-NL] iter 660000/750000  avg_util=-5.5891  infosets=(3126153, 4185671)
+  [MCCFR-NL] iter 670000/750000  avg_util=-5.7311  infosets=(3149479, 4213061)
+  [MCCFR-NL] iter 680000/750000  avg_util=-5.3292  infosets=(3175559, 4242719)
+  [MCCFR-NL] iter 690000/750000  avg_util=-5.1188  infosets=(3199170, 4269150)
+  [MCCFR-NL] iter 700000/750000  avg_util=-5.0691  infosets=(3223013, 4297188)
+  [MCCFR-NL] iter 710000/750000  avg_util=-5.1093  infosets=(3248087, 4327465)
+  [MCCFR-NL] iter 720000/750000  avg_util=-5.1350  infosets=(3270213, 4355159)
+  [MCCFR-NL] iter 730000/750000  avg_util=-5.2680  infosets=(3292940, 4384634)
+  [MCCFR-NL] iter 740000/750000  avg_util=-5.1165  infosets=(3314206, 4409121)
+  [MCCFR-NL] iter 750000/750000  avg_util=-5.0532  infosets=(3334851, 4435100)
+[slumbot] Training complete in 395.42s. P0: 3334851, P1: 4435100 info sets
+[slumbot] Strategy saved to strategy_nl_750k.dat
+[slumbot] Starting session: LIVE (slumbot.com), 0 hands
+
+================================================================
+  Slumbot Session Results (LIVE (slumbot.com))
+================================================================
+
+  Hands played:    0
+  Total winnings:  0 chips
+  Average:         -nan mbb/hand
+  Average:         -nan bb/hand
+  Time:            0.0 seconds (-nan hands/sec)
+
+  Game: HUNL 50/100 blinds, 20000 stack (200bb)
+  Strategy: NL MCCFR, P0=3334851 P1=4435100 info sets
+================================================================

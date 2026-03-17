@@ -1,0 +1,320 @@
+================================================================
+  Surface Sweep: Buckets x Training x Epsilon
+================================================================
+
+  Mode:               LIVE (slumbot.com)
+  Bucket counts:      [5, 10, 20, 50, 169]
+  Training levels:    [10,000, 50,000, 100,000, 500,000]
+  Hands per cell:     100
+  Bucket sweep cells: 20
+  Epsilons:           [0.05, 0.10, 0.20, 0.50, 1.00]
+  Epsilon train lvls: [50,000, 100,000, 500,000]
+  Epsilon cells:      15
+  Total cells:        35
+  Game:               HUNL 50/100 blinds, 20000 stack (200bb)
+
+[csv] Writing incremental results to results/surface_sweep.csv
+[1/3] Computing preflop equities (5,000 MC samples per hand)...
+  Equities computed in 16s (169 canonical hands)
+
+[2/3] Running bucket sweep: 5 bucket_counts x 4 training_levels = 20 cells
+  Building 5-bucket abstraction...
+  5-bucket abstraction built in 0s
+  Building 10-bucket abstraction...
+  10-bucket abstraction built in 0s
+  Building 20-bucket abstraction...
+  20-bucket abstraction built in 0s
+  Building 50-bucket abstraction...
+  50-bucket abstraction built in 0s
+  Building 169-bucket abstraction...
+  169-bucket abstraction built in 0s
+--- 5 buckets ---
+  [cell 1/20] 5 buckets, 10,000 iterations
+
+  [MCCFR-NL] iter 2000/10000  avg_util=-207.7759  infosets=(64422, 100748)
+  [MCCFR-NL] iter 4000/10000  avg_util=-174.2063  infosets=(97620, 151108)
+  [MCCFR-NL] iter 6000/10000  avg_util=-136.3108  infosets=(127431, 195619)
+  [MCCFR-NL] iter 8000/10000  avg_util=-121.0146  infosets=(152501, 231672)
+  [MCCFR-NL] iter 10000/10000  avg_util=-97.2867  infosets=(173526, 261529)
+    trained 10,000 iters in 9s (435K info sets)
+    played 100 hands: -2.48 bb/hand (-24775 chips in 11s)
+  [cell 2/20] 5 buckets, 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=3.8620  infosets=(170818, 258912)
+  [MCCFR-NL] iter 20000/50000  avg_util=0.6251  infosets=(239032, 355267)
+  [MCCFR-NL] iter 30000/50000  avg_util=-16.2948  infosets=(288142, 422384)
+  [MCCFR-NL] iter 40000/50000  avg_util=-14.4246  infosets=(325221, 471129)
+  [MCCFR-NL] iter 50000/50000  avg_util=-22.5942  infosets=(356525, 516460)
+    trained 50,000 iters in 31s (873K info sets)
+    played 100 hands: +0.22 bb/hand (+2225 chips in 13s)
+  [cell 3/20] 5 buckets, 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=-28.2618  infosets=(370817, 529280)
+  [MCCFR-NL] iter 100000/100000  avg_util=-26.4920  infosets=(493503, 691832)
+    trained 100,000 iters in 53s (1.2M info sets)
+    played 100 hands: -3.15 bb/hand (-31525 chips in 13s)
+  [cell 4/20] 5 buckets, 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=-37.6156  infosets=(372579, 543951)
+  [MCCFR-NL] iter 100000/500000  avg_util=-29.7834  infosets=(502672, 714029)
+  [MCCFR-NL] iter 150000/500000  avg_util=-17.1992  infosets=(591385, 833181)
+  [MCCFR-NL] iter 200000/500000  avg_util=-12.6766  infosets=(666047, 925166)
+  [MCCFR-NL] iter 250000/500000  avg_util=-9.1826  infosets=(735009, 1011740)
+  [MCCFR-NL] iter 300000/500000  avg_util=-9.3070  infosets=(800750, 1093752)
+  [MCCFR-NL] iter 350000/500000  avg_util=-7.1172  infosets=(859270, 1167979)
+  [MCCFR-NL] iter 400000/500000  avg_util=-4.6052  infosets=(917885, 1244147)
+  [MCCFR-NL] iter 450000/500000  avg_util=-4.3773  infosets=(966344, 1306355)
+  [MCCFR-NL] iter 500000/500000  avg_util=-1.9257  infosets=(1013065, 1367270)
+    trained 500,000 iters in 4.2m (2.4M info sets)
+    played 100 hands: +0.38 bb/hand (+3825 chips in 13s)
+--- 10 buckets ---
+  [cell 5/20] 10 buckets, 10,000 iterations
+  [MCCFR-NL] iter 2000/10000  avg_util=-56.9516  infosets=(90699, 149531)
+  [MCCFR-NL] iter 4000/10000  avg_util=89.7579  infosets=(157453, 254802)
+  [MCCFR-NL] iter 6000/10000  avg_util=103.1996  infosets=(210650, 338502)
+  [MCCFR-NL] iter 8000/10000  avg_util=33.8313  infosets=(258536, 412021)
+  [MCCFR-NL] iter 10000/10000  avg_util=-11.4779  infosets=(301869, 478315)
+    trained 10,000 iters in 10s (780K info sets)
+    played 100 hands: -2.62 bb/hand (-26225 chips in 14s)
+  [cell 6/20] 10 buckets, 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=-51.3393  infosets=(294766, 467117)
+  [MCCFR-NL] iter 20000/50000  avg_util=-15.5539  infosets=(479363, 741416)
+  [MCCFR-NL] iter 30000/50000  avg_util=-7.5748  infosets=(612881, 935845)
+  [MCCFR-NL] iter 40000/50000  avg_util=5.4805  infosets=(725264, 1092081)
+  [MCCFR-NL] iter 50000/50000  avg_util=2.5852  infosets=(819089, 1226149)
+    trained 50,000 iters in 39s (2.0M info sets)
+    played 100 hands: -3.80 bb/hand (-38000 chips in 13s)
+  [cell 7/20] 10 buckets, 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=24.6885  infosets=(867528, 1266569)
+  [MCCFR-NL] iter 100000/100000  avg_util=8.2743  infosets=(1233805, 1757984)
+    trained 100,000 iters in 1.2m (3.0M info sets)
+    played 100 hands: -5.11 bb/hand (-51050 chips in 13s)
+  [cell 8/20] 10 buckets, 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=-17.9078  infosets=(852005, 1265057)
+  [MCCFR-NL] iter 100000/500000  avg_util=-14.5515  infosets=(1214446, 1741458)
+  [MCCFR-NL] iter 150000/500000  avg_util=-10.1677  infosets=(1494050, 2107819)
+  [MCCFR-NL] iter 200000/500000  avg_util=-8.8499  infosets=(1737169, 2412806)
+  [MCCFR-NL] iter 250000/500000  avg_util=-6.5161  infosets=(1936401, 2660677)
+  [MCCFR-NL] iter 300000/500000  avg_util=-7.7512  infosets=(2105638, 2876029)
+  [MCCFR-NL] iter 350000/500000  avg_util=-6.3748  infosets=(2261626, 3075300)
+  [MCCFR-NL] iter 400000/500000  avg_util=-4.9521  infosets=(2413831, 3268047)
+  [MCCFR-NL] iter 450000/500000  avg_util=-3.8630  infosets=(2553622, 3449839)
+  [MCCFR-NL] iter 500000/500000  avg_util=-3.3541  infosets=(2683760, 3616510)
+    trained 500,000 iters in 4.4m (6.3M info sets)
+    played 100 hands: +1.35 bb/hand (+13525 chips in 14s)
+--- 20 buckets ---
+  [cell 9/20] 20 buckets, 10,000 iterations
+  [MCCFR-NL] iter 2000/10000  avg_util=-142.4427  infosets=(93223, 159281)
+  [MCCFR-NL] iter 4000/10000  avg_util=-63.1843  infosets=(174131, 292447)
+  [MCCFR-NL] iter 6000/10000  avg_util=-52.2106  infosets=(247067, 408093)
+  [MCCFR-NL] iter 8000/10000  avg_util=-33.7628  infosets=(311735, 510946)
+  [MCCFR-NL] iter 10000/10000  avg_util=-35.4340  infosets=(374901, 610637)
+    trained 10,000 iters in 12s (986K info sets)
+    played 100 hands: +0.36 bb/hand (+3600 chips in 14s)
+  [cell 10/20] 20 buckets, 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=52.8739  infosets=(374859, 612331)
+  [MCCFR-NL] iter 20000/50000  avg_util=50.5157  infosets=(625299, 996228)
+  [MCCFR-NL] iter 30000/50000  avg_util=32.2661  infosets=(824564, 1293478)
+  [MCCFR-NL] iter 40000/50000  avg_util=35.8584  infosets=(1000750, 1547612)
+  [MCCFR-NL] iter 50000/50000  avg_util=21.2582  infosets=(1147461, 1758909)
+    trained 50,000 iters in 47s (2.9M info sets)
+    played 100 hands: +1.43 bb/hand (+14250 chips in 14s)
+  [cell 11/20] 20 buckets, 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=24.0251  infosets=(1117564, 1685753)
+  [MCCFR-NL] iter 100000/100000  avg_util=2.3280  infosets=(1679342, 2466513)
+    trained 100,000 iters in 1.4m (4.1M info sets)
+    played 100 hands: -5.75 bb/hand (-57550 chips in 14s)
+  [cell 12/20] 20 buckets, 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=15.0997  infosets=(1140030, 1735489)
+  [MCCFR-NL] iter 100000/500000  avg_util=19.2659  infosets=(1706056, 2516445)
+  [MCCFR-NL] iter 150000/500000  avg_util=11.7438  infosets=(2087773, 3012712)
+  [MCCFR-NL] iter 200000/500000  avg_util=1.2928  infosets=(2416280, 3440259)
+  [MCCFR-NL] iter 250000/500000  avg_util=0.4759  infosets=(2703801, 3812184)
+  [MCCFR-NL] iter 300000/500000  avg_util=0.2528  infosets=(2947506, 4128829)
+  [MCCFR-NL] iter 350000/500000  avg_util=0.9947  infosets=(3169570, 4419781)
+  [MCCFR-NL] iter 400000/500000  avg_util=-0.0769  infosets=(3387397, 4700354)
+  [MCCFR-NL] iter 450000/500000  avg_util=1.3851  infosets=(3586694, 4952535)
+  [MCCFR-NL] iter 500000/500000  avg_util=0.3859  infosets=(3770280, 5184886)
+    trained 500,000 iters in 4.8m (9.0M info sets)
+    played 100 hands: +1.49 bb/hand (+14850 chips in 13s)
+--- 50 buckets ---
+  [cell 13/20] 50 buckets, 10,000 iterations
+  [MCCFR-NL] iter 2000/10000  avg_util=-25.8811  infosets=(106174, 182612)
+  [MCCFR-NL] iter 4000/10000  avg_util=16.4087  infosets=(191106, 323037)
+  [MCCFR-NL] iter 6000/10000  avg_util=49.5370  infosets=(272273, 457259)
+  [MCCFR-NL] iter 8000/10000  avg_util=-4.1561  infosets=(355159, 594213)
+  [MCCFR-NL] iter 10000/10000  avg_util=-27.5669  infosets=(433770, 722851)
+    trained 10,000 iters in 12s (1.2M info sets)
+    played 100 hands: -0.06 bb/hand (-600 chips in 14s)
+  [cell 14/20] 50 buckets, 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=2.1780  infosets=(430188, 710342)
+  [MCCFR-NL] iter 20000/50000  avg_util=-2.2852  infosets=(773259, 1257781)
+  [MCCFR-NL] iter 30000/50000  avg_util=-15.1674  infosets=(1063581, 1710174)
+  [MCCFR-NL] iter 40000/50000  avg_util=-0.3223  infosets=(1319225, 2098379)
+  [MCCFR-NL] iter 50000/50000  avg_util=-23.5165  infosets=(1554853, 2455113)
+    trained 50,000 iters in 54s (4.0M info sets)
+    played 100 hands: -2.79 bb/hand (-27850 chips in 15s)
+  [cell 15/20] 50 buckets, 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=-14.4688  infosets=(1616676, 2576403)
+  [MCCFR-NL] iter 100000/100000  avg_util=2.5412  infosets=(2565662, 3994401)
+    trained 100,000 iters in 1.7m (6.6M info sets)
+    played 100 hands: -9.49 bb/hand (-94950 chips in 14s)
+  [cell 16/20] 50 buckets, 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=5.8508  infosets=(1574618, 2476464)
+  [MCCFR-NL] iter 100000/500000  avg_util=-8.4132  infosets=(2515228, 3873330)
+  [MCCFR-NL] iter 150000/500000  avg_util=8.6208  infosets=(3229348, 4900942)
+  [MCCFR-NL] iter 200000/500000  avg_util=3.8276  infosets=(3831577, 5748834)
+  [MCCFR-NL] iter 250000/500000  avg_util=-1.5152  infosets=(4354085, 6460075)
+  [MCCFR-NL] iter 300000/500000  avg_util=-4.2350  infosets=(4810885, 7080805)
+  [MCCFR-NL] iter 350000/500000  avg_util=-3.3944  infosets=(5216513, 7622473)
+  [MCCFR-NL] iter 400000/500000  avg_util=-0.9384  infosets=(5586998, 8124263)
+  [MCCFR-NL] iter 450000/500000  avg_util=-0.5209  infosets=(5933865, 8583774)
+  [MCCFR-NL] iter 500000/500000  avg_util=-1.4239  infosets=(6267200, 9029991)
+    trained 500,000 iters in 5.9m (15.3M info sets)
+    played 100 hands: -4.36 bb/hand (-43625 chips in 13s)
+--- 169 buckets ---
+  [cell 17/20] 169 buckets, 10,000 iterations
+  [MCCFR-NL] iter 2000/10000  avg_util=274.1463  infosets=(121659, 211720)
+  [MCCFR-NL] iter 4000/10000  avg_util=199.2417  infosets=(226028, 388947)
+  [MCCFR-NL] iter 6000/10000  avg_util=148.8631  infosets=(318892, 545404)
+  [MCCFR-NL] iter 8000/10000  avg_util=137.5784  infosets=(410040, 699609)
+  [MCCFR-NL] iter 10000/10000  avg_util=109.8711  infosets=(498714, 848032)
+    trained 10,000 iters in 13s (1.3M info sets)
+    played 100 hands: -3.81 bb/hand (-38100 chips in 14s)
+  [cell 18/20] 169 buckets, 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=18.1345  infosets=(507394, 868462)
+  [MCCFR-NL] iter 20000/50000  avg_util=107.1328  infosets=(940853, 1591449)
+  [MCCFR-NL] iter 30000/50000  avg_util=38.8516  infosets=(1348963, 2259367)
+  [MCCFR-NL] iter 40000/50000  avg_util=24.1355  infosets=(1728478, 2870816)
+  [MCCFR-NL] iter 50000/50000  avg_util=20.5477  infosets=(2092597, 3451791)
+    trained 50,000 iters in 1.0m (5.5M info sets)
+    played 100 hands: -0.62 bb/hand (-6175 chips in 14s)
+  [cell 19/20] 169 buckets, 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=86.5627  infosets=(2065904, 3419568)
+  [MCCFR-NL] iter 100000/100000  avg_util=41.7384  infosets=(3620917, 5890952)
+    trained 100,000 iters in 2.0m (9.5M info sets)
+    played 100 hands: -3.90 bb/hand (-38975 chips in 14s)
+  [cell 20/20] 169 buckets, 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=-12.4632  infosets=(2076242, 3426719)
+  [MCCFR-NL] iter 100000/500000  avg_util=-0.1635  infosets=(3618188, 5870894)
+  [MCCFR-NL] iter 150000/500000  avg_util=2.2169  infosets=(4931470, 7892219)
+  [MCCFR-NL] iter 200000/500000  avg_util=-1.8799  infosets=(6079184, 9634825)
+  [MCCFR-NL] iter 250000/500000  avg_util=2.5246  infosets=(7122634, 11210292)
+  [MCCFR-NL] iter 300000/500000  avg_util=-3.6581  infosets=(8074904, 12626346)
+  [MCCFR-NL] iter 350000/500000  avg_util=-1.7692  infosets=(8943533, 13908874)
+  [MCCFR-NL] iter 400000/500000  avg_util=-1.8602  infosets=(9739280, 15068335)
+  [MCCFR-NL] iter 450000/500000  avg_util=-2.5805  infosets=(10494933, 16155964)
+  [MCCFR-NL] iter 500000/500000  avg_util=-3.6735  infosets=(11221483, 17193048)
+    trained 500,000 iters in 8.1m (28.4M info sets)
+    played 100 hands: -6.42 bb/hand (-64175 chips in 14s)
+
+[3/3] Running epsilon sweep: 5 epsilons x 3 training_levels = 15 cells
+  Building showdown distribution trees for 169 hands...
+  Trees built in 1s
+  Computing pairwise RBM distance matrix (169x169)...
+  Distance matrix computed in 51s (ev_pruned=44 shallow=14152 full=169)
+
+--- epsilon=0.05 ---
+  epsilon=0.05 -> 169 clusters
+  [eps-cell 1/15] eps=0.05 (169 clusters), 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=-70.2679  infosets=(493749, 846044)
+  [MCCFR-NL] iter 20000/50000  avg_util=-14.2103  infosets=(910649, 1530703)
+  [MCCFR-NL] iter 30000/50000  avg_util=-27.8777  infosets=(1314089, 2183677)
+  [MCCFR-NL] iter 40000/50000  avg_util=-17.7368  infosets=(1693600, 2791080)
+  [MCCFR-NL] iter 50000/50000  avg_util=6.1542  infosets=(2044248, 3355836)
+    trained 50,000 iters in 1.0m (5.4M info sets)
+    played 100 hands: -5.43 bb/hand (-54300 chips in 15s)
+  [eps-cell 2/15] eps=0.05 (169 clusters), 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=5.6016  infosets=(2069602, 3400711)
+  [MCCFR-NL] iter 100000/100000  avg_util=16.4869  infosets=(3614325, 5840169)
+    trained 100,000 iters in 1.9m (9.5M info sets)
+    played 100 hands: -3.13 bb/hand (-31325 chips in 13s)
+  [eps-cell 3/15] eps=0.05 (169 clusters), 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=33.5408  infosets=(2060989, 3383797)
+  [MCCFR-NL] iter 100000/500000  avg_util=18.7933  infosets=(3583774, 5787024)
+  [MCCFR-NL] iter 150000/500000  avg_util=10.3705  infosets=(4863109, 7760019)
+  [MCCFR-NL] iter 200000/500000  avg_util=7.5687  infosets=(5989936, 9483492)
+  [MCCFR-NL] iter 250000/500000  avg_util=5.8742  infosets=(6998944, 11012318)
+  [MCCFR-NL] iter 300000/500000  avg_util=3.3078  infosets=(7933786, 12409075)
+  [MCCFR-NL] iter 350000/500000  avg_util=3.8957  infosets=(8793738, 13687139)
+  [MCCFR-NL] iter 400000/500000  avg_util=0.8899  infosets=(9599209, 14867072)
+  [MCCFR-NL] iter 450000/500000  avg_util=-1.6207  infosets=(10356835, 15966837)
+  [MCCFR-NL] iter 500000/500000  avg_util=-2.9913  infosets=(11059913, 16978552)
+    trained 500,000 iters in 8.0m (28.0M info sets)
+    played 100 hands: -3.10 bb/hand (-31025 chips in 13s)
+
+--- epsilon=0.10 ---
+  epsilon=0.10 -> 169 clusters
+  [eps-cell 4/15] eps=0.10 (169 clusters), 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=111.6937  infosets=(498590, 851661)
+  [MCCFR-NL] iter 20000/50000  avg_util=90.9725  infosets=(932352, 1578349)
+  [MCCFR-NL] iter 30000/50000  avg_util=64.9534  infosets=(1339459, 2245325)
+  [MCCFR-NL] iter 40000/50000  avg_util=41.2461  infosets=(1724121, 2873450)
+  [MCCFR-NL] iter 50000/50000  avg_util=44.8997  infosets=(2080694, 3449929)
+    trained 50,000 iters in 1.1m (5.5M info sets)
+    played 100 hands: +1.91 bb/hand (+19050 chips in 13s)
+  [eps-cell 5/15] eps=0.10 (169 clusters), 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=13.8928  infosets=(2094012, 3445339)
+  [MCCFR-NL] iter 100000/100000  avg_util=1.3006  infosets=(3660997, 5915978)
+    trained 100,000 iters in 2.0m (9.6M info sets)
+    played 100 hands: -0.54 bb/hand (-5400 chips in 15s)
+  [eps-cell 6/15] eps=0.10 (169 clusters), 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=31.5257  infosets=(2091573, 3458952)
+  [MCCFR-NL] iter 100000/500000  avg_util=44.7595  infosets=(3662410, 5948451)
+  [MCCFR-NL] iter 150000/500000  avg_util=24.3834  infosets=(4941415, 7928015)
+  [MCCFR-NL] iter 200000/500000  avg_util=14.5084  infosets=(6037778, 9584683)
+  [MCCFR-NL] iter 250000/500000  avg_util=9.2115  infosets=(7038122, 11075990)
+  [MCCFR-NL] iter 300000/500000  avg_util=6.5657  infosets=(7963514, 12462438)
+  [MCCFR-NL] iter 350000/500000  avg_util=6.7415  infosets=(8811125, 13706479)
+  [MCCFR-NL] iter 400000/500000  avg_util=10.1871  infosets=(9610377, 14870552)
+  [MCCFR-NL] iter 450000/500000  avg_util=9.8901  infosets=(10389519, 15997193)
+  [MCCFR-NL] iter 500000/500000  avg_util=7.1386  infosets=(11129608, 17064682)
+    trained 500,000 iters in 8.1m (28.2M info sets)
+    played 100 hands: -8.80 bb/hand (-87975 chips in 14s)
+
+--- epsilon=0.20 ---
+  epsilon=0.20 -> 169 clusters
+  [eps-cell 7/15] eps=0.20 (169 clusters), 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=-70.3434  infosets=(512828, 876602)
+  [MCCFR-NL] iter 20000/50000  avg_util=35.9366  infosets=(953884, 1612055)
+  [MCCFR-NL] iter 30000/50000  avg_util=4.6478  infosets=(1357483, 2270913)
+  [MCCFR-NL] iter 40000/50000  avg_util=6.7161  infosets=(1743092, 2894892)
+  [MCCFR-NL] iter 50000/50000  avg_util=32.8014  infosets=(2100775, 3467243)
+    trained 50,000 iters in 1.1m (5.6M info sets)
+    played 100 hands: +0.64 bb/hand (+6350 chips in 15s)
+  [eps-cell 8/15] eps=0.20 (169 clusters), 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=8.7948  infosets=(2089183, 3438721)
+  [MCCFR-NL] iter 100000/100000  avg_util=5.9124  infosets=(3665559, 5936890)
+    trained 100,000 iters in 2.0m (9.6M info sets)
+    played 100 hands: -0.53 bb/hand (-5275 chips in 15s)
+  [eps-cell 9/15] eps=0.20 (169 clusters), 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=8.9714  infosets=(2109439, 3458847)
+  [MCCFR-NL] iter 100000/500000  avg_util=5.8382  infosets=(3686969, 5939659)
+  [MCCFR-NL] iter 150000/500000  avg_util=-5.0676  infosets=(5007530, 7993034)
+  [MCCFR-NL] iter 200000/500000  avg_util=-6.5704  infosets=(6146400, 9720026)
+  [MCCFR-NL] iter 250000/500000  avg_util=-13.3638  infosets=(7169370, 11240102)
+  [MCCFR-NL] iter 300000/500000  avg_util=-13.2158  infosets=(8095974, 12616166)
+  [MCCFR-NL] iter 350000/500000  avg_util=-11.1102  infosets=(8945875, 13859089)
+  [MCCFR-NL] iter 400000/500000  avg_util=-9.2561  infosets=(9751163, 15040749)
+  [MCCFR-NL] iter 450000/500000  avg_util=-4.7001  infosets=(10496089, 16117977)
+  [MCCFR-NL] iter 500000/500000  avg_util=-6.1271  infosets=(11203353, 17143286)
+    trained 500,000 iters in 8.2m (28.3M info sets)
+    played 100 hands: -0.62 bb/hand (-6200 chips in 10s)
+
+--- epsilon=0.50 ---
+  epsilon=0.50 -> 169 clusters
+  [eps-cell 10/15] eps=0.50 (169 clusters), 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=52.7494  infosets=(502805, 851832)
+  [MCCFR-NL] iter 20000/50000  avg_util=11.6923  infosets=(941879, 1579420)
+  [MCCFR-NL] iter 30000/50000  avg_util=-17.8496  infosets=(1347316, 2242699)
+  [MCCFR-NL] iter 40000/50000  avg_util=-5.9424  infosets=(1729690, 2857711)
+  [MCCFR-NL] iter 50000/50000  avg_util=7.1857  infosets=(2085896, 3427517)
+    trained 50,000 iters in 1.1m (5.5M info sets)
+    played 100 hands: -3.83 bb/hand (-38350 chips in 10s)
+  [eps-cell 11/15] eps=0.50 (169 clusters), 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=28.2219  infosets=(2112763, 3477972)
+  [MCCFR-NL] iter 100000/100000  avg_util=36.9229  infosets=(3668764, 5939689)
+    trained 100,000 iters in 2.0m (9.6M info sets)
+    played 100 hands: -1.14 bb/hand (-11350 chips in 13s)
+  [eps-cell 12/15] eps=0.50 (169 clusters), 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=-25.8604  infosets=(2076034, 3410135)
+  [MCCFR-NL] iter 100000/500000  avg_util=29.6350  infosets=(3641948, 5878707)
+  [MCCFR-NL] iter 150000/500000  avg_util=22.1844  infosets=(4952929, 7882219)
+  [MCCFR-NL] iter 200000/500000  avg_util=17.2971  infosets=(6083037, 9594303)
