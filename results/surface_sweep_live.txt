@@ -318,3 +318,76 @@
   [MCCFR-NL] iter 100000/500000  avg_util=29.6350  infosets=(3641948, 5878707)
   [MCCFR-NL] iter 150000/500000  avg_util=22.1844  infosets=(4952929, 7882219)
   [MCCFR-NL] iter 200000/500000  avg_util=17.2971  infosets=(6083037, 9594303)
+  [MCCFR-NL] iter 250000/500000  avg_util=11.9490  infosets=(7094625, 11103302)
+  [MCCFR-NL] iter 300000/500000  avg_util=12.1250  infosets=(8021713, 12476638)
+  [MCCFR-NL] iter 350000/500000  avg_util=11.1090  infosets=(8888714, 13761852)
+  [MCCFR-NL] iter 400000/500000  avg_util=10.3926  infosets=(9687986, 14921781)
+  [MCCFR-NL] iter 450000/500000  avg_util=4.4606  infosets=(10434729, 16006686)
+  [MCCFR-NL] iter 500000/500000  avg_util=3.8532  infosets=(11145032, 17025692)
+    trained 500,000 iters in 8.5m (28.2M info sets)
+    played 100 hands: +0.42 bb/hand (+4225 chips in 10s)
+
+--- epsilon=1.00 ---
+  epsilon=1.00 -> 169 clusters
+  [eps-cell 13/15] eps=1.00 (169 clusters), 50,000 iterations
+  [MCCFR-NL] iter 10000/50000  avg_util=-78.6271  infosets=(501561, 858010)
+  [MCCFR-NL] iter 20000/50000  avg_util=-62.5606  infosets=(937091, 1576077)
+  [MCCFR-NL] iter 30000/50000  avg_util=-46.8844  infosets=(1351234, 2256025)
+  [MCCFR-NL] iter 40000/50000  avg_util=-26.4289  infosets=(1736818, 2877442)
+  [MCCFR-NL] iter 50000/50000  avg_util=-43.7963  infosets=(2096637, 3453039)
+    trained 50,000 iters in 1.1m (5.5M info sets)
+    played 100 hands: -12.69 bb/hand (-126900 chips in 11s)
+  [eps-cell 14/15] eps=1.00 (169 clusters), 100,000 iterations
+  [MCCFR-NL] iter 50000/100000  avg_util=16.9538  infosets=(2071078, 3402665)
+  [MCCFR-NL] iter 100000/100000  avg_util=-7.9402  infosets=(3650830, 5912798)
+    trained 100,000 iters in 2.1m (9.6M info sets)
+    played 100 hands: +0.91 bb/hand (+9125 chips in 11s)
+  [eps-cell 15/15] eps=1.00 (169 clusters), 500,000 iterations
+  [MCCFR-NL] iter 50000/500000  avg_util=25.3117  infosets=(2081421, 3430271)
+  [MCCFR-NL] iter 100000/500000  avg_util=-8.2051  infosets=(3626606, 5877675)
+  [MCCFR-NL] iter 150000/500000  avg_util=-14.5214  infosets=(4910600, 7872589)
+  [MCCFR-NL] iter 200000/500000  avg_util=-11.9006  infosets=(6046168, 9604125)
+  [MCCFR-NL] iter 250000/500000  avg_util=-13.7811  infosets=(7069148, 11145671)
+  [MCCFR-NL] iter 300000/500000  avg_util=-13.5540  infosets=(8002110, 12535201)
+  [MCCFR-NL] iter 350000/500000  avg_util=-6.1865  infosets=(8841429, 13765889)
+  [MCCFR-NL] iter 400000/500000  avg_util=-4.3388  infosets=(9638844, 14924983)
+  [MCCFR-NL] iter 450000/500000  avg_util=-6.2099  infosets=(10376679, 15999630)
+  [MCCFR-NL] iter 500000/500000  avg_util=-6.7494  infosets=(11076019, 17010253)
+    trained 500,000 iters in 8.6m (28.1M info sets)
+    played 100 hands: +1.60 bb/hand (+16037 chips in 10s)
+
+================================================================
+  SURFACE SWEEP RESULTS
+================================================================
+
+=== Performance Surface: Buckets x Training ===
+
+                  10K iter      50K iter      100K iter     500K iter   
+  ----------------------------------------------------------------------
+  5 buckets       -2.48         +0.22         -3.15         +0.38       
+  10 buckets      -2.62         -3.80         -5.11         +1.35       
+  20 buckets      +0.36         +1.43         -5.75         +1.49       
+  50 buckets      -0.06         -2.79         -9.49         -4.36       
+  169 buckets     -3.81         -0.62         -3.90         -6.42       
+
+
+=== Epsilon-Based Clustering (RBM Distance Threshold) ===
+
+  epsilon     clusters    50K iter      100K iter     500K iter   
+  ----------------------------------------------------------------
+  0.05        169         -5.43         -3.13         -3.10       
+  0.10        169         +1.91         -0.54         -8.80       
+  0.20        169         +0.64         -0.53         -0.62       
+  0.50        169         -3.83         -1.14         +0.42       
+  1.00        169         -12.69        +0.91         +1.60       
+
+=== Summary ===
+
+  Total wall time:    112.3m
+  Equity computation: 16s
+  Cells completed:    35/35
+  Best bucket config: 20 buckets, 500,000 iterations -> +1.49 bb/hand
+  Best epsilon config: rbm_eps0.10, 50,000 iterations -> +1.91 bb/hand
+
+  Results saved to: results/surface_sweep.csv
+================================================================

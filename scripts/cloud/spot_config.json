@@ -1,0 +1,120 @@
+{
+  "_comment": "EC2 spot instance configuration for distributed MCCFR training. Edit the placeholder values before use.",
+
+  "instance_configs": {
+    "compute_optimized_x86": {
+      "instance_type": "c6i.4xlarge",
+      "description": "16 vCPUs, 32 GB RAM, Intel Ice Lake, x86_64",
+      "vcpus": 16,
+      "memory_gb": 32,
+      "spot_price_estimate": "$0.25-0.40/hr",
+      "on_demand_price": "$0.68/hr",
+      "notes": "Best x86 compatibility, recommended for initial runs"
+    },
+    "compute_optimized_arm": {
+      "instance_type": "c7g.4xlarge",
+      "description": "16 vCPUs, 32 GB RAM, AWS Graviton3, ARM64",
+      "vcpus": 16,
+      "memory_gb": 32,
+      "spot_price_estimate": "$0.18-0.30/hr",
+      "on_demand_price": "$0.58/hr",
+      "notes": "~30% cheaper than x86 but requires ARM Docker image build"
+    },
+    "memory_optimized": {
+      "instance_type": "r6i.2xlarge",
+      "description": "8 vCPUs, 64 GB RAM, Intel Ice Lake, x86_64",
+      "vcpus": 8,
+      "memory_gb": 64,
+      "spot_price_estimate": "$0.15-0.25/hr",
+      "on_demand_price": "$0.504/hr",
+      "notes": "For large abstraction tables (>20 buckets, millions of info sets)"
+    },
+    "budget": {
+      "instance_type": "c6i.2xlarge",
+      "description": "8 vCPUs, 16 GB RAM, Intel Ice Lake, x86_64",
+      "vcpus": 8,
+      "memory_gb": 16,
+      "spot_price_estimate": "$0.10-0.20/hr",
+      "on_demand_price": "$0.34/hr",
+      "notes": "Half the compute at half the cost, good for small-scale runs"
+    }
+  },
+
+  "spot_fleet_request": {
+    "_comment": "Template for aws ec2 request-spot-fleet. Fill in placeholders.",
+    "SpotFleetRequestConfig": {
+      "IamFleetRole": "arn:aws:iam::ACCOUNT_ID:role/aws-ec2-spot-fleet-tagging-role",
+      "TargetCapacity": 4,
+      "SpotPrice": "0.40",
+      "TerminateInstancesWithExpiration": true,
+      "ValidUntil": "2026-12-31T23:59:59Z",
+      "Type": "request",
+      "LaunchSpecifications": [
+        {
+          "ImageId": "PLACEHOLDER_AMI_ID",
+          "InstanceType": "c6i.4xlarge",
+          "KeyName": "PLACEHOLDER_KEY_PAIR",
+          "SecurityGroups": [
+            {
+              "GroupId": "PLACEHOLDER_SECURITY_GROUP_ID"
+            }
+          ],
+          "SubnetId": "PLACEHOLDER_SUBNET_ID",
+          "IamInstanceProfile": {
+            "Arn": "arn:aws:iam::ACCOUNT_ID:instance-profile/rbm-trainer-role"
+          },
+          "TagSpecifications": [
+            {
+              "ResourceType": "instance",
+              "Tags": [
+                { "Key": "Name", "Value": "rbm-mccfr-worker" },
+                { "Key": "Project", "Value": "rbm-mccfr" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+
+  "iam_policy": {
+    "_comment": "Minimal IAM policy for worker instances. Attach to rbm-trainer-role.",
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ],
+        "Resource": [
+          "arn:aws:s3:::PLACEHOLDER_BUCKET_NAME",
+          "arn:aws:s3:::PLACEHOLDER_BUCKET_NAME/*"
+        ]
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer"
+        ],
+        "Resource": "*"
+      }
+    ]
+  },
+
+  "security_group_rules": {
+    "_comment": "Minimal security group -- workers only need outbound access to S3 and ECR.",
+    "inbound": [],
+    "outbound": [
+      {
+        "protocol": "tcp",
+        "port": 443,
+        "destination": "0.0.0.0/0",
+        "description": "HTTPS for S3, ECR, and package downloads"
+      }
+    ]
+  }
+}

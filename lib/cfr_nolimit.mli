@@ -66,3 +66,32 @@ val precompute_buckets_equity
 (** [regret_matching regrets] converts cumulative regrets into a strategy
     via the standard regret-matching formula.  Exposed for testing. *)
 val regret_matching : float array -> float array
+
+(** Internal NL game state, exposed for the standalone trainer. *)
+type nl_state = {
+  to_act : int;
+  round_idx : int;
+  num_raises : int;
+  current_bet : int;
+  p_invested : int array;
+  p_stack : int array;
+  round_start_invested : int array;
+  actions_remaining : int;
+}
+
+(** [mccfr_traverse ~config ~p1_cards ~p2_cards ~board ~p1_buckets ~p2_buckets
+      ~history ~state ~traverser ~cfr_states]
+    performs one external-sampling MCCFR traversal.
+    Returns the counterfactual value for the traverser. *)
+val mccfr_traverse
+  :  config:Nolimit_holdem.config
+  -> p1_cards:Card.t * Card.t
+  -> p2_cards:Card.t * Card.t
+  -> board:Card.t list
+  -> p1_buckets:int array
+  -> p2_buckets:int array
+  -> history:string
+  -> state:nl_state
+  -> traverser:int
+  -> cfr_states:cfr_state array
+  -> float
