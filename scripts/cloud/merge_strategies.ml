@@ -35,18 +35,24 @@
    estimator of a single run of K*N iterations.
 
    -----------------------------------------------------------------------
-   Serialization format (Marshal)
+   Serialization format (Marshal, closure-free)
    -----------------------------------------------------------------------
 
-   Files are OCaml Marshal format containing:
-     (Cfr_nolimit.cfr_state * Cfr_nolimit.cfr_state)
+   Files are OCaml Marshal format containing a 4-tuple of association lists:
 
-   This is a pair of (player0_state, player1_state).  Each cfr_state
-   contains regret_sum and strategy_sum hashtables.
+     ( (string * float array) list    -- P0 regret_sum
+     * (string * float array) list    -- P0 strategy_sum
+     * (string * float array) list    -- P1 regret_sum
+     * (string * float array) list )  -- P1 strategy_sum
 
-   The slumbot_client uses a different Sexp-based format for averaged
-   strategies (not raw cfr_state).  This merger works with the raw
-   cfr_state format produced by the training entrypoint.
+   We use association lists instead of Hashtbl.Poly.t to avoid Marshal
+   closure compatibility issues.  Core's Hashtbl.Poly.t contains closures
+   (the comparison function) whose module hashes differ across executables,
+   causing "unknown code module" errors when deserializing between the
+   trainer binary and the merger binary.
+
+   The trainer (rbm-train-mccfr-nl) converts hashtables to alists before
+   marshaling, and the merger converts them back.
 
    -----------------------------------------------------------------------
    Usage from the built binary
@@ -57,10 +63,9 @@
        -o merged_strategy.dat \
        worker_0.dat worker_1.dat worker_2.dat worker_3.dat
 
-     # Then evaluate the merged strategy:
-     opam exec -- dune exec -- rbm-slumbot-client \
-       --strategy merged_strategy.dat \
-       --hands 500 --mock
+     # Then convert to averaged strategy for evaluation:
+     # The merged file can be loaded by any tool that reads the same
+     # alist-based Marshal format.
 *)
 
 (* The actual implementation is in bin/merge_strategies.ml.

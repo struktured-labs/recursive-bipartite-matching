@@ -116,10 +116,20 @@ let () =
     (Hashtbl.length cfr_states.(1).regret_sum)
     (Hashtbl.length cfr_states.(1).strategy_sum);
 
-  (* Save raw cfr_state pair in Marshal format *)
+  (* Save raw cfr_state as association lists (no closures for Marshal
+     compatibility across different executables). *)
   printf "\nSaving raw cfr_state to %s...\n%!" !output_file;
+  let hashtbl_to_alist tbl =
+    Hashtbl.fold tbl ~init:[] ~f:(fun ~key ~data acc -> (key, data) :: acc)
+  in
+  let data =
+    ( hashtbl_to_alist cfr_states.(0).regret_sum
+    , hashtbl_to_alist cfr_states.(0).strategy_sum
+    , hashtbl_to_alist cfr_states.(1).regret_sum
+    , hashtbl_to_alist cfr_states.(1).strategy_sum )
+  in
   let oc = Out_channel.create !output_file in
-  Marshal.to_channel oc (cfr_states.(0), cfr_states.(1)) [ Marshal.Closures ];
+  Marshal.to_channel oc data [];
   Out_channel.close oc;
   let file_size = Int64.to_int_exn (Core_unix.stat !output_file).st_size in
   printf "  File size: %d bytes (%.1f MB)\n%!" file_size
