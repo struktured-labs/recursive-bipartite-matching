@@ -1,0 +1,31 @@
+{
+  "run_id": "run-20260316-225128",
+  "instance_id": "i-079e5e4c4fe4683ee",
+  "instance_type": "c6i.2xlarge",
+  "n_buckets": 20,
+  "iterations_requested": 10000000,
+  "iterations_completed": 5970000,
+  "training_status": "oom_killed",
+  "info_sets_p0": 13657644,
+  "info_sets_p1": 17305550,
+  "info_sets_total": 30963194,
+  "avg_utility_last": 0.9326,
+  "train_time_s": 6840,
+  "setup_time_s": 420,
+  "total_time_s": 7260,
+  "memory_gb": 16,
+  "spot_price_per_hr": 0.15,
+  "total_cost_usd": 0.30,
+  "slumbot_hands_played": 0,
+  "slumbot_mbb": "N/A",
+  "notes": "OOM killed at 5.97M iterations. 16GB RAM insufficient for 10M iter with 20 buckets and 3 bet fractions. Need 32-64GB for 10M+ iterations.",
+  "timestamp": "2026-03-17T04:48:00Z",
+  "learnings": {
+    "memory_per_infoset_bytes": 500,
+    "infoset_growth_rate": "~5300 per 10K iterations (decelerating)",
+    "training_speed_iter_per_sec": 900,
+    "abstraction_build_time_20b": 275,
+    "ocaml_install_time_s": 365,
+    "recommended_instance_10M_iter": "r6i.2xlarge (64GB) or c6i.4xlarge (32GB)"
+  }
+}
