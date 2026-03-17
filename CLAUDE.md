@@ -112,3 +112,14 @@ bin/
 - `_exn` versions for public functions
 - `.mli` files for public interfaces
 - `[@@deriving sexp, compare, equal]` on types
+
+## Python / tooling
+
+- Use `uv` for all Python package management (never raw pip)
+- AWS CLI installed via `uv tool install awscli`
+
+## Cloud / deployment
+
+- AWS spot instances for large-scale MCCFR training
+- Strategy files saved as OCaml Marshal (.dat) — merge with bin/merge_strategies.exe
+- Distributed training: each worker trains independently, merge regret sums after
