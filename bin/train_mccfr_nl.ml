@@ -9,9 +9,13 @@
     Uses {!Compact_cfr} (monomorphic string hashtables, pre-sized) for
     ~3x lower memory overhead vs {!Cfr_nolimit} (Hashtbl.Poly).
 
+    Supports periodic checkpointing via [--checkpoint-every N] so that
+    intermediate state survives OOM kills during long cloud runs.
+
     Usage:
       opam exec -- dune exec -- rbm-train-mccfr-nl \
-        --iterations 500000 --buckets 20 --output strategy.dat *)
+        --iterations 500000 --buckets 20 --output strategy.dat \
+        --checkpoint-every 100000 --checkpoint-prefix ckpt *)
 
 open Rbm
 
@@ -21,6 +25,8 @@ let () =
   let output_file = ref "strategy_cfr_state.dat" in
   let report_every = ref 10_000 in
   let initial_size = ref 1_000_000 in
+  let checkpoint_every = ref 0 in
+  let checkpoint_prefix = ref "checkpoint" in
 
   let args = [
     ("--iterations", Arg.Set_int iterations,
@@ -33,9 +39,13 @@ let () =
      "N  Report progress every N iterations (default: 10000)");
     ("--initial-size", Arg.Set_int initial_size,
      "N  Pre-size hash tables to N entries (default: 1000000)");
+    ("--checkpoint-every", Arg.Set_int checkpoint_every,
+     "N  Save checkpoint every N iterations (default: 0 = off)");
+    ("--checkpoint-prefix", Arg.Set_string checkpoint_prefix,
+     "PREFIX  Checkpoint filename prefix (default: checkpoint)");
   ] in
   Arg.parse args (fun _ -> ())
-    "rbm-train-mccfr-nl [--iterations N] [--buckets N] [--output FILE]";
+    "rbm-train-mccfr-nl [--iterations N] [--buckets N] [--output FILE] [--checkpoint-every N]";
 
   let config : Nolimit_holdem.config =
     { deck = Card.full_deck
@@ -49,11 +59,15 @@ let () =
   in
 
   printf "=== NL MCCFR Trainer (compact storage, raw cfr_state output) ===\n%!";
-  printf "  Iterations:    %d\n%!" !iterations;
-  printf "  Buckets:       %d\n%!" !n_buckets;
-  printf "  Output:        %s\n%!" !output_file;
-  printf "  Initial size:  %d\n%!" !initial_size;
-  printf "  Config:        SB=%d BB=%d stack=%d fracs=[0.5;1.0;2.0]\n%!"
+  printf "  Iterations:       %d\n%!" !iterations;
+  printf "  Buckets:          %d\n%!" !n_buckets;
+  printf "  Output:           %s\n%!" !output_file;
+  printf "  Initial size:     %d\n%!" !initial_size;
+  printf "  Checkpoint every: %d%s\n%!" !checkpoint_every
+    (match !checkpoint_every > 0 with
+     | true -> sprintf " (prefix: %s)" !checkpoint_prefix
+     | false -> " (disabled)");
+  printf "  Config:           SB=%d BB=%d stack=%d fracs=[0.5;1.0;2.0]\n%!"
     config.small_blind config.big_blind config.starting_stack;
   printf "\n%!";
 
@@ -101,16 +115,25 @@ let () =
     let value = Compact_cfr.mccfr_traverse ~config ~p1_cards ~p2_cards ~board
         ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser ~cfr_states in
     util_sum := !util_sum +. value;
-    match iter % !report_every = 0 with
-    | true ->
-      let avg_util = !util_sum /. Float.of_int iter in
-      let elapsed = Core_unix.gettimeofday () -. t_train_start in
-      let rate = Float.of_int iter /. elapsed in
-      let n0 = Hashtbl.length cfr_states.(0).regret_sum in
-      let n1 = Hashtbl.length cfr_states.(1).regret_sum in
-      printf "  [%d/%d] avg_util=%.4f infosets=(%d,%d) %.0f iter/s\n%!"
-        iter !iterations avg_util n0 n1 rate
-    | false -> ()
+    (match iter % !report_every = 0 with
+     | true ->
+       let avg_util = !util_sum /. Float.of_int iter in
+       let elapsed = Core_unix.gettimeofday () -. t_train_start in
+       let rate = Float.of_int iter /. elapsed in
+       let n0 = Hashtbl.length cfr_states.(0).regret_sum in
+       let n1 = Hashtbl.length cfr_states.(1).regret_sum in
+       printf "  [%d/%d] avg_util=%.4f infosets=(%d,%d) %.0f iter/s\n%!"
+         iter !iterations avg_util n0 n1 rate
+     | false -> ());
+    (match !checkpoint_every > 0 && iter % !checkpoint_every = 0 with
+     | true ->
+       let filename = sprintf "%s_%d.dat" !checkpoint_prefix iter in
+       printf "  [Checkpoint] Saving %s ...\n%!" filename;
+       Compact_cfr.save_checkpoint ~filename cfr_states;
+       let file_size = Int64.to_int_exn (Core_unix.stat filename).st_size in
+       printf "  [Checkpoint] Done (%.1f MB)\n%!"
+         (Float.of_int file_size /. 1_048_576.0)
+     | false -> ())
   done;
 
   let t_train_end = Core_unix.gettimeofday () in
@@ -127,21 +150,9 @@ let () =
     (Hashtbl.length cfr_states.(1).regret_sum)
     (Hashtbl.length cfr_states.(1).strategy_sum);
 
-  (* Save raw cfr_state as association lists (no closures for Marshal
-     compatibility across different executables). *)
+  (* Save final raw cfr_state *)
   printf "\nSaving raw cfr_state to %s...\n%!" !output_file;
-  let hashtbl_to_alist tbl =
-    Hashtbl.fold tbl ~init:[] ~f:(fun ~key ~data acc -> (key, data) :: acc)
-  in
-  let data =
-    ( hashtbl_to_alist cfr_states.(0).regret_sum
-    , hashtbl_to_alist cfr_states.(0).strategy_sum
-    , hashtbl_to_alist cfr_states.(1).regret_sum
-    , hashtbl_to_alist cfr_states.(1).strategy_sum )
-  in
-  let oc = Out_channel.create !output_file in
-  Marshal.to_channel oc data [];
-  Out_channel.close oc;
+  Compact_cfr.save_checkpoint ~filename:!output_file cfr_states;
   let file_size = Int64.to_int_exn (Core_unix.stat !output_file).st_size in
   printf "  File size: %d bytes (%.1f MB)\n%!" file_size
     (Float.of_int file_size /. 1_048_576.0);

@@ -532,11 +532,31 @@ and advance_to_next_round
 (* Top-level training loop                                             *)
 (* ------------------------------------------------------------------ *)
 
+(* ------------------------------------------------------------------ *)
+(* Checkpoint serialization (Marshal format, same as train_mccfr_nl)   *)
+(* ------------------------------------------------------------------ *)
+
+let save_checkpoint ~(filename : string) (cfr_states : cfr_state array) : unit =
+  let hashtbl_to_alist tbl =
+    Hashtbl.fold tbl ~init:[] ~f:(fun ~key ~data acc -> (key, data) :: acc)
+  in
+  let data =
+    ( hashtbl_to_alist cfr_states.(0).regret_sum
+    , hashtbl_to_alist cfr_states.(0).strategy_sum
+    , hashtbl_to_alist cfr_states.(1).regret_sum
+    , hashtbl_to_alist cfr_states.(1).strategy_sum )
+  in
+  let oc = Out_channel.create filename in
+  Marshal.to_channel oc data [];
+  Out_channel.close oc
+
 let train_mccfr ~(config : Nolimit_holdem.config)
     ~(abstraction : Abstraction.abstraction_partial)
     ~(iterations : int)
     ?(report_every = 10_000)
     ?(initial_size = 1_000_000)
+    ?(checkpoint_every = 0)
+    ?(checkpoint_prefix = "checkpoint")
     ()
   : strategy * strategy =
   let cfr_states = [| create ~size:initial_size (); create ~size:initial_size () |] in
@@ -569,14 +589,21 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     let value = mccfr_traverse ~config ~p1_cards ~p2_cards ~board
         ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser ~cfr_states in
     util_sum := !util_sum +. value;
-    match iter % report_every = 0 with
-    | true ->
-      let avg_util = !util_sum /. Float.of_int iter in
-      let n_infosets_0 = Hashtbl.length cfr_states.(0).regret_sum in
-      let n_infosets_1 = Hashtbl.length cfr_states.(1).regret_sum in
-      printf "  [Compact-MCCFR-NL] iter %d/%d  avg_util=%.4f  infosets=(%d, %d)\n%!"
-        iter iterations avg_util n_infosets_0 n_infosets_1
-    | false -> ()
+    (match iter % report_every = 0 with
+     | true ->
+       let avg_util = !util_sum /. Float.of_int iter in
+       let n_infosets_0 = Hashtbl.length cfr_states.(0).regret_sum in
+       let n_infosets_1 = Hashtbl.length cfr_states.(1).regret_sum in
+       printf "  [Compact-MCCFR-NL] iter %d/%d  avg_util=%.4f  infosets=(%d, %d)\n%!"
+         iter iterations avg_util n_infosets_0 n_infosets_1
+     | false -> ());
+    (match checkpoint_every > 0 && iter % checkpoint_every = 0 with
+     | true ->
+       let filename = sprintf "%s_%d.dat" checkpoint_prefix iter in
+       printf "  [Checkpoint] Saving %s ...\n%!" filename;
+       save_checkpoint ~filename cfr_states;
+       printf "  [Checkpoint] Done.\n%!"
+     | false -> ())
   done;
   let p0_avg = average_strategy cfr_states.(0) in
   let p1_avg = average_strategy cfr_states.(1) in

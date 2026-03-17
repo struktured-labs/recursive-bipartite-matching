@@ -31,9 +31,16 @@ val create : ?size:int -> unit -> cfr_state
     from a 52-card deck.  Returns (p1_hole, p2_hole, board). *)
 val sample_deal : unit -> (Card.t * Card.t) * (Card.t * Card.t) * Card.t list
 
+(** [save_checkpoint ~filename cfr_states] serialises raw CFR state
+    (regret_sum + strategy_sum for both players) to [filename] using
+    Marshal format.  Compatible with {!train_mccfr_nl}'s output. *)
+val save_checkpoint : filename:string -> cfr_state array -> unit
+
 (** [train_mccfr ~config ~abstraction ~iterations] runs external-sampling
     MCCFR for [iterations] iterations, alternating traverser each iteration.
     [~initial_size] pre-sizes the hash tables (default 1_000_000).
+    [~checkpoint_every] saves raw CFR state every N iterations (default 0 = off).
+    [~checkpoint_prefix] filename prefix for checkpoints (default "checkpoint").
     Returns (p1_average_strategy, p2_average_strategy).
     Prints convergence diagnostics every [~report_every] iterations. *)
 val train_mccfr
@@ -42,6 +49,8 @@ val train_mccfr
   -> iterations:int
   -> ?report_every:int
   -> ?initial_size:int
+  -> ?checkpoint_every:int
+  -> ?checkpoint_prefix:string
   -> unit
   -> strategy * strategy
 
