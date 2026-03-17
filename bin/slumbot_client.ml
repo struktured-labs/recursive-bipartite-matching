@@ -64,7 +64,7 @@ let time f =
 (* Strategy serialization                                              *)
 (* ------------------------------------------------------------------ *)
 
-let strategy_to_sexp (strat : Cfr_nolimit.strategy) : Sexp.t =
+let strategy_to_sexp (strat : Compact_cfr.strategy) : Sexp.t =
   let entries =
     Hashtbl.fold strat ~init:[] ~f:(fun ~key ~data acc ->
       let probs = List.map (Array.to_list data) ~f:(fun f ->
@@ -73,8 +73,8 @@ let strategy_to_sexp (strat : Cfr_nolimit.strategy) : Sexp.t =
   in
   Sexp.List entries
 
-let strategy_of_sexp (sexp : Sexp.t) : Cfr_nolimit.strategy =
-  let table = Hashtbl.Poly.create () in
+let strategy_of_sexp (sexp : Sexp.t) : Compact_cfr.strategy =
+  let table = Hashtbl.create (module String) in
   (match sexp with
    | Sexp.List entries ->
      List.iter entries ~f:(fun entry ->
@@ -90,11 +90,11 @@ let strategy_of_sexp (sexp : Sexp.t) : Cfr_nolimit.strategy =
    | _ -> failwith "strategy_of_sexp: expected list");
   table
 
-let save_strategy ~filename (p0 : Cfr_nolimit.strategy) (p1 : Cfr_nolimit.strategy) =
+let save_strategy ~filename (p0 : Compact_cfr.strategy) (p1 : Compact_cfr.strategy) =
   let sexp = Sexp.List [ strategy_to_sexp p0; strategy_to_sexp p1 ] in
   Out_channel.write_all filename ~data:(Sexp.to_string sexp)
 
-let load_strategy ~filename : Cfr_nolimit.strategy * Cfr_nolimit.strategy =
+let load_strategy ~filename : Compact_cfr.strategy * Compact_cfr.strategy =
   let sexp = Sexp.load_sexp filename in
   match sexp with
   | Sexp.List [ p0_sexp; p1_sexp ] ->
@@ -357,8 +357,8 @@ let _street_of_action (action : string) : int =
 
     Returns: (slumbot_action_string, info_key, strategy_probs) *)
 let select_slumbot_action
-    ~(p0_strat : Cfr_nolimit.strategy)
-    ~(p1_strat : Cfr_nolimit.strategy)
+    ~(p0_strat : Compact_cfr.strategy)
+    ~(p1_strat : Compact_cfr.strategy)
     ~(abstraction : Abstraction.abstraction_partial)
     ~(hole_cards : Card.t * Card.t)
     ~(board : Card.t list)
@@ -368,11 +368,11 @@ let select_slumbot_action
   : string * string * float array =
   (* Compute buckets *)
   let buckets =
-    Cfr_nolimit.precompute_buckets_equity ~abstraction ~hole_cards ~board
+    Compact_cfr.precompute_buckets_equity ~abstraction ~hole_cards ~board
   in
   let round_idx = action_state.street in
   let internal_history = slumbot_action_to_internal_history action in
-  let key = Cfr_nolimit.make_info_key ~buckets ~round_idx ~history:internal_history in
+  let key = Compact_cfr.make_info_key ~buckets ~round_idx ~history:internal_history in
   (* Our position in the trained strategy: client_pos 0 = BB = position 1 in
      internal model (SB=0, BB=1).  Actually Slumbot: client_pos 0 = BB,
      client_pos 1 = SB.  Our internal: position 0 = SB, position 1 = BB.
@@ -805,8 +805,8 @@ let api_act ~(mode : api_mode) ~(token : string) ~(incr : string) =
 let play_hand
     ~(mode : api_mode)
     ~(token : string option)
-    ~(p0_strat : Cfr_nolimit.strategy)
-    ~(p1_strat : Cfr_nolimit.strategy)
+    ~(p0_strat : Compact_cfr.strategy)
+    ~(p1_strat : Compact_cfr.strategy)
     ~(abstraction : Abstraction.abstraction_partial)
     ~(verbose : bool)
   : string option * int =
@@ -905,8 +905,8 @@ let play_hand
 let run_session
     ~(mode : api_mode)
     ~(num_hands : int)
-    ~(p0_strat : Cfr_nolimit.strategy)
-    ~(p1_strat : Cfr_nolimit.strategy)
+    ~(p0_strat : Compact_cfr.strategy)
+    ~(p1_strat : Compact_cfr.strategy)
     ~(abstraction : Abstraction.abstraction_partial)
     ~(verbose : bool)
     ~(username : string)
@@ -1037,7 +1037,7 @@ let () =
           !train_iters !n_buckets;
         let config = slumbot_config in
         let ((p0, p1), train_time) = time (fun () ->
-          Cfr_nolimit.train_mccfr ~config ~abstraction:preflop_abs
+          Compact_cfr.train_mccfr ~config ~abstraction:preflop_abs
             ~iterations:!train_iters ~report_every:10_000 ())
         in
         eprintf "[slumbot] Training complete in %.2fs. P0: %d, P1: %d info sets\n%!"
@@ -1050,7 +1050,7 @@ let () =
         (p0, p1)
       | false ->
         eprintf "[slumbot] WARNING: No strategy specified. Using uniform random.\n%!";
-        (Hashtbl.Poly.create (), Hashtbl.Poly.create ())
+        (Hashtbl.create (module String), Hashtbl.create (module String))
   in
 
   let mode =

@@ -6,6 +6,9 @@
     training: workers save raw state, then rbm-merge-strategies averages
     the regret and strategy sums across all workers.
 
+    Uses {!Compact_cfr} (monomorphic string hashtables, pre-sized) for
+    ~3x lower memory overhead vs {!Cfr_nolimit} (Hashtbl.Poly).
+
     Usage:
       opam exec -- dune exec -- rbm-train-mccfr-nl \
         --iterations 500000 --buckets 20 --output strategy.dat *)
@@ -17,6 +20,7 @@ let () =
   let n_buckets = ref 20 in
   let output_file = ref "strategy_cfr_state.dat" in
   let report_every = ref 10_000 in
+  let initial_size = ref 1_000_000 in
 
   let args = [
     ("--iterations", Arg.Set_int iterations,
@@ -27,6 +31,8 @@ let () =
      "FILE  Output cfr_state file in Marshal format (default: strategy_cfr_state.dat)");
     ("--report-every", Arg.Set_int report_every,
      "N  Report progress every N iterations (default: 10000)");
+    ("--initial-size", Arg.Set_int initial_size,
+     "N  Pre-size hash tables to N entries (default: 1000000)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-train-mccfr-nl [--iterations N] [--buckets N] [--output FILE]";
@@ -42,11 +48,12 @@ let () =
     }
   in
 
-  printf "=== NL MCCFR Trainer (raw cfr_state output) ===\n%!";
-  printf "  Iterations:  %d\n%!" !iterations;
-  printf "  Buckets:     %d\n%!" !n_buckets;
-  printf "  Output:      %s\n%!" !output_file;
-  printf "  Config:      SB=%d BB=%d stack=%d fracs=[0.5;1.0;2.0]\n%!"
+  printf "=== NL MCCFR Trainer (compact storage, raw cfr_state output) ===\n%!";
+  printf "  Iterations:    %d\n%!" !iterations;
+  printf "  Buckets:       %d\n%!" !n_buckets;
+  printf "  Output:        %s\n%!" !output_file;
+  printf "  Initial size:  %d\n%!" !initial_size;
+  printf "  Config:        SB=%d BB=%d stack=%d fracs=[0.5;1.0;2.0]\n%!"
     config.small_blind config.big_blind config.starting_stack;
   printf "\n%!";
 
@@ -58,17 +65,21 @@ let () =
   printf "  Abstraction built in %.2fs\n\n%!" (t1 -. t0);
 
   (* Train -- we replicate the training loop to capture raw cfr_state *)
-  let cfr_states = [| Cfr_nolimit.create (); Cfr_nolimit.create () |] in
+  let cfr_states =
+    [| Compact_cfr.create ~size:!initial_size ()
+     ; Compact_cfr.create ~size:!initial_size ()
+    |]
+  in
   let util_sum = ref 0.0 in
   let t_train_start = Core_unix.gettimeofday () in
 
   for iter = 1 to !iterations do
-    let (p1_cards, p2_cards, board) = Cfr_nolimit.sample_deal () in
+    let (p1_cards, p2_cards, board) = Compact_cfr.sample_deal () in
     let p1_buckets =
-      Cfr_nolimit.precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
+      Compact_cfr.precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
     in
     let p2_buckets =
-      Cfr_nolimit.precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
+      Compact_cfr.precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
     in
     let traverser = (iter - 1) % 2 in
     let p_invested = [| config.small_blind; config.big_blind |] in
@@ -77,7 +88,7 @@ let () =
       config.starting_stack - config.big_blind;
     |] in
     let round_start_invested = [| config.small_blind; config.big_blind |] in
-    let state : Cfr_nolimit.nl_state = {
+    let state : Compact_cfr.nl_state = {
       to_act = 0;
       round_idx = 0;
       num_raises = 1;
@@ -87,7 +98,7 @@ let () =
       round_start_invested;
       actions_remaining = 2;
     } in
-    let value = Cfr_nolimit.mccfr_traverse ~config ~p1_cards ~p2_cards ~board
+    let value = Compact_cfr.mccfr_traverse ~config ~p1_cards ~p2_cards ~board
         ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser ~cfr_states in
     util_sum := !util_sum +. value;
     match iter % !report_every = 0 with

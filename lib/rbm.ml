@@ -26,3 +26,4 @@ module Cfr_abstract = Cfr_abstract
 module Acpc_protocol = Acpc_protocol
 module Nolimit_holdem = Nolimit_holdem
 module Cfr_nolimit = Cfr_nolimit
+module Compact_cfr = Compact_cfr
