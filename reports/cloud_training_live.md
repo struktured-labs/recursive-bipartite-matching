@@ -1,16 +1,17 @@
 # Cloud Training Live Report
 
-Last updated: 2026-03-18 16:00 UTC
+Last updated: 2026-03-18 16:30 UTC
 
-## Active Instance: Breakeven Run
+## Active: Breakeven Run (169b, 25M→100M)
 
-| Instance | Type | RAM | Config | Status |
-|----------|------|-----|--------|--------|
-| i-0f3cbe94c35b0ef68 | r6i.8xlarge | 256GB | 169b resume 25M→100M | Downloading 18GB checkpoint from S3 |
+| Instance | Type | RAM | Progress | Info Sets | RAM Free | Avg Util |
+|----------|------|-----|----------|-----------|----------|----------|
+| i-0f3cbe94c35b0ef68 | r6i.8xlarge | 256GB | 25.49M/100M (25%) | 228.7M | 186GB ✓ | -0.004 🎯 |
 
-## Target: BREAKEVEN against Slumbot
+Resumed from 25M checkpoint. Training at ~800 iter/sec.
+Next checkpoint: 50M total (~7 hours)
 
-## Historical Results (Slumbot, 1000 hands each)
+## Complete Scaling Curve
 
 | Config | Training | bb/hand | Info Sets | Cost |
 |--------|---------|---------|-----------|------|
@@ -20,10 +21,5 @@ Last updated: 2026-03-18 16:00 UTC
 | 169b | 25M | **-0.47** | 225M | ~$20 |
 | 169b | 100M (running) | ??? | ~500M est | ~$56 |
 
-## Prediction (O(1/√T) convergence)
-- 50M: ~-0.33
-- 75M: ~-0.27
-- 100M: ~-0.24
-- Breakeven needs ~400M+ (resumable from checkpoints)
-
-## Total AWS Spend: ~$130 estimated (including this run)
+## Budget: $500 (spent ~$131, remaining ~$369)
+## Auto-scaling: will launch 400M run if 100M shows improvement
