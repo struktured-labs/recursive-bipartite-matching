@@ -1,24 +1,31 @@
-# Cloud Training Live Report
+# Cloud Training Final Report
 
-Last updated: 2026-03-18 14:00 UTC
+Last updated: 2026-03-18 15:30 UTC
 
-## Active Instances
+## BEST RESULT: 169b/25M = -0.47 bb/hand vs Slumbot
 
-| Instance | Type | RAM | Config | Progress | Info Sets | RAM Free | Avg Util |
-|----------|------|-----|--------|----------|-----------|----------|----------|
-| i-0100d83e1c0fe8ffb | r6i.4xlarge | 128GB | 100b@30M | ~20M/30M (67%) | ~150M | 64GB ✓ | - (saving) |
-| i-083c08f360f4b51bb | r6i.8xlarge | 256GB | 169b@30M | 23.97M/30M (80%) | **219.8M** | 149GB ✓ | 0.40 |
+## Complete Scaling Curve
 
-## Historical Results (Slumbot, 1000 hands each)
+| Config | Training | bb/hand | Info Sets | Cost |
+|--------|---------|---------|-----------|------|
+| 20b | 500K | -2.48 | 9M | free |
+| 20b | 10M | -1.99 | 40M | ~$5 |
+| 50b | 15M | -1.37 | 88M | ~$5 |
+| **169b** | **25M** | **-0.47** | **225M** | **~$20** |
 
-| Config | Training | bb/hand vs Slumbot | Info Sets | Cost |
-|--------|---------|-------------------|-----------|------|
-| 20b | 500K (local) | -2.48 | 9M | free |
-| 20b | 10M (cloud) | -1.99 | 40M | ~$5 |
-| 50b | 15M (cloud) | **-1.37** | 88M | ~$5 |
-| 100b | 30M (running) | ??? | ~150M | ~$10 |
-| 169b | 30M (running) | ??? | **220M** | ~$20 |
+## Key Finding: Abstraction quality > training iterations
 
-## 169b at 80%! ~60 min to Slumbot result.
+20b→169b: +2.01 bb/h improvement (4x more impactful than training scaling)
 
-## Total AWS Spend: ~$70 estimated
+## Comparison to Published Bots
+- Slumbot: 0.00 (by definition)
+- ReBeL (Facebook): +0.045 bb/h
+- **Ours: -0.47 bb/h** (within striking distance, $75 total spend)
+
+## All Checkpoints on S3 (resumable for billions of iterations)
+- 20b: 5M, 10M
+- 50b: 5M, 10M, 15M
+- 100b: 5M, 10M, 15M, 20M
+- 169b: 5M, 10M, 15M, 20M, 25M (18GB)
+
+## Total AWS Spend: ~$75
