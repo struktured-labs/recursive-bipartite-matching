@@ -995,6 +995,7 @@ let () =
   let password = ref "" in
   let checkpoint_every = ref 0 in
   let checkpoint_prefix = ref "checkpoint" in
+  let resume_file = ref "" in
 
   let args = [
     ("--train", Arg.Set_int train_iters,
@@ -1019,6 +1020,8 @@ let () =
      "N  Save checkpoint every N training iterations (default: 0 = off)");
     ("--checkpoint-prefix", Arg.Set_string checkpoint_prefix,
      "PREFIX  Checkpoint filename prefix (default: checkpoint)");
+    ("--resume", Arg.Set_string resume_file,
+     "FILE  Resume training from a checkpoint .dat file");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-slumbot-client [--train N | --strategy FILE] [--hands N] [--mock] [--verbose]";
@@ -1043,10 +1046,16 @@ let () =
           !train_iters !n_buckets;
         let config = slumbot_config in
         let ((p0, p1), train_time) = time (fun () ->
+          let resume_from =
+            match String.length !resume_file > 0 with
+            | true -> Some !resume_file
+            | false -> None
+          in
           Compact_cfr.train_mccfr ~config ~abstraction:preflop_abs
             ~iterations:!train_iters ~report_every:10_000
             ~checkpoint_every:!checkpoint_every
-            ~checkpoint_prefix:!checkpoint_prefix ())
+            ~checkpoint_prefix:!checkpoint_prefix
+            ?resume_from ())
         in
         eprintf "[slumbot] Training complete in %.2fs. P0: %d, P1: %d info sets\n%!"
           train_time (Hashtbl.length p0) (Hashtbl.length p1);

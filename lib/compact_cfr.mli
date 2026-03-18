@@ -36,11 +36,17 @@ val sample_deal : unit -> (Card.t * Card.t) * (Card.t * Card.t) * Card.t list
     Marshal format.  Compatible with {!train_mccfr_nl}'s output. *)
 val save_checkpoint : filename:string -> cfr_state array -> unit
 
+(** [load_checkpoint ~filename] loads a previously saved CFR state from disk.
+    Returns a 2-element array of cfr_states (P0, P1) with regret_sum and
+    strategy_sum hash tables restored. Use with [~resume_from] in train_mccfr. *)
+val load_checkpoint : filename:string -> cfr_state array
+
 (** [train_mccfr ~config ~abstraction ~iterations] runs external-sampling
     MCCFR for [iterations] iterations, alternating traverser each iteration.
     [~initial_size] pre-sizes the hash tables (default 1_000_000).
     [~checkpoint_every] saves raw CFR state every N iterations (default 0 = off).
     [~checkpoint_prefix] filename prefix for checkpoints (default "checkpoint").
+    [~resume_from] loads a checkpoint file and continues training from that state.
     Returns (p1_average_strategy, p2_average_strategy).
     Prints convergence diagnostics every [~report_every] iterations. *)
 val train_mccfr
@@ -51,6 +57,7 @@ val train_mccfr
   -> ?initial_size:int
   -> ?checkpoint_every:int
   -> ?checkpoint_prefix:string
+  -> ?resume_from:string
   -> unit
   -> strategy * strategy
 

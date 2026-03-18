@@ -536,6 +536,23 @@ and advance_to_next_round
 (* Checkpoint serialization (Marshal format, same as train_mccfr_nl)   *)
 (* ------------------------------------------------------------------ *)
 
+let load_checkpoint ~(filename : string) : cfr_state array =
+  let ic = In_channel.create filename in
+  let (p0_regret, p0_strat, p1_regret, p1_strat) :
+    (string * float array) list * (string * float array) list *
+    (string * float array) list * (string * float array) list =
+    Marshal.from_channel ic
+  in
+  In_channel.close ic;
+  let to_hashtbl lst =
+    let tbl = Hashtbl.create (module String) ~size:(List.length lst) in
+    List.iter lst ~f:(fun (k, v) -> Hashtbl.set tbl ~key:k ~data:v);
+    tbl
+  in
+  [| { regret_sum = to_hashtbl p0_regret; strategy_sum = to_hashtbl p0_strat }
+   ; { regret_sum = to_hashtbl p1_regret; strategy_sum = to_hashtbl p1_strat }
+  |]
+
 let save_checkpoint ~(filename : string) (cfr_states : cfr_state array) : unit =
   let hashtbl_to_alist tbl =
     Hashtbl.fold tbl ~init:[] ~f:(fun ~key ~data acc -> (key, data) :: acc)
@@ -557,9 +574,21 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     ?(initial_size = 1_000_000)
     ?(checkpoint_every = 0)
     ?(checkpoint_prefix = "checkpoint")
+    ?(resume_from : string option)
     ()
   : strategy * strategy =
-  let cfr_states = [| create ~size:initial_size (); create ~size:initial_size () |] in
+  let cfr_states =
+    match resume_from with
+    | Some filename ->
+      printf "  [Resume] Loading checkpoint from %s ...\n%!" filename;
+      let states = load_checkpoint ~filename in
+      printf "  [Resume] Loaded P0=%d P1=%d info sets. Continuing training.\n%!"
+        (Hashtbl.length states.(0).regret_sum)
+        (Hashtbl.length states.(1).regret_sum);
+      states
+    | None ->
+      [| create ~size:initial_size (); create ~size:initial_size () |]
+  in
   let util_sum = ref 0.0 in
   for iter = 1 to iterations do
     let (p1_cards, p2_cards, board) = sample_deal () in
