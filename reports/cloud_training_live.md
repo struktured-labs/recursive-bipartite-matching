@@ -1,31 +1,29 @@
-# Cloud Training Final Report
+# Cloud Training Live Report
 
-Last updated: 2026-03-18 15:30 UTC
+Last updated: 2026-03-18 16:00 UTC
 
-## BEST RESULT: 169b/25M = -0.47 bb/hand vs Slumbot
+## Active Instance: Breakeven Run
 
-## Complete Scaling Curve
+| Instance | Type | RAM | Config | Status |
+|----------|------|-----|--------|--------|
+| i-0f3cbe94c35b0ef68 | r6i.8xlarge | 256GB | 169b resume 25M→100M | Downloading 18GB checkpoint from S3 |
+
+## Target: BREAKEVEN against Slumbot
+
+## Historical Results (Slumbot, 1000 hands each)
 
 | Config | Training | bb/hand | Info Sets | Cost |
 |--------|---------|---------|-----------|------|
 | 20b | 500K | -2.48 | 9M | free |
 | 20b | 10M | -1.99 | 40M | ~$5 |
 | 50b | 15M | -1.37 | 88M | ~$5 |
-| **169b** | **25M** | **-0.47** | **225M** | **~$20** |
+| 169b | 25M | **-0.47** | 225M | ~$20 |
+| 169b | 100M (running) | ??? | ~500M est | ~$56 |
 
-## Key Finding: Abstraction quality > training iterations
+## Prediction (O(1/√T) convergence)
+- 50M: ~-0.33
+- 75M: ~-0.27
+- 100M: ~-0.24
+- Breakeven needs ~400M+ (resumable from checkpoints)
 
-20b→169b: +2.01 bb/h improvement (4x more impactful than training scaling)
-
-## Comparison to Published Bots
-- Slumbot: 0.00 (by definition)
-- ReBeL (Facebook): +0.045 bb/h
-- **Ours: -0.47 bb/h** (within striking distance, $75 total spend)
-
-## All Checkpoints on S3 (resumable for billions of iterations)
-- 20b: 5M, 10M
-- 50b: 5M, 10M, 15M
-- 100b: 5M, 10M, 15M, 20M
-- 169b: 5M, 10M, 15M, 20M, 25M (18GB)
-
-## Total AWS Spend: ~$75
+## Total AWS Spend: ~$130 estimated (including this run)
