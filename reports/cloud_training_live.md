@@ -1,6 +1,6 @@
 # Cloud Training Live Report
 
-Last updated: 2026-03-19 16:47 UTC
+Last updated: 2026-03-19 20:22 UTC
 
 ## Active: Resume Run (169b, 50M→100M)
 
@@ -12,8 +12,16 @@ IP: 98.93.74.244 | Cost: ~$3.02/hr
 | Setup (OCaml 5.2) | Done (3.5 min) | |
 | Download 50M ckpt | Done (102s, 26.9GB) | |
 | **50M Slumbot eval** | **Done** | **-1164.93 mbb/hand (-1.16 bb/hand)** |
-| Resume training | **In Progress** | 370K/50M (0.7%), avg_util=5.1, 95GB RAM |
+| Resume training | **In Progress** | 10.09M/50M (20%), avg_util=-0.28, 146GB RAM |
+| **10M checkpoint** | **Saved!** | 31GB, peak RAM 239GB (384GB handled it) |
 | 100M Slumbot eval | Pending | After training completes |
+
+### Checkpoint save RAM profile (10M = 60M total)
+- Steady state: 109GB
+- Peak during Marshal serialization: 239GB (+130GB spike)
+- After save complete: 146GB (buff/cache holds 31GB file)
+- 384GB instance: plenty of headroom (103GB free at peak)
+- This same spike (200GB+) killed the 256GB instance at 75M
 
 ## Previous Instance (TERMINATED)
 
@@ -34,4 +42,4 @@ Instance i-0f3cbe94c35b0ef68 died at 75M total iterations during checkpoint save
 Note: 50M result worse than 25M likely due to high variance (SE ≈ 0.9 bb/hand with 200bb stacks).
 95% CIs overlap. Need 10K+ hands for reliable comparison.
 
-## Budget: $500 (spent ~$260, remaining ~$240)
+## Budget: $500 (spent ~$270, remaining ~$230)
