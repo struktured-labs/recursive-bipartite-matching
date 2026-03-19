@@ -1,6 +1,6 @@
 # Cloud Training Live Report
 
-Last updated: 2026-03-19 16:30 UTC
+Last updated: 2026-03-19 16:47 UTC
 
 ## Active: Resume Run (169b, 50M→100M)
 
@@ -12,7 +12,7 @@ IP: 98.93.74.244 | Cost: ~$3.02/hr
 | Setup (OCaml 5.2) | Done (3.5 min) | |
 | Download 50M ckpt | Done (102s, 26.9GB) | |
 | **50M Slumbot eval** | **Done** | **-1164.93 mbb/hand (-1.16 bb/hand)** |
-| Resume training | **In Progress** | 50M more iters, ckpt every 10M |
+| Resume training | **In Progress** | 370K/50M (0.7%), avg_util=5.1, 95GB RAM |
 | 100M Slumbot eval | Pending | After training completes |
 
 ## Previous Instance (TERMINATED)
