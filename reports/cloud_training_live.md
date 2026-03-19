@@ -1,12 +1,12 @@
 # Cloud Training Live Report
 
-Last updated: 2026-03-19 03:30 UTC
+Last updated: 2026-03-19 03:45 UTC
 
 ## Active: Breakeven Run (169b, 25M→100M)
 
 | Total Progress | Info Sets | RAM Used | RAM Free | Avg Util | Checkpoints |
 |----------------|-----------|----------|----------|----------|-------------|
-| **54.55M/100M (55%)** | **372.0M** | 129GB | 116GB ✓ | +0.004 | ✅ 25M, ✅ 50M (27GB) |
+| **55.16M/100M (55%)** | **374.5M** | 129GB | 115GB ✓ | -0.03 | ✅ 25M, ✅ 50M (27GB) |
 
 Instance: i-0f3cbe94c35b0ef68 | r6i.8xlarge (256GB) | ~900 iter/sec
 HALFWAY! Next checkpoint: 75M total (~7 hours)
