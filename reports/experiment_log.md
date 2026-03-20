@@ -16,12 +16,15 @@ total memory, not M. Single-threaded shares one table.
 **Rule of thumb**: For RBM with 169 buckets on 128GB, use single-threaded.
 Parallel RBM needs 256GB+ (for 2 workers) or 768GB (for 4+ workers).
 
-## 2026-03-20 08:15 UTC — Single-Threaded Training at 30%
+## 2026-03-20 11:50 UTC — 5M CHECKPOINT COMPLETE, Slumbot Eval Running!
 
-**1.54M/5M** (30.8%), 29GB/123GB RAM, 109M info sets.
-Info set growth sub-linear (good — tree filling out).
-Extrapolating: ~94GB at 5M. Safe.
-Rate: ~8K iter/min. ETA: ~4.5 hours to 5M checkpoint + Slumbot eval.
+**Training**: 5M iters in 18,325s (5.1hr). 247M info sets (P0=96M, P1=151M). 63GB RAM.
+**Checkpoint**: checkpoint_5M_5000000.dat saved successfully.
+**Slumbot eval**: 2,980/25,000 hands (12%). Running avg: **-634 mbb/hand**.
+
+**EARLY SIGNAL**: -634 mbb at 5M RBM iters vs -1275 mbb at 60M equity iters.
+RBM at 5M is already ~2x better than equity at 60M (12x more training!).
+Still very early (big variance at 3K hands) but the direction is extremely promising.
 
 ---
 
