@@ -1054,6 +1054,8 @@ let () =
   let checkpoint_prefix = ref "checkpoint" in
   let resume_file = ref "" in
   let min_hands = ref 1000 in
+  let parallel = ref false in
+  let num_domains = ref 0 in
 
   let args = [
     ("--train", Arg.Set_int train_iters,
@@ -1082,6 +1084,10 @@ let () =
      "FILE  Resume training from a checkpoint .dat file");
     ("--min-hands", Arg.Set_int min_hands,
      "N  Warn if fewer than N hands played (default: 1000)");
+    ("--parallel", Arg.Set parallel,
+     "  Use parallel MCCFR training (all available cores)");
+    ("--domains", Arg.Set_int num_domains,
+     "N  Number of parallel domains (default: nproc - 1, implies --parallel)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-slumbot-client [--train N | --strategy FILE] [--hands N] [--mock] [--verbose]";
@@ -1102,8 +1108,19 @@ let () =
     | false ->
       match !train_iters > 0 with
       | true ->
-        eprintf "[slumbot] Training NL MCCFR for %d iterations (%d buckets)...\n%!"
-          !train_iters !n_buckets;
+        let use_parallel = !parallel || !num_domains > 0 in
+        let n_domains =
+          match !num_domains > 0 with
+          | true -> Some !num_domains
+          | false -> None
+        in
+        (match use_parallel with
+         | true ->
+           eprintf "[slumbot] Training NL MCCFR (PARALLEL) for %d iterations (%d buckets)...\n%!"
+             !train_iters !n_buckets
+         | false ->
+           eprintf "[slumbot] Training NL MCCFR for %d iterations (%d buckets)...\n%!"
+             !train_iters !n_buckets);
         let config = slumbot_config in
         let ((p0, p1), train_time) = time (fun () ->
           let resume_from =
@@ -1111,11 +1128,19 @@ let () =
             | true -> Some !resume_file
             | false -> None
           in
-          Compact_cfr.train_mccfr ~config ~abstraction:preflop_abs
-            ~iterations:!train_iters ~report_every:10_000
-            ~checkpoint_every:!checkpoint_every
-            ~checkpoint_prefix:!checkpoint_prefix
-            ?resume_from ())
+          match use_parallel with
+          | true ->
+            Compact_cfr.train_mccfr_parallel ~config ~abstraction:preflop_abs
+              ~iterations:!train_iters ~report_every:10_000
+              ~checkpoint_every:!checkpoint_every
+              ~checkpoint_prefix:!checkpoint_prefix
+              ?resume_from ?num_domains:n_domains ()
+          | false ->
+            Compact_cfr.train_mccfr ~config ~abstraction:preflop_abs
+              ~iterations:!train_iters ~report_every:10_000
+              ~checkpoint_every:!checkpoint_every
+              ~checkpoint_prefix:!checkpoint_prefix
+              ?resume_from ())
         in
         eprintf "[slumbot] Training complete in %.2fs. P0: %d, P1: %d info sets\n%!"
           train_time (Hashtbl.length p0) (Hashtbl.length p1);
