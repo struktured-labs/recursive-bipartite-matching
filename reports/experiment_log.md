@@ -46,7 +46,11 @@ Likely partial read on large buffer in `In_channel.input`. Needs fix.
 Launched 10M from scratch instead — loses 5M warm start but avoids the bug.
 ~10 hours to 10M checkpoint + 25K Slumbot eval.
 
-**TODO**: Fix chunked checkpoint resume (use looped reads for large buffers).
+**Checkpoint resume bug FIXED** (commit f73a817): read_exact loops for large buffers.
+
+### 10M Training Progress (fresh, no resume)
+- 25% (2.53M/10M), 154M info sets, ~2.5 hours to checkpoint + 25K Slumbot eval
+- Instance cost so far: ~$14 (~14 hours × $1/hr)
 
 ---
 
