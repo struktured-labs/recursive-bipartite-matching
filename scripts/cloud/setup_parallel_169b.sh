@@ -140,37 +140,11 @@ echo "    Downloaded: $CHECKPOINT_LOCAL ($(echo "scale=1; $CKPT_SIZE / 107374182
 echo "    Done in $(($(date +%s) - t0))s"
 
 # ----------------------------------------------------------------
-# Phase 6: Evaluate 60M strategy vs Slumbot (25K hands)
+# Phase 6: SKIP — 60M eval already done twice (confirmed -1.3 to -1.5 bb/hand)
 # ----------------------------------------------------------------
-echo ">>> Phase 6: Evaluate 60M strategy vs Slumbot ($SLUMBOT_HANDS hands)"
-echo "    (25K hands → ±0.5 bb/hand 95% CI at σ≈40)"
-t0=$(date +%s)
-
-cd "$WORK_DIR"
-eval $(opam env --switch=rbm)
-
-set +e
-dune exec -- rbm-slumbot-client \
-  --resume "$CHECKPOINT_LOCAL" \
-  --train 1 \
-  --buckets $N_BUCKETS \
-  --hands $SLUMBOT_HANDS \
-  2>&1 | tee "$RESULTS_DIR/slumbot_60M_eval.log"
-EVAL_EXIT=${PIPESTATUS[0]}
-set -e
-
-EVAL_TIME=$(($(date +%s) - t0))
-echo "    Evaluation exit code: $EVAL_EXIT"
-
-MBB_60M=$(grep -oP '[-0-9.]+(?= mbb/hand)' "$RESULTS_DIR/slumbot_60M_eval.log" | tail -1 2>/dev/null || echo "N/A")
-CI_60M=$(grep -oP '95% CI:.*' "$RESULTS_DIR/slumbot_60M_eval.log" | tail -1 2>/dev/null || echo "N/A")
-echo "    >>> 60M RESULT: ${MBB_60M} mbb/hand | ${CI_60M} in ${EVAL_TIME}s <<<"
-
-aws s3 cp "$RESULTS_DIR/slumbot_60M_eval.log" \
-  "s3://$S3_BUCKET/results/results_169b_60M_eval.txt" || true
-echo "    Uploaded 60M eval results to S3"
-
-echo "    Done in ${EVAL_TIME}s"
+echo ">>> Phase 6: SKIPPED (60M eval done in prior runs: -1.28/-1.45 bb/hand)"
+MBB_60M="skipped"
+CI_60M="see prior runs"
 
 # ----------------------------------------------------------------
 # Phase 7: Resume training from 60M → 200M total (PARALLEL)
@@ -212,6 +186,7 @@ dune exec -- rbm-slumbot-client \
   --checkpoint-every $CHECKPOINT_EVERY \
   --checkpoint-prefix checkpoint \
   --parallel \
+  --domains 8 \
   2>&1 | tee "$RESULTS_DIR/training_200M.log"
 TRAIN_EXIT=${PIPESTATUS[0]}
 set -e
