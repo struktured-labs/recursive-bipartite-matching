@@ -802,21 +802,34 @@ let write_hashtbl_chunked (oc : Out_channel.t) (tbl : (string, float array) Hash
       done);
     Out_channel.output oc ~buf:float_buf ~pos:0 ~len:(arr_len * 8))
 
+(** Read exactly [len] bytes from [ic] into [buf] starting at [pos].
+    Loops to handle partial reads from In_channel.input. *)
+let read_exact (ic : In_channel.t) ~(buf : Bytes.t) ~(pos : int) ~(len : int) : bool =
+  let remaining = ref len in
+  let offset = ref pos in
+  while !remaining > 0 do
+    let n = In_channel.input ic ~buf ~pos:!offset ~len:!remaining in
+    match n = 0 with
+    | true -> remaining := -1  (* EOF *)
+    | false ->
+      offset := !offset + n;
+      remaining := !remaining - n
+  done;
+  !remaining = 0
+
 let read_hashtbl_chunked (ic : In_channel.t) : (string, float array) Hashtbl.t =
   let n_entries = read_int64_le ic in
   let tbl = Hashtbl.create (module String) ~size:n_entries in
   for _ = 1 to n_entries do
     let key_len = read_int32_le ic in
     let key_buf = Bytes.create key_len in
-    let n_read = In_channel.input ic ~buf:key_buf ~pos:0 ~len:key_len in
-    (match n_read = key_len with
+    (match read_exact ic ~buf:key_buf ~pos:0 ~len:key_len with
      | true -> ()
      | false -> failwith "read_hashtbl_chunked: unexpected EOF reading key");
     let key = Bytes.to_string key_buf in
     let arr_len = read_int32_le ic in
     let float_buf = Bytes.create (arr_len * 8) in
-    let n_read = In_channel.input ic ~buf:float_buf ~pos:0 ~len:(arr_len * 8) in
-    (match n_read = arr_len * 8 with
+    (match read_exact ic ~buf:float_buf ~pos:0 ~len:(arr_len * 8) with
      | true -> ()
      | false -> failwith "read_hashtbl_chunked: unexpected EOF reading floats");
     let data = Array.init arr_len ~f:(fun i ->
