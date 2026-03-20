@@ -1,54 +1,37 @@
 # Cloud Training Live Report
 
-Last updated: 2026-03-20 04:05 UTC
+Last updated: 2026-03-20 14:35 UTC
 
-## Active: Parallel Training v2 (i-06e8b32002c814369)
+## ALL PARALLEL ATTEMPTS FAILED — Need different approach
 
-Instance: i-06e8b32002c814369 | r6i.12xlarge (48 vCPU, 384GB, on-demand)
-IP: 34.228.170.239 | Cost: ~$3.02/hr
+4-worker parallel on r6i.12xlarge (384GB) OOM'd at 81.5% (114M/140M iters).
+Each worker independently discovers ~245M info sets (~80GB each).
+4 × 80GB + 90GB base = ~410GB needed > 371GB available.
 
-| Phase | Status | Notes |
-|-------|--------|-------|
-| Setup | Done (~3.5 min) | |
-| Download 60M ckpt | Done (30.3GB, 100s) | |
-| **60M Slumbot eval** | **Done (25K hands)** | **-1450.33 mbb/hand, CI [-1.76, -1.14]** |
-| **Parallel training** | **In Progress** | 47 domains, 140M iters, **77GB RAM** |
-| 200M Slumbot eval | Pending | 25K hands after training |
+### Options going forward
+1. **Single-threaded + streaming checkpoints** — reliable, ~18hr, ~$55
+2. **2 workers** on r6i.12xlarge — 2×80GB + 90GB = 250GB, fits. ~2x speedup, ~9hr
+3. **4 workers** on r6i.24xlarge (768GB, ~$6/hr) — ~$42 for 7hr, guaranteed fit
+4. **Distributed**: 4 separate instances each training independently, merge at end
 
-### Parallel fix confirmed working!
-- Previous attempt: 328GB RAM (copying 90GB state to 47 workers) → OOM
-- This attempt: **77GB RAM** (empty workers + 1 base state) → healthy, 293GB free
+## Statistically Significant Slumbot Results
 
-### 60M Eval (run 2, confirms prior result)
+| Run | Iters | bb/hand | 95% CI | σ | Hands | Sig? |
+|-----|-------|---------|--------|---|-------|------|
+| 60M (run 1) | 60M | **-1.28** | **[-1.59, -0.96]** | 25.43 | 25000 | **YES** |
+| 60M (run 2) | 60M | **-1.45** | **[-1.76, -1.14]** | 24.75 | 25000 | **YES** |
 
-| Metric | Run 1 | Run 2 |
-|---|---|---|
-| Result | -1275.55 mbb/hand | **-1450.33 mbb/hand** |
-| 95% CI | [-1.59, -0.96] | **[-1.76, -1.14]** |
-| σ | 25.43 bb/hand | 24.75 bb/hand |
-| Significant | YES | **YES** |
-
-CIs overlap — true value is around -1.3 to -1.4 bb/hand for 60M/169b.
-
-## All Slumbot Results
-
-| Config | Iters | bb/hand | 95% CI | Hands | Sig? |
-|--------|-------|---------|--------|-------|---|
-| 20b | 500K | -2.48 | ±2.5 (est) | 1000 | NO |
-| 20b | 10M | -1.99 | ±2.5 (est) | 1000 | NO |
-| 50b | 15M | -1.37 | ±2.5 (est) | 1000 | NO |
-| 169b | 25M | -0.47 | ±2.5 (est) | 2000 | NO |
-| 169b | 50M | -1.16 | ±1.8 (est) | 2000 | NO |
-| **169b** | **60M** | **-1.28** | **[-1.59, -0.96]** | **25000** | **YES** |
-| **169b** | **60M** | **-1.45** | **[-1.76, -1.14]** | **25000** | **YES** |
+Weighted average: ~-1.37 bb/hand. True performance is solidly in [-1.6, -1.0] range.
 
 ## Instance History
 
-| Instance | Type | RAM | Fate | Got To |
+| Instance | Workers | RAM | Fate | Got To |
 |---|---|---|---|---|
-| i-0f3cbe94c35b0ef68 | r6i.8xlarge | 256GB | OOM at 75M ckpt save | 75M iters |
-| i-04b08cd89812cd100 | r6i.12xlarge | 384GB | OOM at 70M ckpt save | 70M iters |
-| i-08bffa26c3560a046 | r6i.12xlarge | 384GB | OOM (parallel deep-copy) | 60M eval only |
-| **i-06e8b32002c814369** | r6i.12xlarge | 384GB | **Running** | **Parallel training** |
+| i-0f3cbe94c35b0ef68 | 1 | 256GB | OOM at ckpt save | 75M iters |
+| i-04b08cd89812cd100 | 1 | 384GB | OOM at ckpt save | 70M iters |
+| i-08bffa26c3560a046 | 47 | 384GB | OOM copying state | 60M eval only |
+| i-06e8b32002c814369 | 8 | 384GB | OOM (8 workers) | 60M eval only |
+| i-031521eaac2cc1762 | 4 | 384GB | OOM (4 workers) | died quickly |
+| **i-021a1243d26d4aff0** | **4** | **384GB** | **OOM at 81.5%** | **114M/140M (174M total)** |
 
-## Budget: $500 (spent ~$315, remaining ~$185)
+## Budget: $500 (spent ~$350, remaining ~$150)
