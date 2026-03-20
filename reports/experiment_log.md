@@ -1,18 +1,18 @@
 # Experiment Log
 
-## 2026-03-20 06:03 UTC — Checkpoint 1 Training (70%) — RAM WARNING
+## 2026-03-20 06:18 UTC — OOM at 95%, Relaunched with 4 Domains
 
-Instance i-0dc922cf7e7d7930d: **3.49M/5M iters** (70%) of first checkpoint.
-16 parallel workers, **92GB/123GB RAM** (31GB free). ~10M info sets per worker.
-~15 min to checkpoint completion.
+**OOM killed** at 4.75M/5M (95%). Exit code 137. 16 workers × 12M info sets
+each = ~192M total info sets in 16 separate hash tables → exceeded 123GB.
+No checkpoint saved.
 
-**RAM RISK**: 92GB at 70%. Extrapolating: ~131GB at 100% > 123GB available.
-Post-training merge (combining 16 worker states) will spike further.
-OOM kill possible. Streaming checkpoints won't help — the issue is the
-16 independent worker hash tables growing during training.
+**Relaunched** on same instance with `--domains 4` (4 workers instead of 16).
+4 × 12M = ~48GB estimated, well within 123GB. Training ~4x slower but safe.
+Abstraction building now, training in ~5 min.
 
-**If OOM**: Reduce to 8 workers on next attempt, or use r6i.8xlarge (256GB)
-when vCPU quota frees up.
+**Lesson**: RBM bucketing creates far more info sets per iteration than equity
+(~12M per worker at 333K iters vs ~200M total at 60M iters with equity).
+Parallel workers multiply this by N. Must size workers to RAM.
 
 ---
 
