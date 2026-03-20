@@ -34,15 +34,27 @@ module Action = struct
     | Check -> "k"
     | Call -> "c"
     | Bet_frac f ->
-      (match Float.( = ) f 0.5 with
-       | true -> "h"
+      (match Float.( = ) f 0.25 with
+       | true -> "q"  (* quarter pot *)
        | false ->
-         match Float.( = ) f 1.0 with
-         | true -> "p"
+         match Float.( = ) f 0.33 with
+         | true -> "t"  (* third pot *)
          | false ->
-           match Float.( = ) f 2.0 with
-           | true -> "d"
-           | false -> sprintf "b%.0f" (f *. 100.0))
+           match Float.( = ) f 0.5 with
+           | true -> "h"  (* half pot *)
+           | false ->
+             match Float.( = ) f 0.75 with
+             | true -> "r"  (* three-quarter pot *)
+             | false ->
+               match Float.( = ) f 1.0 with
+               | true -> "p"  (* pot *)
+               | false ->
+                 match Float.( = ) f 1.5 with
+                 | true -> "o"  (* overbet *)
+                 | false ->
+                   match Float.( = ) f 2.0 with
+                   | true -> "d"  (* double pot *)
+                   | false -> sprintf "b%.0f" (f *. 100.0))
     | All_in -> "a"
 end
 
@@ -113,6 +125,16 @@ let six_max_short_config =
   ; bet_fractions = [ 0.5; 1.0 ]
   ; max_raises_per_round = 4
   ; num_players = 6
+  }
+
+let expanded_config =
+  { deck = Card.full_deck
+  ; small_blind = 1
+  ; big_blind = 2
+  ; starting_stack = 400  (* 200 big blinds *)
+  ; bet_fractions = [ 0.25; 0.33; 0.5; 0.75; 1.0; 1.5; 2.0 ]
+  ; max_raises_per_round = 4
+  ; num_players = 2
   }
 
 (* ------------------------------------------------------------------ *)
@@ -501,3 +523,89 @@ let game_tree_for_deal ~(config : config) ~(p1_cards : Card.t * Card.t)
     };
   |] in
   game_tree_for_deal_n ~config ~players ~board
+
+(* ------------------------------------------------------------------ *)
+(* Showdown distribution tree (for RBM bucketing)                      *)
+(* ------------------------------------------------------------------ *)
+
+(** Build a compact showdown distribution tree for a hand at a given
+    board state.  Samples board completions and opponent hands to create
+    a small tree (~max_board_samples * max_opponents nodes) capturing
+    the hand's strength distribution.
+
+    This is the NL equivalent of {!Limit_holdem.showdown_distribution_tree}.
+    The tree structure is identical — only the node label type differs
+    ([Node_label.t] uses [winners] list instead of [winner] option).
+    Since {!Distance.compute} is polymorphic in label type, these trees
+    work directly with the RBM distance metric. *)
+let showdown_distribution_tree ?(max_opponents = 15) ?(max_board_samples = 5)
+    ~config:_ ~player ~hole_cards ~board_visible () =
+  let (h1, h2) = hole_cards in
+  let dealt = [ h1; h2 ] @ board_visible in
+  let remaining =
+    List.filter Card.full_deck ~f:(fun c ->
+      not (List.exists dealt ~f:(fun cc -> Card.equal c cc)))
+  in
+  let n_board_needed = 5 - List.length board_visible in
+  let remaining_arr = Array.of_list remaining in
+  let n_rem = Array.length remaining_arr in
+  let children = ref [] in
+  let n_boards_sampled = ref 0 in
+  while !n_boards_sampled < max_board_samples do
+    (* Sample board completion via Fisher-Yates partial shuffle *)
+    for i = 0 to Int.min (n_board_needed + 2 - 1) (n_rem - 1) do
+      let j = i + Random.int (n_rem - i) in
+      let tmp = remaining_arr.(i) in
+      remaining_arr.(i) <- remaining_arr.(j);
+      remaining_arr.(j) <- tmp
+    done;
+    let extra_board =
+      match n_board_needed with
+      | 0 -> []
+      | k -> List.init (Int.min k n_rem) ~f:(fun i -> remaining_arr.(i))
+    in
+    let full_board = board_visible @ extra_board in
+    (* Sample opponents from remaining cards after board *)
+    let opp_start = n_board_needed in
+    let n_opp_available = (n_rem - opp_start) / 2 in
+    let n_opps = Int.min max_opponents n_opp_available in
+    (* Partial shuffle for opponents *)
+    for i = opp_start to Int.min (opp_start + n_opps * 2 - 1) (n_rem - 1) do
+      let j = i + Random.int (n_rem - i) in
+      let tmp = remaining_arr.(i) in
+      remaining_arr.(i) <- remaining_arr.(j);
+      remaining_arr.(j) <- tmp
+    done;
+    let opp_leaves = ref [] in
+    for k = 0 to n_opps - 1 do
+      let o1 = remaining_arr.(opp_start + k * 2) in
+      let o2 = remaining_arr.(opp_start + k * 2 + 1) in
+      let p1h = [ h1; h2 ] @ full_board in
+      let p2h = [ o1; o2 ] @ full_board in
+      let cmp = Hand_eval7.compare_hands7 p1h p2h in
+      let value =
+        match player with
+        | 0 ->
+          (match cmp > 0 with true -> 1.0 | false ->
+           match cmp = 0 with true -> 0.0 | false -> -1.0)
+        | _ ->
+          (match cmp > 0 with true -> -1.0 | false ->
+           match cmp = 0 with true -> 0.0 | false -> 1.0)
+      in
+      opp_leaves :=
+        Tree.leaf ~label:(Node_label.Terminal { winners = []; pot = 0 })
+          ~value
+        :: !opp_leaves
+    done;
+    children :=
+      Tree.node
+        ~label:(Node_label.Chance { description = "board_sample" })
+        ~children:(List.rev !opp_leaves)
+      :: !children;
+    Int.incr n_boards_sampled
+  done;
+  Tree.node
+    ~label:(Node_label.Chance {
+      description = sprintf "showdown_dist p%d" (player + 1)
+    })
+    ~children:(List.rev !children)

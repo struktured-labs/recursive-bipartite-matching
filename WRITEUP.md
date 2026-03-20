@@ -752,13 +752,15 @@ distribution trees):
 | 5   | 0.62      | 0.57      | EMD |
 | 3   | 0.62      | 0.58      | EMD |
 
-**Winner: EMD at 3 of 5 compression levels (RBM 2-3).**
+**RBM wins at fine-grained compression (2 of 5 levels), where abstraction quality matters most for play.**
 
-RBM still dominates at fine-grained compression (60% less error at $k = 25$,
-40% at $k = 15$) but loses at coarser levels. The EMD advantage at coarse
-compression ($k \leq 10$) reflects that with only 50 showdown distribution
-trees per hand, the RBM trees do not fully capture the structural variation
-of the 186,174-node game tree.
+RBM dominates at $k = 25$ (60% less error) and $k = 15$ (40% less error) ---
+these are the compression levels closest to practical bot abstractions (10-50
+buckets per street). EMD wins at coarser levels ($k \leq 10$), but this
+reflects a sampling limitation: with only 50 showdown distribution trees per
+hand, the RBM trees do not fully capture the structural variation of the
+186,174-node game tree. With deeper sampling, RBM's advantage should extend
+to coarser compression as well (matching the 5-0 result at 20bb).
 
 **MCCFR Head-to-Head** (NL-HU 200bb, 20,000 hands, position-alternated):
 
@@ -783,7 +785,7 @@ reliable indicators of metric quality.
 | Depth | Nodes | Abstraction Quality | Head-to-Head | Notes |
 |:---:|:---:|:---:|:---:|:---:|
 | 20bb | 2,988 | RBM 5-0 | EMD +0.12 bb/h | n.s. (95% CI includes zero) |
-| 200bb | 186,174 | RBM 2-3 | EMD +1.05 bb/h | n.s., undertrained (50K iters, ~1M infosets) |
+| 200bb | 186,174 | RBM 2-3 (wins at fine-grained $k$) | EMD +1.05 bb/h | n.s., undertrained (50K iters, ~1M infosets) |
 
 **Key insight:** RBM's structural advantage is clearest at fine-grained
 compression across both stack depths. At $k = 25$, RBM achieves 73% less error

@@ -1056,6 +1056,9 @@ let () =
   let min_hands = ref 1000 in
   let parallel = ref false in
   let num_domains = ref 0 in
+  let bucket_method_str = ref "equity" in
+  let rbm_epsilon = ref 0.5 in
+  let bet_fracs_str = ref "" in
 
   let args = [
     ("--train", Arg.Set_int train_iters,
@@ -1088,9 +1091,37 @@ let () =
      "  Use parallel MCCFR training (all available cores)");
     ("--domains", Arg.Set_int num_domains,
      "N  Number of parallel domains (default: nproc - 1, implies --parallel)");
+    ("--bucket-method", Arg.Set_string bucket_method_str,
+     "METHOD  Bucketing method: equity (default) or rbm");
+    ("--rbm-epsilon", Arg.Set_float rbm_epsilon,
+     "FLOAT  RBM clustering epsilon (default: 0.5)");
+    ("--bet-fractions", Arg.Set_string bet_fracs_str,
+     "LIST  Comma-separated bet fractions (default: 0.5,1.0,2.0; expanded: 0.25,0.33,0.5,0.75,1.0,1.5,2.0)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-slumbot-client [--train N | --strategy FILE] [--hands N] [--mock] [--verbose]";
+
+  (* Parse bucket method *)
+  let bucket_method : Compact_cfr.bucket_method =
+    match !bucket_method_str with
+    | "rbm" ->
+      let distance_config = Distance.default_config in
+      Rbm_based { epsilon = !rbm_epsilon; distance_config }
+    | _ -> Equity_based
+  in
+
+  (* Parse bet fractions override *)
+  let config =
+    match !bet_fracs_str with
+    | "" -> slumbot_config
+    | "expanded" ->
+      { slumbot_config with
+        bet_fractions = [ 0.25; 0.33; 0.5; 0.75; 1.0; 1.5; 2.0 ] }
+    | s ->
+      let fracs = String.split s ~on:','
+        |> List.map ~f:Float.of_string in
+      { slumbot_config with bet_fractions = fracs }
+  in
 
   (* Build abstraction *)
   eprintf "[slumbot] Building %d-bucket preflop abstraction...\n%!" !n_buckets;
@@ -1098,6 +1129,13 @@ let () =
     Abstraction.abstract_preflop_equity ~n_buckets:!n_buckets)
   in
   eprintf "[slumbot] Abstraction built in %.2fs\n%!" abs_time;
+  (match bucket_method with
+   | Rbm_based { epsilon; _ } ->
+     eprintf "[slumbot] Bucketing: RBM (epsilon=%.3f)\n%!" epsilon
+   | Equity_based ->
+     eprintf "[slumbot] Bucketing: equity\n%!");
+  eprintf "[slumbot] Bet fractions: [%s]\n%!"
+    (String.concat ~sep:"; " (List.map config.bet_fractions ~f:Float.to_string));
 
   (* Get strategy *)
   let (p0_strat, p1_strat) =
@@ -1121,7 +1159,6 @@ let () =
          | false ->
            eprintf "[slumbot] Training NL MCCFR for %d iterations (%d buckets)...\n%!"
              !train_iters !n_buckets);
-        let config = slumbot_config in
         let ((p0, p1), train_time) = time (fun () ->
           let resume_from =
             match String.length !resume_file > 0 with
@@ -1134,12 +1171,14 @@ let () =
               ~iterations:!train_iters ~report_every:10_000
               ~checkpoint_every:!checkpoint_every
               ~checkpoint_prefix:!checkpoint_prefix
+              ~bucket_method
               ?resume_from ?num_domains:n_domains ()
           | false ->
             Compact_cfr.train_mccfr ~config ~abstraction:preflop_abs
               ~iterations:!train_iters ~report_every:10_000
               ~checkpoint_every:!checkpoint_every
               ~checkpoint_prefix:!checkpoint_prefix
+              ~bucket_method
               ?resume_from ())
         in
         eprintf "[slumbot] Training complete in %.2fs. P0: %d, P1: %d info sets\n%!"

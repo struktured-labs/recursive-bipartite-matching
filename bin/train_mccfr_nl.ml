@@ -28,6 +28,9 @@ let () =
   let checkpoint_every = ref 0 in
   let checkpoint_prefix = ref "checkpoint" in
   let format = ref "chunked" in
+  let bucket_method_str = ref "equity" in
+  let rbm_epsilon = ref 0.5 in
+  let bet_fracs_str = ref "" in
 
   let args = [
     ("--iterations", Arg.Set_int iterations,
@@ -46,11 +49,17 @@ let () =
      "PREFIX  Checkpoint filename prefix (default: checkpoint)");
     ("--format", Arg.Set_string format,
      "FORMAT  Checkpoint format: chunked (default, low memory) or marshal (legacy)");
+    ("--bucket-method", Arg.Set_string bucket_method_str,
+     "METHOD  Bucketing method: equity (default) or rbm");
+    ("--rbm-epsilon", Arg.Set_float rbm_epsilon,
+     "FLOAT  RBM clustering epsilon (default: 0.5)");
+    ("--bet-fractions", Arg.Set_string bet_fracs_str,
+     "LIST  Comma-separated bet fractions (default: 0.5,1.0,2.0; expanded: 0.25,0.33,0.5,0.75,1.0,1.5,2.0)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-train-mccfr-nl [--iterations N] [--buckets N] [--output FILE] [--checkpoint-every N] [--format chunked|marshal]";
 
-  let config : Nolimit_holdem.config =
+  let base_config : Nolimit_holdem.config =
     { deck = Card.full_deck
     ; small_blind = 50
     ; big_blind = 100
@@ -59,6 +68,24 @@ let () =
     ; max_raises_per_round = 4
     ; num_players = 2
     }
+  in
+  let config =
+    match !bet_fracs_str with
+    | "" -> base_config
+    | "expanded" ->
+      { base_config with
+        bet_fractions = [ 0.25; 0.33; 0.5; 0.75; 1.0; 1.5; 2.0 ] }
+    | s ->
+      let fracs = String.split s ~on:','
+        |> List.map ~f:Float.of_string in
+      { base_config with bet_fractions = fracs }
+  in
+  let bucket_method : Compact_cfr.bucket_method =
+    match !bucket_method_str with
+    | "rbm" ->
+      let distance_config = Distance.default_config in
+      Rbm_based { epsilon = !rbm_epsilon; distance_config }
+    | _ -> Equity_based
   in
 
   printf "=== NL MCCFR Trainer (compact storage, raw cfr_state output) ===\n%!";
@@ -71,8 +98,14 @@ let () =
      | true -> sprintf " (prefix: %s)" !checkpoint_prefix
      | false -> " (disabled)");
   printf "  Format:           %s\n%!" !format;
-  printf "  Config:           SB=%d BB=%d stack=%d fracs=[0.5;1.0;2.0]\n%!"
-    config.small_blind config.big_blind config.starting_stack;
+  printf "  Config:           SB=%d BB=%d stack=%d fracs=[%s]\n%!"
+    config.small_blind config.big_blind config.starting_stack
+    (String.concat ~sep:";" (List.map config.bet_fractions ~f:Float.to_string));
+  (match bucket_method with
+   | Compact_cfr.Rbm_based { epsilon; _ } ->
+     printf "  Bucketing:        RBM (epsilon=%.3f)\n%!" epsilon
+   | Compact_cfr.Equity_based ->
+     printf "  Bucketing:        equity\n%!");
   printf "\n%!";
 
   let save_fn =
@@ -94,16 +127,34 @@ let () =
      ; Compact_cfr.create ~size:!initial_size ()
     |]
   in
+  let postflop_states =
+    match bucket_method with
+    | Compact_cfr.Rbm_based _ ->
+      [| Compact_cfr.create_postflop_state ()
+       ; Compact_cfr.create_postflop_state ()
+      |]
+    | Compact_cfr.Equity_based -> [||]
+  in
   let util_sum = ref 0.0 in
   let t_train_start = Core_unix.gettimeofday () in
 
   for iter = 1 to !iterations do
     let (p1_cards, p2_cards, board) = Compact_cfr.sample_deal () in
     let p1_buckets =
-      Compact_cfr.precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
+      match bucket_method with
+      | Compact_cfr.Equity_based ->
+        Compact_cfr.precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
+      | Compact_cfr.Rbm_based { epsilon; distance_config } ->
+        Compact_cfr.precompute_buckets_rbm ~abstraction ~config ~epsilon ~distance_config
+          ~postflop:postflop_states.(0) ~hole_cards:p1_cards ~board ~player:0
     in
     let p2_buckets =
-      Compact_cfr.precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
+      match bucket_method with
+      | Compact_cfr.Equity_based ->
+        Compact_cfr.precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
+      | Compact_cfr.Rbm_based { epsilon; distance_config } ->
+        Compact_cfr.precompute_buckets_rbm ~abstraction ~config ~epsilon ~distance_config
+          ~postflop:postflop_states.(1) ~hole_cards:p2_cards ~board ~player:1
     in
     let traverser = (iter - 1) % 2 in
     let p_invested = [| config.small_blind; config.big_blind |] in

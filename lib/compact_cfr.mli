@@ -63,6 +63,22 @@ val load_checkpoint_marshal : filename:string -> cfr_state array
     with the chunked-format magic header ["RBMCFR01"]. *)
 val is_chunked_format : filename:string -> bool
 
+(** Bucketing method selector for MCCFR training.
+
+    [Equity_based]: fast O(1) equity quantization (default, no RBM guarantees).
+    [Rbm_based { epsilon; distance_config }]: builds showdown distribution
+    trees per street and clusters by RBM distance, preserving formal error
+    bounds from Theorem 9.2. *)
+type bucket_method =
+  | Equity_based
+  | Rbm_based of { epsilon : float; distance_config : Distance.config }
+
+(** Mutable per-player per-street cluster state for RBM bucketing. *)
+type postflop_state
+
+(** [create_postflop_state ()] returns a fresh (empty) cluster state. *)
+val create_postflop_state : unit -> postflop_state
+
 (** [train_mccfr ~config ~abstraction ~iterations] runs external-sampling
     MCCFR for [iterations] iterations, alternating traverser each iteration.
     [~initial_size] pre-sizes the hash tables (default 1_000_000).
@@ -80,6 +96,7 @@ val train_mccfr
   -> ?checkpoint_every:int
   -> ?checkpoint_prefix:string
   -> ?resume_from:string
+  -> ?bucket_method:bucket_method
   -> unit
   -> strategy * strategy
 
@@ -97,6 +114,22 @@ val precompute_buckets_equity
   :  abstraction:Abstraction.abstraction_partial
   -> hole_cards:Card.t * Card.t
   -> board:Card.t list
+  -> int array
+
+(** [precompute_buckets_rbm ~abstraction ~config ~epsilon ~distance_config
+      ~postflop ~hole_cards ~board ~player]
+    returns a 4-element array of bucket assignments using RBM distance
+    for post-flop streets.  Preflop uses the same canonical-hand abstraction
+    as equity-based bucketing. *)
+val precompute_buckets_rbm
+  :  abstraction:Abstraction.abstraction_partial
+  -> config:Nolimit_holdem.config
+  -> epsilon:float
+  -> distance_config:Distance.config
+  -> postflop:postflop_state
+  -> hole_cards:Card.t * Card.t
+  -> board:Card.t list
+  -> player:int
   -> int array
 
 (** [regret_matching regrets] converts cumulative regrets into a strategy
@@ -162,5 +195,6 @@ val train_mccfr_parallel
   -> ?checkpoint_prefix:string
   -> ?resume_from:string
   -> ?num_domains:int
+  -> ?bucket_method:bucket_method
   -> unit
   -> strategy * strategy

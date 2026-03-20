@@ -70,6 +70,10 @@ val short_stack_config : config
     6 players. *)
 val six_max_short_config : config
 
+(** Expanded heads-up config: 200bb deep, 7 bet sizes
+    [0.25; 0.33; 0.5; 0.75; 1.0; 1.5; 2.0]. *)
+val expanded_config : config
+
 (** Generate heads-up no-limit game tree for a specific deal.
     [board] must contain exactly 5 community cards. *)
 val game_tree_for_deal
@@ -87,4 +91,24 @@ val game_tree_for_deal_n
   :  config:config
   -> players:player_state array
   -> board:Card.t list
+  -> Node_label.t Tree.t
+
+(** Build a compact showdown distribution tree for RBM-based bucketing.
+
+    Samples [max_board_samples] board completions and [max_opponents]
+    opponent hands to create a small tree capturing the hand's strength
+    distribution at a given board state.  The tree structure is compatible
+    with {!Distance.compute} for RBM distance computation.
+
+    [board_visible] is the currently visible board cards (3 for flop,
+    4 for turn, 5 for river).  [player] is 0 or 1 (determines value
+    sign convention). *)
+val showdown_distribution_tree
+  :  ?max_opponents:int
+  -> ?max_board_samples:int
+  -> config:config
+  -> player:int
+  -> hole_cards:Card.t * Card.t
+  -> board_visible:Card.t list
+  -> unit
   -> Node_label.t Tree.t

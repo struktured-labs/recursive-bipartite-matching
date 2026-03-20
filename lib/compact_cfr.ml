@@ -215,6 +215,143 @@ let precompute_buckets_equity
     compute_bucket_equity ~abstraction ~hole_cards ~board ~round_idx)
 
 (* ------------------------------------------------------------------ *)
+(* RBM-based postflop bucketing                                        *)
+(* ------------------------------------------------------------------ *)
+
+type bucket_method =
+  | Equity_based
+  | Rbm_based of { epsilon : float; distance_config : Distance.config }
+
+type postflop_cluster = {
+  representative : Nolimit_holdem.Node_label.t Tree.t;
+  rep_ev : float;
+  mutable member_count : int;
+}
+
+type postflop_state = {
+  clusters : (int, postflop_cluster list ref) Hashtbl.t;
+}
+
+let create_postflop_state () =
+  { clusters = Hashtbl.Poly.create ~size:4 () }
+
+let find_nearest_postflop_cluster ~epsilon ~distance_config clusters tree =
+  match clusters with
+  | [] -> None
+  | _ ->
+    let tree_ev = Tree.ev tree in
+    let best =
+      List.foldi clusters ~init:(0, Float.infinity)
+        ~f:(fun i (best_i, best_d) oc ->
+          let ev_diff = Float.abs (tree_ev -. oc.rep_ev) in
+          match Float.( > ) ev_diff epsilon with
+          | true -> (best_i, best_d)
+          | false ->
+            match Float.( >= ) ev_diff best_d with
+            | true -> (best_i, best_d)
+            | false ->
+              let (d, _depth) =
+                Distance.compute_progressive ~config:distance_config
+                  ~threshold:epsilon tree oc.representative
+              in
+              match Float.( < ) d best_d with
+              | true -> (i, d)
+              | false -> (best_i, best_d))
+    in
+    Some best
+
+let compute_bucket_rbm_postflop
+    ~(config : Nolimit_holdem.config)
+    ~(epsilon : float)
+    ~(distance_config : Distance.config)
+    ~(postflop : postflop_state)
+    ~(hole_cards : Card.t * Card.t)
+    ~(board : Card.t list)
+    ~(round_idx : int)
+    ~(player : int)
+  : int =
+  let board_visible =
+    match round_idx with
+    | 1 -> List.take board 3
+    | 2 -> List.take board 4
+    | _ -> board
+  in
+  let is_tree =
+    Nolimit_holdem.showdown_distribution_tree ~max_opponents:5
+      ~max_board_samples:2 ~config
+      ~player ~hole_cards ~board_visible ()
+  in
+  let clusters_ref =
+    match Hashtbl.find postflop.clusters round_idx with
+    | Some r -> r
+    | None ->
+      let r = ref [] in
+      Hashtbl.set postflop.clusters ~key:round_idx ~data:r;
+      r
+  in
+  let clusters = !clusters_ref in
+  let nearest =
+    find_nearest_postflop_cluster ~epsilon ~distance_config clusters is_tree
+  in
+  match nearest with
+  | Some (idx, d) ->
+    (match Float.( < ) d epsilon with
+     | true ->
+       let oc = List.nth_exn clusters idx in
+       oc.member_count <- oc.member_count + 1;
+       idx
+     | false ->
+       let new_cluster =
+         { representative = is_tree
+         ; rep_ev = Tree.ev is_tree
+         ; member_count = 1
+         }
+       in
+       clusters_ref := clusters @ [ new_cluster ];
+       List.length clusters)
+  | None ->
+    let new_cluster =
+      { representative = is_tree
+      ; rep_ev = Tree.ev is_tree
+      ; member_count = 1
+      }
+    in
+    clusters_ref := [ new_cluster ];
+    0
+
+let compute_bucket_rbm
+    ~(abstraction : Abstraction.abstraction_partial)
+    ~(config : Nolimit_holdem.config)
+    ~(epsilon : float)
+    ~(distance_config : Distance.config)
+    ~(postflop : postflop_state)
+    ~(hole_cards : Card.t * Card.t)
+    ~(board : Card.t list)
+    ~(round_idx : int)
+    ~(player : int)
+  : int =
+  match round_idx with
+  | 0 ->
+    Abstraction.get_bucket abstraction ~hole_cards
+  | _ ->
+    compute_bucket_rbm_postflop ~config ~epsilon ~distance_config
+      ~postflop ~hole_cards ~board ~round_idx ~player
+
+let precompute_buckets_rbm
+    ~(abstraction : Abstraction.abstraction_partial)
+    ~(config : Nolimit_holdem.config)
+    ~(epsilon : float)
+    ~(distance_config : Distance.config)
+    ~(postflop : postflop_state)
+    ~(hole_cards : Card.t * Card.t)
+    ~(board : Card.t list)
+    ~(player : int)
+  : int array =
+  Array.init 4 ~f:(fun round_idx ->
+    compute_bucket_rbm ~abstraction ~config ~epsilon ~distance_config
+      ~postflop ~hole_cards ~board ~round_idx ~player)
+
+(* ------------------------------------------------------------------ *)
 (* NL-specific round state                                             *)
 (* ------------------------------------------------------------------ *)
 
@@ -763,6 +900,7 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     ?(checkpoint_every = 0)
     ?(checkpoint_prefix = "checkpoint")
     ?(resume_from : string option)
+    ?(bucket_method : bucket_method = Equity_based)
     ()
   : strategy * strategy =
   let cfr_states =
@@ -777,14 +915,34 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     | None ->
       [| create ~size:initial_size (); create ~size:initial_size () |]
   in
+  let postflop_states =
+    match bucket_method with
+    | Rbm_based _ -> [| create_postflop_state (); create_postflop_state () |]
+    | Equity_based -> [||]
+  in
+  (match bucket_method with
+   | Rbm_based { epsilon; _ } ->
+     printf "  [Bucketing] RBM-based (epsilon=%.3f)\n%!" epsilon
+   | Equity_based ->
+     printf "  [Bucketing] Equity-based\n%!");
   let util_sum = ref 0.0 in
   for iter = 1 to iterations do
     let (p1_cards, p2_cards, board) = sample_deal () in
     let p1_buckets =
-      precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
+      match bucket_method with
+      | Equity_based ->
+        precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
+      | Rbm_based { epsilon; distance_config } ->
+        precompute_buckets_rbm ~abstraction ~config ~epsilon ~distance_config
+          ~postflop:postflop_states.(0) ~hole_cards:p1_cards ~board ~player:0
     in
     let p2_buckets =
-      precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
+      match bucket_method with
+      | Equity_based ->
+        precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
+      | Rbm_based { epsilon; distance_config } ->
+        precompute_buckets_rbm ~abstraction ~config ~epsilon ~distance_config
+          ~postflop:postflop_states.(1) ~hole_cards:p2_cards ~board ~player:1
     in
     let traverser = (iter - 1) % 2 in
     let p_invested = [| config.small_blind; config.big_blind |] in
@@ -866,6 +1024,7 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
     ?(checkpoint_prefix = "checkpoint")
     ?(resume_from : string option)
     ?(num_domains = Parallel.default_num_domains ())
+    ?(bucket_method : bucket_method = Equity_based)
     ()
   : strategy * strategy =
   let num_workers = Int.max 1 num_domains in
@@ -913,14 +1072,30 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
         Random.self_init ();
         let my_states = worker_states.(worker_id) in
         let my_iters = worker_iters.(worker_id) in
+        (* Each worker gets its own postflop cluster state (mutable, not shared) *)
+        let my_postflop =
+          match bucket_method with
+          | Rbm_based _ -> [| create_postflop_state (); create_postflop_state () |]
+          | Equity_based -> [||]
+        in
         let local_util_sum = ref 0.0 in
         for iter = 1 to my_iters do
           let (p1_cards, p2_cards, board) = sample_deal () in
           let p1_buckets =
-            precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
+            match bucket_method with
+            | Equity_based ->
+              precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
+            | Rbm_based { epsilon; distance_config } ->
+              precompute_buckets_rbm ~abstraction ~config ~epsilon ~distance_config
+                ~postflop:my_postflop.(0) ~hole_cards:p1_cards ~board ~player:0
           in
           let p2_buckets =
-            precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
+            match bucket_method with
+            | Equity_based ->
+              precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
+            | Rbm_based { epsilon; distance_config } ->
+              precompute_buckets_rbm ~abstraction ~config ~epsilon ~distance_config
+                ~postflop:my_postflop.(1) ~hole_cards:p2_cards ~board ~player:1
           in
           let traverser = (iter - 1) % 2 in
           let p_invested = [| config.small_blind; config.big_blind |] in
