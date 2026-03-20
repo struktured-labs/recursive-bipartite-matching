@@ -1,19 +1,20 @@
 # Experiment Log
 
-## 2026-03-20 06:35 UTC — Second OOM, Relaunched with 2 Domains
+## 2026-03-20 06:50 UTC — All Parallel Attempts OOM, Switched to Single-Threaded
 
-**Attempt 1** (16 domains): OOM at 95% (4.75M/5M). 16 × 12M info sets = too much.
-**Attempt 2** (4 domains): OOM at ~20% (1M/5M). 4 × 10.5M info sets, 29GB at 20%
-→ extrapolated 145GB > 123GB available. Same trajectory.
-**Attempt 3** (2 domains): Launched. 2 workers × ~12M info sets = ~72GB estimated.
-Should fit comfortably in 123GB. Training slower but safe.
+**Attempt 1** (16 domains): OOM at 95% (4.75M/5M). 16 × 12M info sets.
+**Attempt 2** (4 domains): OOM at ~20% (1M/5M). 29GB at 20% → extrapolated 145GB.
+**Attempt 3** (2 domains): Killed at 4%. 8.7GB at 4% → extrapolated 200GB.
+**Attempt 4** (single-threaded): Launched. One shared info set table — no
+duplication across workers. Est. ~700M info sets × ~100 bytes ≈ 70GB. Fits 123GB.
 
-**Lesson**: RBM bucketing creates ~12M info sets per 300K iterations per worker.
-Each info set entry is ~3KB (key + regret + strategy arrays). Must limit
-workers × iters_per_worker × info_set_growth to fit in RAM.
+**Root cause**: Parallel MCCFR duplicates info sets across N independent workers.
+Each worker builds its own hash tables. With RBM's fine-grained clustering,
+each worker creates ~12M info sets per 300K iters. N workers × M entries = N×M
+total memory, not M. Single-threaded shares one table.
 
-**Rule of thumb**: For RBM with 169 buckets, ~30GB per worker at 5M iters.
-On 128GB → max 2 workers. On 256GB → max 4-6 workers.
+**Rule of thumb**: For RBM with 169 buckets on 128GB, use single-threaded.
+Parallel RBM needs 256GB+ (for 2 workers) or 768GB (for 4+ workers).
 
 ---
 
