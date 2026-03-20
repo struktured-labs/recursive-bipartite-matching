@@ -1,11 +1,14 @@
 # Experiment Log
 
-## 2026-03-20 05:30 UTC — Checkpoint 1 Training (10.6%)
+## 2026-03-20 05:47 UTC — Checkpoint 1 Training (39%)
 
-Instance i-0dc922cf7e7d7930d: **530K/5M iters** (10.6%) of first checkpoint.
-16 parallel workers, 18GB/123GB RAM. ~1.5-3M info sets per worker.
+Instance i-0dc922cf7e7d7930d: **1.96M/5M iters** (39%) of first checkpoint.
+16 parallel workers, 61GB/123GB RAM. ~6M info sets per worker.
 RBM clustering producing fine-grained post-flop buckets as expected.
-Est. ~1hr to first 5M checkpoint + 25K Slumbot eval.
+Est. ~30-40 min to first 5M checkpoint + 25K Slumbot eval.
+
+**RAM note**: 61GB at 39% with 16 workers. Extrapolating to 100%: ~100-110GB.
+128GB should be enough but tight. Streaming checkpoints avoid the Marshal spike.
 
 ---
 
