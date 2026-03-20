@@ -1,5 +1,14 @@
 # Experiment Log
 
+## 2026-03-20 05:30 UTC — Checkpoint 1 Training (10.6%)
+
+Instance i-0dc922cf7e7d7930d: **530K/5M iters** (10.6%) of first checkpoint.
+16 parallel workers, 18GB/123GB RAM. ~1.5-3M info sets per worker.
+RBM clustering producing fine-grained post-flop buckets as expected.
+Est. ~1hr to first 5M checkpoint + 25K Slumbot eval.
+
+---
+
 ## 2026-03-20 05:03 UTC — RBM Cloud Experiment Launched
 
 ### Local Smoke Test: PASSED
