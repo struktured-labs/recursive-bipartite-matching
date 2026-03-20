@@ -16,6 +16,13 @@ total memory, not M. Single-threaded shares one table.
 **Rule of thumb**: For RBM with 169 buckets on 128GB, use single-threaded.
 Parallel RBM needs 256GB+ (for 2 workers) or 768GB (for 4+ workers).
 
+## 2026-03-20 08:15 UTC — Single-Threaded Training at 30%
+
+**1.54M/5M** (30.8%), 29GB/123GB RAM, 109M info sets.
+Info set growth sub-linear (good — tree filling out).
+Extrapolating: ~94GB at 5M. Safe.
+Rate: ~8K iter/min. ETA: ~4.5 hours to 5M checkpoint + Slumbot eval.
+
 ---
 
 ## 2026-03-20 05:03 UTC — RBM Cloud Experiment Launched
