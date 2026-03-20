@@ -892,11 +892,14 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
     | true  -> iters_per_worker + 1
     | false -> iters_per_worker)
   in
-  (* Pre-allocate per-worker state arrays (done on main domain before
-     spawning, so no races) *)
+  (* Each worker starts with EMPTY state — do NOT copy the resume
+     checkpoint to every worker (that would use N × 90GB+ of RAM).
+     Workers accumulate fresh regrets independently, then we merge
+     all worker states + the base state at the end. This is correct
+     because MCCFR regret/strategy sums are additive. *)
   let worker_states = Array.init num_workers ~f:(fun _i ->
-    [| copy_cfr_state base_states.(0)
-     ; copy_cfr_state base_states.(1)
+    [| create ~size:initial_size ()
+     ; create ~size:initial_size ()
     |])
   in
   let worker_utils = Array.create ~len:num_workers 0.0 in
@@ -951,13 +954,16 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
         done;
         worker_utils.(worker_id) <- !local_util_sum));
   Domainslib.Task.teardown_pool pool;
-  (* Merge all worker states into worker 0 *)
-  printf "  [Parallel-MCCFR] Merging %d worker states ...\n%!" num_workers;
+  (* Merge all worker states into worker 0, then add the base (resume) state *)
+  printf "  [Parallel-MCCFR] Merging %d worker states + base state ...\n%!" num_workers;
   let merged = worker_states.(0) in
   for w = 1 to num_workers - 1 do
     merge_cfr_state_into ~dst:merged.(0) ~src:worker_states.(w).(0);
     merge_cfr_state_into ~dst:merged.(1) ~src:worker_states.(w).(1)
   done;
+  (* Add accumulated regrets/strategies from the resume checkpoint *)
+  merge_cfr_state_into ~dst:merged.(0) ~src:base_states.(0);
+  merge_cfr_state_into ~dst:merged.(1) ~src:base_states.(1);
   let total_util = Array.fold worker_utils ~init:0.0 ~f:( +. ) in
   let avg_util = total_util /. Float.of_int iterations in
   printf "  [Parallel-MCCFR] Done. avg_util=%.4f  infosets=(%d, %d)\n%!"
