@@ -1,18 +1,19 @@
 # Experiment Log
 
-## 2026-03-20 06:18 UTC — OOM at 95%, Relaunched with 4 Domains
+## 2026-03-20 06:35 UTC — Second OOM, Relaunched with 2 Domains
 
-**OOM killed** at 4.75M/5M (95%). Exit code 137. 16 workers × 12M info sets
-each = ~192M total info sets in 16 separate hash tables → exceeded 123GB.
-No checkpoint saved.
+**Attempt 1** (16 domains): OOM at 95% (4.75M/5M). 16 × 12M info sets = too much.
+**Attempt 2** (4 domains): OOM at ~20% (1M/5M). 4 × 10.5M info sets, 29GB at 20%
+→ extrapolated 145GB > 123GB available. Same trajectory.
+**Attempt 3** (2 domains): Launched. 2 workers × ~12M info sets = ~72GB estimated.
+Should fit comfortably in 123GB. Training slower but safe.
 
-**Relaunched** on same instance with `--domains 4` (4 workers instead of 16).
-4 × 12M = ~48GB estimated, well within 123GB. Training ~4x slower but safe.
-Abstraction building now, training in ~5 min.
+**Lesson**: RBM bucketing creates ~12M info sets per 300K iterations per worker.
+Each info set entry is ~3KB (key + regret + strategy arrays). Must limit
+workers × iters_per_worker × info_set_growth to fit in RAM.
 
-**Lesson**: RBM bucketing creates far more info sets per iteration than equity
-(~12M per worker at 333K iters vs ~200M total at 60M iters with equity).
-Parallel workers multiply this by N. Must size workers to RAM.
+**Rule of thumb**: For RBM with 169 buckets, ~30GB per worker at 5M iters.
+On 128GB → max 2 workers. On 256GB → max 4-6 workers.
 
 ---
 
