@@ -1,32 +1,38 @@
 # Cloud Training Live Report
 
-Last updated: 2026-03-19 20:22 UTC
+Last updated: 2026-03-20 00:20 UTC
 
-## Active: Resume Run (169b, 50M→100M)
+## Instance i-04b08cd89812cd100 — OOM KILLED at 20M checkpoint
 
 Instance: i-04b08cd89812cd100 | r6i.12xlarge (384GB, on-demand)
-IP: 98.93.74.244 | Cost: ~$3.02/hr
+IP: 98.93.74.244 | Cost: ~$3.02/hr | Runtime: ~8hr
 
-| Phase | Status | Notes |
-|-------|--------|-------|
-| Setup (OCaml 5.2) | Done (3.5 min) | |
-| Download 50M ckpt | Done (102s, 26.9GB) | |
-| **50M Slumbot eval** | **Done** | **-1164.93 mbb/hand (-1.16 bb/hand)** |
-| Resume training | **In Progress** | 10.09M/50M (20%), avg_util=-0.28, 146GB RAM |
-| **10M checkpoint** | **Saved!** | 31GB, peak RAM 239GB (384GB handled it) |
-| 100M Slumbot eval | Pending | After training completes |
+### What happened
+- Training reached 20M/50M iterations (70M total, 435M info sets)
+- 10M checkpoint (60M total) saved successfully: 31GB, peak 239GB RAM
+- 20M checkpoint (70M total) triggered OOM kill: exit code 137
+- Serialization spike exceeded 371GB available (steady 156GB + ~160GB buffer)
+- 20M checkpoint = 0 bytes (failed). 10M checkpoint = 31GB (valid, on S3)
 
-### Checkpoint save RAM profile (10M = 60M total)
-- Steady state: 109GB
-- Peak during Marshal serialization: 239GB (+130GB spike)
-- After save complete: 146GB (buff/cache holds 31GB file)
-- 384GB instance: plenty of headroom (103GB free at peak)
-- This same spike (200GB+) killed the 256GB instance at 75M
+### Checkpoint RAM progression
+| Checkpoint | Steady RAM | Peak RAM | Outcome |
+|---|---|---|---|
+| 10M (60M total) | 109GB | 239GB | Saved (31GB) |
+| 20M (70M total) | 156GB | >371GB | **OOM killed** |
 
-## Previous Instance (TERMINATED)
+### Key issue: Marshal serialization doesn't scale
+OCaml's Marshal.to_channel builds entire serialized form in memory.
+As info sets grow, both working set AND serialization buffer grow.
+384GB isn't enough for 435M+ info sets.
 
-Instance i-0f3cbe94c35b0ef68 died at 75M total iterations during checkpoint save.
-75M checkpoint = 0 bytes (failed). 50M checkpoint = 28.9GB (valid, used for resume).
+## Valid Checkpoints on S3
+
+| S3 Key | Size | Total Iters | Info Sets |
+|---|---|---|---|
+| `169b_100M/checkpoint_25M.dat` | 18.4GB | 25M | 225M |
+| `169b_100M/checkpoint_25000000.dat` | 28.9GB | 50M | 353M |
+| `169b_200M/checkpoint_10000000.dat` | 31GB | **60M** | **397M** |
+| `169b_200M/checkpoint_50M_total.dat` | 28.9GB | 50M (copy) | 353M |
 
 ## Slumbot Results
 
@@ -37,9 +43,12 @@ Instance i-0f3cbe94c35b0ef68 died at 75M total iterations during checkpoint save
 | 50b | 15M | -1.37 | -1370 | 1000 | 88M |
 | 169b | 25M | **-0.47** | -470 | 2000 | 225M |
 | 169b | 50M | **-1.16** | -1165 | 2000 | 353M |
-| 169b | 100M | ??? | — | 2000 | ~500M est |
+| 169b | 60M | pending | — | — | 397M |
 
-Note: 50M result worse than 25M likely due to high variance (SE ≈ 0.9 bb/hand with 200bb stacks).
-95% CIs overlap. Need 10K+ hands for reliable comparison.
+## Next Steps
+1. Evaluate 60M checkpoint vs Slumbot (use existing instance before it self-terminates)
+2. Fix Marshal serialization: stream to disk in chunks, or use Bigarray mmap
+3. Or use r6i.24xlarge (768GB, ~$6/hr) for brute-force headroom
+4. Consider: is more training actually helping? 50M result (-1165 mbb) was worse than 25M (-470 mbb)
 
-## Budget: $500 (spent ~$270, remaining ~$230)
+## Budget: $500 (spent ~$285, remaining ~$215)
