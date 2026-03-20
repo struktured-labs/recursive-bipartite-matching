@@ -40,9 +40,13 @@ Parallel RBM needs 256GB+ (for 2 workers) or 768GB (for 4+ workers).
 CIs overlap, so not a statistically significant difference between the two methods yet.
 But the training efficiency is dramatically better — same performance at 1/12th the compute.
 
-### 10M Training Launched
-Resuming from 5M checkpoint. Same config (single-threaded, 169b, ε=0.5).
-~5 hours to 10M checkpoint + 25K Slumbot eval.
+### 10M Training Launched (fresh, no resume)
+Resume from 5M checkpoint failed: `read_hashtbl_chunked: unexpected EOF reading floats`.
+Likely partial read on large buffer in `In_channel.input`. Needs fix.
+Launched 10M from scratch instead — loses 5M warm start but avoids the bug.
+~10 hours to 10M checkpoint + 25K Slumbot eval.
+
+**TODO**: Fix chunked checkpoint resume (use looped reads for large buffers).
 
 ---
 
