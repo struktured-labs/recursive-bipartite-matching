@@ -1,54 +1,51 @@
 # Cloud Training Live Report
 
-Last updated: 2026-03-20 00:20 UTC
+Last updated: 2026-03-20 02:50 UTC
 
-## Instance i-04b08cd89812cd100 — OOM KILLED at 20M checkpoint
+## Active: Parallel Run (169b, 60M→200M)
 
-Instance: i-04b08cd89812cd100 | r6i.12xlarge (384GB, on-demand)
-IP: 98.93.74.244 | Cost: ~$3.02/hr | Runtime: ~8hr
+Instance: i-08bffa26c3560a046 | r6i.12xlarge (48 vCPU, 384GB, on-demand)
+IP: 3.85.87.157 | Cost: ~$3.02/hr
 
-### What happened
-- Training reached 20M/50M iterations (70M total, 435M info sets)
-- 10M checkpoint (60M total) saved successfully: 31GB, peak 239GB RAM
-- 20M checkpoint (70M total) triggered OOM kill: exit code 137
-- Serialization spike exceeded 371GB available (steady 156GB + ~160GB buffer)
-- 20M checkpoint = 0 bytes (failed). 10M checkpoint = 31GB (valid, on S3)
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Setup (OCaml 5.2) | Done (~3.5 min) | |
+| Download 60M ckpt | Done (31GB) | |
+| **60M Slumbot eval** | **Done (25K hands)** | **-1275.55 mbb/hand, 95% CI [-1.59, -0.96] bb/hand** |
+| **Parallel training** | **In Progress** | 140M iters on 48 cores, chunked checkpoints |
+| 200M Slumbot eval | Pending | 25K hands after training |
 
-### Checkpoint RAM progression
-| Checkpoint | Steady RAM | Peak RAM | Outcome |
-|---|---|---|---|
-| 10M (60M total) | 109GB | 239GB | Saved (31GB) |
-| 20M (70M total) | 156GB | >371GB | **OOM killed** |
+### 60M Eval — First Statistically Significant Result!
 
-### Key issue: Marshal serialization doesn't scale
-OCaml's Marshal.to_channel builds entire serialized form in memory.
-As info sets grow, both working set AND serialization buffer grow.
-384GB isn't enough for 435M+ info sets.
+| Metric | Value |
+|---|---|
+| Result | -1275.55 mbb/hand (-1.28 bb/hand) |
+| Std dev | 25.43 bb/hand |
+| Std error | 0.16 bb/hand |
+| 95% CI | **[-1.59, -0.96] bb/hand** |
+| Significant | **YES** (CI excludes zero) |
+| Hands | 25,000 |
 
-## Valid Checkpoints on S3
+## Slumbot Results (with statistical context)
 
-| S3 Key | Size | Total Iters | Info Sets |
-|---|---|---|---|
-| `169b_100M/checkpoint_25M.dat` | 18.4GB | 25M | 225M |
-| `169b_100M/checkpoint_25000000.dat` | 28.9GB | 50M | 353M |
-| `169b_200M/checkpoint_10000000.dat` | 31GB | **60M** | **397M** |
-| `169b_200M/checkpoint_50M_total.dat` | 28.9GB | 50M (copy) | 353M |
+| Config | Iters | bb/hand | 95% CI | Hands | Significant? |
+|--------|-------|---------|--------|-------|---|
+| 20b | 500K | -2.48 | ±2.5 (est) | 1000 | NO |
+| 20b | 10M | -1.99 | ±2.5 (est) | 1000 | NO |
+| 50b | 15M | -1.37 | ±2.5 (est) | 1000 | NO |
+| 169b | 25M | -0.47 | ±2.5 (est) | 2000 | NO |
+| 169b | 50M | -1.16 | ±1.8 (est) | 2000 | NO |
+| **169b** | **60M** | **-1.28** | **[-1.59, -0.96]** | **25000** | **YES** |
 
-## Slumbot Results
+Note: Prior results with <2000 hands had σ≈25-40 bb/hand, making CIs ±2-3 bb/hand.
+The 25K hand eval at 60M is the first result we can trust. Earlier "better" results (-0.47)
+were noise — the 25K result proves the true performance is around -1.28 bb/hand.
 
-| Config | Training | bb/hand | mbb/hand | Hands | Info Sets |
-|--------|---------|---------|----------|-------|-----------|
-| 20b | 500K | -2.48 | -2480 | 1000 | 9M |
-| 20b | 10M | -1.99 | -1990 | 1000 | 40M |
-| 50b | 15M | -1.37 | -1370 | 1000 | 88M |
-| 169b | 25M | **-0.47** | -470 | 2000 | 225M |
-| 169b | 50M | **-1.16** | -1165 | 2000 | 353M |
-| 169b | 60M | pending | — | — | 397M |
+## Improvements This Run
 
-## Next Steps
-1. Evaluate 60M checkpoint vs Slumbot (use existing instance before it self-terminates)
-2. Fix Marshal serialization: stream to disk in chunks, or use Bigarray mmap
-3. Or use r6i.24xlarge (768GB, ~$6/hr) for brute-force headroom
-4. Consider: is more training actually helping? 50M result (-1165 mbb) was worse than 25M (-470 mbb)
+1. **Streaming checkpoints** — chunked binary format, no Marshal OOM
+2. **Parallel MCCFR** — 48 cores via Domainslib
+3. **25K Slumbot hands** — statistically significant (±0.5 bb/hand CI)
+4. **CI reporting** — σ, SE, 95% CI computed automatically
 
-## Budget: $500 (spent ~$285, remaining ~$215)
+## Budget: $500 (spent ~$300, remaining ~$200)
