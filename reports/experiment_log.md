@@ -49,10 +49,11 @@ Launched 10M from scratch instead — loses 5M warm start but avoids the bug.
 **Checkpoint resume bug FIXED** (commit f73a817): read_exact loops for large buffers.
 
 ### 10M Training Progress (fresh, no resume)
-- **50% (4.96M/10M)**, 242M info sets, ~8 hours to checkpoint + 25K Slumbot eval
-- Rate slowing as hash tables grow: ~8K→5K iter/min
-- RAM: ~55GB estimated (safe for 123GB)
-- Instance cost so far: ~$20 (~20 hours × $1/hr)
+- **75% (7.26M/10M)**, 315M info sets, 74GB/123GB RAM
+- Rate: ~4.5K iter/min (slowing with table growth)
+- Extrapolated peak: ~102GB at 10M — fits but tight
+- Instance cost so far: ~$26 (~26 hours × $1/hr)
+- ~3.5 hours to checkpoint + 25K Slumbot eval
 
 ---
 
