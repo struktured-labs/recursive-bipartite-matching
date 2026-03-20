@@ -3,6 +3,10 @@
     Uses Domainslib.Task for work-stealing parallelism.  Each (i,j) pair
     in the upper triangle is independent, so parallelism is trivial. *)
 
+(** [default_num_domains ()] returns [Domain.recommended_domain_count () - 1],
+    the default number of worker domains used for parallel computations. *)
+val default_num_domains : unit -> int
+
 (** [precompute_distances_parallel ~num_domains trees] computes the full
     pairwise distance matrix using [num_domains] parallel workers.
 

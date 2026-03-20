@@ -911,6 +911,7 @@ let run_session
     ~(verbose : bool)
     ~(username : string)
     ~(password : string)
+    ~(min_hands : int)
   =
   let mode_str =
     match mode with
@@ -918,6 +919,11 @@ let run_session
     | Mock -> "MOCK (local check/call bot)"
   in
   eprintf "[slumbot] Starting session: %s, %d hands\n%!" mode_str num_hands;
+  (match min_hands > 0 && num_hands < min_hands with
+   | true ->
+     eprintf "[slumbot] WARNING: %d hands requested < min-hands=%d. Results may lack statistical power.\n%!"
+       num_hands min_hands
+   | false -> ());
   (* Login if credentials provided *)
   let initial_token =
     match mode with
@@ -932,6 +938,7 @@ let run_session
       | false -> None
   in
   let total_winnings = ref 0 in
+  let hand_results = Queue.create () in
   let token = ref initial_token in
   let t_start = Core_unix.gettimeofday () in
   for hand = 1 to num_hands do
@@ -942,6 +949,7 @@ let run_session
        in
        token := new_token;
        total_winnings := !total_winnings + winnings;
+       Queue.enqueue hand_results (Float.of_int winnings);
        let avg_bb =
          Float.of_int !total_winnings
          /. Float.of_int hand
@@ -957,23 +965,72 @@ let run_session
   done;
   let t_end = Core_unix.gettimeofday () in
   let elapsed = t_end -. t_start in
-  let avg_bb =
-    Float.of_int !total_winnings
-    /. Float.of_int num_hands
-    /. Float.of_int slumbot_big_blind
+  let n = Queue.length hand_results in
+  let n_f = Float.of_int n in
+  let bb = Float.of_int slumbot_big_blind in
+  (* Convert per-hand chip winnings to bb/hand *)
+  let winnings_bb = Queue.to_array hand_results |> Array.map ~f:(fun w -> w /. bb) in
+  let mean_bb =
+    match n > 0 with
+    | true -> Array.fold winnings_bb ~init:0.0 ~f:( +. ) /. n_f
+    | false -> 0.0
+  in
+  let variance =
+    match n > 1 with
+    | true ->
+      let sum_sq_dev =
+        Array.fold winnings_bb ~init:0.0 ~f:(fun acc w ->
+          let d = w -. mean_bb in
+          acc +. (d *. d))
+      in
+      sum_sq_dev /. (n_f -. 1.0)
+    | false -> 0.0
+  in
+  let stddev = Float.sqrt variance in
+  let se =
+    match n > 0 with
+    | true -> stddev /. Float.sqrt n_f
+    | false -> 0.0
+  in
+  let ci_lo = mean_bb -. 1.96 *. se in
+  let ci_hi = mean_bb +. 1.96 *. se in
+  let significant =
+    (* Significant if 95% CI does not include 0 *)
+    Float.( > ) ci_lo 0.0 || Float.( < ) ci_hi 0.0
+  in
+  (* Minimum hands needed for ±0.5 bb/hand CI at current σ:
+     CI half-width = 1.96 * σ / √n = 0.5  =>  n = (1.96 * σ / 0.5)^2 *)
+  let hands_for_half_bb =
+    match Float.( > ) stddev 0.0 with
+    | true ->
+      let z_sigma = 1.96 *. stddev /. 0.5 in
+      Float.to_int (Float.round_up (z_sigma *. z_sigma))
+    | false -> 0
   in
   printf "\n";
   printf "================================================================\n";
   printf "  Slumbot Session Results (%s)\n" mode_str;
   printf "================================================================\n";
   printf "\n";
-  printf "  Hands played:    %d\n" num_hands;
+  printf "  Hands played:    %d\n" n;
   printf "  Total winnings:  %d chips\n" !total_winnings;
-  printf "  Average:         %.2f mbb/hand\n" (avg_bb *. 1000.0);
-  printf "  Average:         %.4f bb/hand\n" avg_bb;
-  printf "  Time:            %.1f seconds (%.2f hands/sec)\n"
-    elapsed (Float.of_int num_hands /. elapsed);
+  printf "  Average:         %.2f mbb/hand\n" (mean_bb *. 1000.0);
+  printf "  Average:         %.4f bb/hand\n" mean_bb;
+  printf "  Std dev:         %.2f bb/hand\n" stddev;
+  printf "  Std error:       %.2f bb/hand\n" se;
+  printf "  95%% CI:          [%.2f, %.2f] bb/hand\n" ci_lo ci_hi;
+  (match significant with
+   | true -> printf "  Significant:     YES (CI excludes zero)\n"
+   | false -> printf "  Significant:     NO (CI includes zero)\n");
+  printf "  For +/-0.5 bb/hand CI: need %s hands\n"
+    (Int.to_string_hum hands_for_half_bb);
   printf "\n";
+  (match min_hands > 0 && n < min_hands with
+   | true ->
+     printf "  WARNING: Only %d hands played (< %d). Low statistical power.\n" n min_hands
+   | false -> ());
+  printf "  Time:            %.1f seconds (%.2f hands/sec)\n"
+    elapsed (Float.of_int n /. elapsed);
   printf "  Game: HUNL 50/100 blinds, 20000 stack (200bb)\n";
   printf "  Strategy: NL MCCFR, P0=%d P1=%d info sets\n"
     (Hashtbl.length p0_strat) (Hashtbl.length p1_strat);
@@ -996,6 +1053,7 @@ let () =
   let checkpoint_every = ref 0 in
   let checkpoint_prefix = ref "checkpoint" in
   let resume_file = ref "" in
+  let min_hands = ref 1000 in
 
   let args = [
     ("--train", Arg.Set_int train_iters,
@@ -1022,6 +1080,8 @@ let () =
      "PREFIX  Checkpoint filename prefix (default: checkpoint)");
     ("--resume", Arg.Set_string resume_file,
      "FILE  Resume training from a checkpoint .dat file");
+    ("--min-hands", Arg.Set_int min_hands,
+     "N  Warn if fewer than N hands played (default: 1000)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-slumbot-client [--train N | --strategy FILE] [--hands N] [--mock] [--verbose]";
@@ -1079,3 +1139,4 @@ let () =
     ~p0_strat ~p1_strat ~abstraction:preflop_abs
     ~verbose:!verbose
     ~username:!username ~password:!password
+    ~min_hands:!min_hands

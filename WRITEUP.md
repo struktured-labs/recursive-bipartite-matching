@@ -662,7 +662,7 @@ position-alternated match.
 
 | Matchup | Result |
 |---------|--------|
-| RBM bot vs EMD bot | **RBM +0.02 bb/hand** |
+| RBM bot vs EMD bot | **RBM +0.02 bb/hand** (n.s.) |
 | RBM bot vs Random | +1.24 bb/hand |
 | EMD bot vs Random | +1.12 bb/hand |
 | RBM bot vs Always-Call | +0.30 bb/hand |
@@ -671,6 +671,13 @@ position-alternated match.
 The RBM bot's advantage over EMD is consistent: it wins the head-to-head and
 shows larger margins against both baselines, confirming that better abstraction
 quality translates to stronger play.
+
+*Statistical note:* The +0.02 bb/hand head-to-head margin is not statistically
+significant. With $\sigma \approx 15$ bb/hand for Limit Hold'em,
+$\mathrm{SE}(20{,}000) \approx 0.11$ bb/hand, giving a 95% CI of approximately
+$[-0.19, +0.23]$ bb/hand. The directional advantage is consistent with the
+abstraction quality results but a larger sample is needed to confirm
+statistical significance.
 
 ### 9.3 Online Learner on Full Hold'em
 
@@ -718,12 +725,15 @@ advantage at fine-grained compression (73% less error at $k = 25$).
 
 | Matchup | Result |
 |---------|--------|
-| RBM bot vs EMD bot | EMD **+0.12 bb/hand** |
+| RBM bot vs EMD bot | EMD **+0.12 bb/hand** (n.s.) |
 
-The EMD bot wins the head-to-head despite RBM winning abstraction quality.
-This is consistent with the push/fold nature of 20bb play: at the coarse
-preflop level where MCCFR operates (10 buckets), EMD's equity clustering is
-effective for short-stack play.
+The EMD bot wins the head-to-head despite RBM winning abstraction quality,
+though the margin is not statistically significant. With $\sigma \approx 10$
+bb/hand for 20bb push/fold, $\mathrm{SE}(20{,}000) \approx 0.07$ bb/hand,
+giving a 95% CI of approximately $[-0.26, +0.02]$ bb/hand --- marginal, with
+the interval nearly including zero. The result is consistent with the push/fold
+nature of 20bb play: at the coarse preflop level where MCCFR operates (10
+buckets), EMD's equity clustering is effective for short-stack play.
 
 #### 200bb Deep-Stack Results
 
@@ -754,23 +764,26 @@ of the 186,174-node game tree.
 
 | Matchup | Result | Info Sets |
 |---------|--------|-----------|
-| RBM bot vs EMD bot | EMD **+1.05 bb/hand** | ~1M per player |
+| RBM bot vs EMD bot | EMD **+1.05 bb/hand** (n.s.) | ~1M per player |
 
-The EMD bot wins more decisively at 200bb. This result comes with a critical
-caveat: with ~1M info sets per player but only 50K MCCFR iterations, both
-bots are **severely undertrained**. Average utility was still fluctuating at
-training end (0.31 for RBM, 0.02 for EMD), far from convergence. The 200bb
-game requires an order of magnitude more training iterations — 500K or more —
-for meaningful head-to-head comparison. The abstraction quality results (which
-do not depend on MCCFR training) are more reliable indicators of metric
-quality.
+The EMD bot wins more decisively at 200bb. This result is **not statistically
+reliable** for two compounding reasons. First, with ~1M info sets per player
+but only 50K MCCFR iterations, both bots are **severely undertrained** ---
+average utility was still fluctuating at training end (0.31 for RBM, 0.02 for
+EMD), far from convergence. The high variance of undertrained strategies makes
+the head-to-head outcome unreliable regardless of sample size. Second, even
+with well-trained bots, the 20,000-hand sample provides limited precision for
+deep-stack NL. The 200bb game requires an order of magnitude more training
+iterations --- 500K or more --- for meaningful head-to-head comparison. The
+abstraction quality results (which do not depend on MCCFR training) are more
+reliable indicators of metric quality.
 
 #### Cross-Depth Analysis
 
 | Depth | Nodes | Abstraction Quality | Head-to-Head | Notes |
 |:---:|:---:|:---:|:---:|:---:|
-| 20bb | 2,988 | RBM 5-0 | EMD +0.12 bb/h | push/fold regime |
-| 200bb | 186,174 | RBM 2-3 | EMD +1.05 bb/h | undertrained (50K iters, ~1M infosets) |
+| 20bb | 2,988 | RBM 5-0 | EMD +0.12 bb/h | n.s. (95% CI includes zero) |
+| 200bb | 186,174 | RBM 2-3 | EMD +1.05 bb/h | n.s., undertrained (50K iters, ~1M infosets) |
 
 **Key insight:** RBM's structural advantage is clearest at fine-grained
 compression across both stack depths. At $k = 25$, RBM achieves 73% less error

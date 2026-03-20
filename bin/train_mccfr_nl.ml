@@ -27,6 +27,7 @@ let () =
   let initial_size = ref 1_000_000 in
   let checkpoint_every = ref 0 in
   let checkpoint_prefix = ref "checkpoint" in
+  let format = ref "chunked" in
 
   let args = [
     ("--iterations", Arg.Set_int iterations,
@@ -34,7 +35,7 @@ let () =
     ("--buckets", Arg.Set_int n_buckets,
      "N  Preflop abstraction buckets (default: 20)");
     ("--output", Arg.Set_string output_file,
-     "FILE  Output cfr_state file in Marshal format (default: strategy_cfr_state.dat)");
+     "FILE  Output cfr_state file (default: strategy_cfr_state.dat)");
     ("--report-every", Arg.Set_int report_every,
      "N  Report progress every N iterations (default: 10000)");
     ("--initial-size", Arg.Set_int initial_size,
@@ -43,9 +44,11 @@ let () =
      "N  Save checkpoint every N iterations (default: 0 = off)");
     ("--checkpoint-prefix", Arg.Set_string checkpoint_prefix,
      "PREFIX  Checkpoint filename prefix (default: checkpoint)");
+    ("--format", Arg.Set_string format,
+     "FORMAT  Checkpoint format: chunked (default, low memory) or marshal (legacy)");
   ] in
   Arg.parse args (fun _ -> ())
-    "rbm-train-mccfr-nl [--iterations N] [--buckets N] [--output FILE] [--checkpoint-every N]";
+    "rbm-train-mccfr-nl [--iterations N] [--buckets N] [--output FILE] [--checkpoint-every N] [--format chunked|marshal]";
 
   let config : Nolimit_holdem.config =
     { deck = Card.full_deck
@@ -67,9 +70,16 @@ let () =
     (match !checkpoint_every > 0 with
      | true -> sprintf " (prefix: %s)" !checkpoint_prefix
      | false -> " (disabled)");
+  printf "  Format:           %s\n%!" !format;
   printf "  Config:           SB=%d BB=%d stack=%d fracs=[0.5;1.0;2.0]\n%!"
     config.small_blind config.big_blind config.starting_stack;
   printf "\n%!";
+
+  let save_fn =
+    match String.equal !format "marshal" with
+    | true  -> Compact_cfr.save_checkpoint_marshal
+    | false -> Compact_cfr.save_checkpoint_chunked
+  in
 
   (* Build preflop abstraction *)
   printf "Building %d-bucket preflop abstraction...\n%!" !n_buckets;
@@ -129,7 +139,7 @@ let () =
      | true ->
        let filename = sprintf "%s_%d.dat" !checkpoint_prefix iter in
        printf "  [Checkpoint] Saving %s ...\n%!" filename;
-       Compact_cfr.save_checkpoint ~filename cfr_states;
+       save_fn ~filename cfr_states;
        let file_size = Int64.to_int_exn (Core_unix.stat filename).st_size in
        printf "  [Checkpoint] Done (%.1f MB)\n%!"
          (Float.of_int file_size /. 1_048_576.0)
@@ -152,7 +162,7 @@ let () =
 
   (* Save final raw cfr_state *)
   printf "\nSaving raw cfr_state to %s...\n%!" !output_file;
-  Compact_cfr.save_checkpoint ~filename:!output_file cfr_states;
+  save_fn ~filename:!output_file cfr_states;
   let file_size = Int64.to_int_exn (Core_unix.stat !output_file).st_size in
   printf "  File size: %d bytes (%.1f MB)\n%!" file_size
     (Float.of_int file_size /. 1_048_576.0);

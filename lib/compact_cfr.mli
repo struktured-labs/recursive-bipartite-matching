@@ -33,13 +33,35 @@ val sample_deal : unit -> (Card.t * Card.t) * (Card.t * Card.t) * Card.t list
 
 (** [save_checkpoint ~filename cfr_states] serialises raw CFR state
     (regret_sum + strategy_sum for both players) to [filename] using
-    Marshal format.  Compatible with {!train_mccfr_nl}'s output. *)
+    the chunked binary format.  Streams entries one at a time to avoid
+    building a giant marshaled blob in memory.  This is the default. *)
 val save_checkpoint : filename:string -> cfr_state array -> unit
 
 (** [load_checkpoint ~filename] loads a previously saved CFR state from disk.
+    Auto-detects the format: chunked binary (magic "RBMCFR01") or legacy
+    Marshal format.
     Returns a 2-element array of cfr_states (P0, P1) with regret_sum and
     strategy_sum hash tables restored. Use with [~resume_from] in train_mccfr. *)
 val load_checkpoint : filename:string -> cfr_state array
+
+(** [save_checkpoint_chunked ~filename cfr_states] saves using the
+    streaming chunked binary format (no memory spike). *)
+val save_checkpoint_chunked : filename:string -> cfr_state array -> unit
+
+(** [load_checkpoint_chunked ~filename] loads the chunked binary format. *)
+val load_checkpoint_chunked : filename:string -> cfr_state array
+
+(** [save_checkpoint_marshal ~filename cfr_states] saves using the legacy
+    OCaml Marshal format.  Warning: builds the full serialized form in
+    memory, causing ~2x memory spike. *)
+val save_checkpoint_marshal : filename:string -> cfr_state array -> unit
+
+(** [load_checkpoint_marshal ~filename] loads the legacy Marshal format. *)
+val load_checkpoint_marshal : filename:string -> cfr_state array
+
+(** [is_chunked_format ~filename] returns [true] when the file starts
+    with the chunked-format magic header ["RBMCFR01"]. *)
+val is_chunked_format : filename:string -> bool
 
 (** [train_mccfr ~config ~abstraction ~iterations] runs external-sampling
     MCCFR for [iterations] iterations, alternating traverser each iteration.
@@ -109,3 +131,36 @@ val mccfr_traverse
   -> traverser:int
   -> cfr_states:cfr_state array
   -> float
+
+(** [copy_cfr_state state] returns a deep copy of [state], including
+    independent copies of all regret_sum and strategy_sum arrays. *)
+val copy_cfr_state : cfr_state -> cfr_state
+
+(** [merge_cfr_state_into ~dst ~src] adds all regret_sum and strategy_sum
+    values from [src] into [dst] element-wise.  Mutates [dst] in place.
+    Keys present in [src] but not [dst] are copied. *)
+val merge_cfr_state_into : dst:cfr_state -> src:cfr_state -> unit
+
+(** [train_mccfr_parallel ~config ~abstraction ~iterations] runs
+    external-sampling MCCFR across [~num_domains] OCaml 5 domains.
+    Each domain maintains its own independent cfr_state and runs
+    iterations concurrently.  After all iterations complete, worker
+    states are merged by summing regret_sum and strategy_sum values
+    (valid because MCCFR regret/strategy sums are additive).
+
+    Parameters are identical to {!train_mccfr} with the addition of:
+    - [~num_domains] — number of worker domains (default: CPU count - 1)
+
+    Returns (p1_average_strategy, p2_average_strategy). *)
+val train_mccfr_parallel
+  :  config:Nolimit_holdem.config
+  -> abstraction:Abstraction.abstraction_partial
+  -> iterations:int
+  -> ?report_every:int
+  -> ?initial_size:int
+  -> ?checkpoint_every:int
+  -> ?checkpoint_prefix:string
+  -> ?resume_from:string
+  -> ?num_domains:int
+  -> unit
+  -> strategy * strategy

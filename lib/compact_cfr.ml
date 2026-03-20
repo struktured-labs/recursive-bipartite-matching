@@ -41,24 +41,16 @@ let regret_matching (regrets : float array) : float array =
 
 let get_strategy (state : cfr_state) (key : info_key) ~(num_actions : int) : float array =
   let regrets =
-    match Hashtbl.find state.regret_sum key with
-    | Some r -> r
-    | None ->
-      let r = Array.create ~len:num_actions 0.0 in
-      Hashtbl.set state.regret_sum ~key ~data:r;
-      r
+    Hashtbl.find_or_add state.regret_sum key
+      ~default:(fun () -> Array.create ~len:num_actions 0.0)
   in
   regret_matching regrets
 
 let accumulate_strategy (state : cfr_state) (key : info_key)
     (strat : float array) (weight : float) =
   let current =
-    match Hashtbl.find state.strategy_sum key with
-    | Some s -> s
-    | None ->
-      let s = Array.create ~len:(Array.length strat) 0.0 in
-      Hashtbl.set state.strategy_sum ~key ~data:s;
-      s
+    Hashtbl.find_or_add state.strategy_sum key
+      ~default:(fun () -> Array.create ~len:(Array.length strat) 0.0)
   in
   Array.iteri strat ~f:(fun i p ->
     current.(i) <- current.(i) +. weight *. p)
@@ -102,19 +94,51 @@ let sample_deal () =
 (* Bucket-based info-set key                                           *)
 (* ------------------------------------------------------------------ *)
 
+(** Write the decimal digits of non-negative [n] into [buf] starting at [pos].
+    Returns the new position after the last digit written.
+    Avoids [Int.to_string] allocation on the hot path. *)
+let write_int_digits (buf : Bytes.t) (pos : int) (n : int) : int =
+  match n with
+  | 0 ->
+    Bytes.set buf pos '0';
+    pos + 1
+  | _ ->
+    (* Count digits *)
+    let nd = ref 0 in
+    let v = ref n in
+    while !v > 0 do
+      Int.incr nd;
+      v := !v / 10
+    done;
+    let end_pos = pos + !nd in
+    v := n;
+    for i = end_pos - 1 downto pos do
+      Bytes.set buf i (Char.of_int_exn (Char.to_int '0' + (!v % 10)));
+      v := !v / 10
+    done;
+    end_pos
+
 let make_info_key ~(buckets : int array) ~(round_idx : int) ~(history : string) : info_key =
-  let buf = Buffer.create 32 in
-  Buffer.add_char buf 'B';
-  for i = 0 to Int.min round_idx 3 do
-    match i with
-    | 0 -> Buffer.add_string buf (Int.to_string buckets.(0))
-    | _ ->
-      Buffer.add_char buf ':';
-      Buffer.add_string buf (Int.to_string buckets.(i))
+  let history_len = String.length history in
+  (* Upper bound: 'B' + up to 4 bucket ints (max ~7 digits each) + 3 colons
+     + '|' + history.  40 bytes covers the prefix generously. *)
+  let buf = Bytes.create (40 + history_len) in
+  Bytes.set buf 0 'B';
+  let pos = ref 1 in
+  let last = Int.min round_idx 3 in
+  for i = 0 to last do
+    (match i with
+     | 0 -> ()
+     | _ ->
+       Bytes.set buf !pos ':';
+       pos := !pos + 1);
+    pos := write_int_digits buf !pos buckets.(i)
   done;
-  Buffer.add_char buf '|';
-  Buffer.add_string buf history;
-  Buffer.contents buf
+  Bytes.set buf !pos '|';
+  pos := !pos + 1;
+  Stdlib.Bytes.blit_string history 0 buf !pos history_len;
+  pos := !pos + history_len;
+  Stdlib.Bytes.sub_string buf 0 !pos
 
 (* ------------------------------------------------------------------ *)
 (* Bucket computation per street (equity-based)                        *)
@@ -466,12 +490,8 @@ and handle_decision ~(player : int) ~(traverser : int) ~(cfr_st : cfr_state)
       acc +. strat.(i) *. v)
     in
     let regrets =
-      match Hashtbl.find cfr_st.regret_sum key with
-      | Some r -> r
-      | None ->
-        let r = Array.create ~len:num_actions 0.0 in
-        Hashtbl.set cfr_st.regret_sum ~key ~data:r;
-        r
+      Hashtbl.find_or_add cfr_st.regret_sum key
+        ~default:(fun () -> Array.create ~len:num_actions 0.0)
     in
     Array.iteri action_values ~f:(fun i v ->
       regrets.(i) <- regrets.(i) +. (v -. node_value));
@@ -533,10 +553,15 @@ and advance_to_next_round
 (* ------------------------------------------------------------------ *)
 
 (* ------------------------------------------------------------------ *)
-(* Checkpoint serialization (Marshal format, same as train_mccfr_nl)   *)
+(* Checkpoint serialization                                            *)
 (* ------------------------------------------------------------------ *)
 
-let load_checkpoint ~(filename : string) : cfr_state array =
+(** Magic header for the chunked binary format (8 bytes). *)
+let chunked_magic = "RBMCFR01"
+
+(* -- Legacy Marshal format (kept for backward compat) --------------- *)
+
+let load_checkpoint_marshal ~(filename : string) : cfr_state array =
   let ic = In_channel.create filename in
   let (p0_regret, p0_strat, p1_regret, p1_strat) :
     (string * float array) list * (string * float array) list *
@@ -553,7 +578,7 @@ let load_checkpoint ~(filename : string) : cfr_state array =
    ; { regret_sum = to_hashtbl p1_regret; strategy_sum = to_hashtbl p1_strat }
   |]
 
-let save_checkpoint ~(filename : string) (cfr_states : cfr_state array) : unit =
+let save_checkpoint_marshal ~(filename : string) (cfr_states : cfr_state array) : unit =
   let hashtbl_to_alist tbl =
     Hashtbl.fold tbl ~init:[] ~f:(fun ~key ~data acc -> (key, data) :: acc)
   in
@@ -566,6 +591,169 @@ let save_checkpoint ~(filename : string) (cfr_states : cfr_state array) : unit =
   let oc = Out_channel.create filename in
   Marshal.to_channel oc data [];
   Out_channel.close oc
+
+(* -- Chunked binary format (streaming, no memory spike) ------------- *)
+
+(** Binary layout:
+    {[
+      magic      : 8 bytes  "RBMCFR01"
+      version    : 4 bytes  (int32-le, currently 1)
+      n_tables   : 4 bytes  (int32-le, always 4)
+      -- for each table:
+        n_entries  : 8 bytes (int64-le)
+        -- for each entry:
+          key_len    : 4 bytes (int32-le)
+          key_bytes  : key_len bytes
+          arr_len    : 4 bytes (int32-le)
+          arr_floats : arr_len * 8 bytes (float64, native endian)
+    ]} *)
+
+let write_int32_le (oc : Out_channel.t) (v : int) : unit =
+  let buf = Bytes.create 4 in
+  Bytes.set buf 0 (Char.of_int_exn (v land 0xFF));
+  Bytes.set buf 1 (Char.of_int_exn ((v lsr 8) land 0xFF));
+  Bytes.set buf 2 (Char.of_int_exn ((v lsr 16) land 0xFF));
+  Bytes.set buf 3 (Char.of_int_exn ((v lsr 24) land 0xFF));
+  Out_channel.output oc ~buf ~pos:0 ~len:4
+
+let write_int64_le (oc : Out_channel.t) (v : int) : unit =
+  let buf = Bytes.create 8 in
+  for i = 0 to 7 do
+    Bytes.set buf i (Char.of_int_exn ((v lsr (i * 8)) land 0xFF))
+  done;
+  Out_channel.output oc ~buf ~pos:0 ~len:8
+
+let read_int32_le (ic : In_channel.t) : int =
+  let buf = Bytes.create 4 in
+  let n = In_channel.input ic ~buf ~pos:0 ~len:4 in
+  match n = 4 with
+  | true ->
+    Char.to_int (Bytes.get buf 0)
+    lor (Char.to_int (Bytes.get buf 1) lsl 8)
+    lor (Char.to_int (Bytes.get buf 2) lsl 16)
+    lor (Char.to_int (Bytes.get buf 3) lsl 24)
+  | false -> failwith "read_int32_le: unexpected EOF"
+
+let read_int64_le (ic : In_channel.t) : int =
+  let buf = Bytes.create 8 in
+  let n = In_channel.input ic ~buf ~pos:0 ~len:8 in
+  match n = 8 with
+  | true ->
+    let v = ref 0 in
+    for i = 0 to 7 do
+      v := !v lor (Char.to_int (Bytes.get buf i) lsl (i * 8))
+    done;
+    !v
+  | false -> failwith "read_int64_le: unexpected EOF"
+
+let write_hashtbl_chunked (oc : Out_channel.t) (tbl : (string, float array) Hashtbl.t) : unit =
+  let n_entries = Hashtbl.length tbl in
+  write_int64_le oc n_entries;
+  Hashtbl.iteri tbl ~f:(fun ~key ~data ->
+    let key_len = String.length key in
+    write_int32_le oc key_len;
+    Out_channel.output_string oc key;
+    let arr_len = Array.length data in
+    write_int32_le oc arr_len;
+    (* Write float array as raw bytes — 8 bytes per float, native endian *)
+    let float_buf = Bytes.create (arr_len * 8) in
+    Array.iteri data ~f:(fun i f ->
+      let bits = Int64.bits_of_float f in
+      for b = 0 to 7 do
+        Bytes.set float_buf ((i * 8) + b)
+          (Char.of_int_exn (Int64.to_int_exn (Int64.( land ) (Int64.shift_right_logical bits (b * 8)) 0xFFL)))
+      done);
+    Out_channel.output oc ~buf:float_buf ~pos:0 ~len:(arr_len * 8))
+
+let read_hashtbl_chunked (ic : In_channel.t) : (string, float array) Hashtbl.t =
+  let n_entries = read_int64_le ic in
+  let tbl = Hashtbl.create (module String) ~size:n_entries in
+  for _ = 1 to n_entries do
+    let key_len = read_int32_le ic in
+    let key_buf = Bytes.create key_len in
+    let n_read = In_channel.input ic ~buf:key_buf ~pos:0 ~len:key_len in
+    (match n_read = key_len with
+     | true -> ()
+     | false -> failwith "read_hashtbl_chunked: unexpected EOF reading key");
+    let key = Bytes.to_string key_buf in
+    let arr_len = read_int32_le ic in
+    let float_buf = Bytes.create (arr_len * 8) in
+    let n_read = In_channel.input ic ~buf:float_buf ~pos:0 ~len:(arr_len * 8) in
+    (match n_read = arr_len * 8 with
+     | true -> ()
+     | false -> failwith "read_hashtbl_chunked: unexpected EOF reading floats");
+    let data = Array.init arr_len ~f:(fun i ->
+      let bits = ref 0L in
+      for b = 0 to 7 do
+        bits := Int64.( lor ) !bits
+          (Int64.shift_left (Int64.of_int_exn (Char.to_int (Bytes.get float_buf ((i * 8) + b)))) (b * 8))
+      done;
+      Int64.float_of_bits !bits) in
+    Hashtbl.set tbl ~key ~data
+  done;
+  tbl
+
+let save_checkpoint_chunked ~(filename : string) (cfr_states : cfr_state array) : unit =
+  let oc = Out_channel.create filename in
+  (* Magic header *)
+  Out_channel.output_string oc chunked_magic;
+  (* Version *)
+  write_int32_le oc 1;
+  (* Number of tables *)
+  write_int32_le oc 4;
+  (* Write all 4 tables: P0 regret, P0 strategy, P1 regret, P1 strategy *)
+  write_hashtbl_chunked oc cfr_states.(0).regret_sum;
+  write_hashtbl_chunked oc cfr_states.(0).strategy_sum;
+  write_hashtbl_chunked oc cfr_states.(1).regret_sum;
+  write_hashtbl_chunked oc cfr_states.(1).strategy_sum;
+  Out_channel.close oc
+
+let load_checkpoint_chunked ~(filename : string) : cfr_state array =
+  let ic = In_channel.create filename in
+  (* Read and verify magic *)
+  let magic_buf = Bytes.create 8 in
+  let n = In_channel.input ic ~buf:magic_buf ~pos:0 ~len:8 in
+  (match n = 8 && String.equal (Bytes.to_string magic_buf) chunked_magic with
+   | true -> ()
+   | false -> failwithf "load_checkpoint_chunked: bad magic in %s" filename ());
+  (* Version *)
+  let version = read_int32_le ic in
+  (match version = 1 with
+   | true -> ()
+   | false -> failwithf "load_checkpoint_chunked: unsupported version %d" version ());
+  (* Number of tables *)
+  let n_tables = read_int32_le ic in
+  (match n_tables = 4 with
+   | true -> ()
+   | false -> failwithf "load_checkpoint_chunked: expected 4 tables, got %d" n_tables ());
+  (* Read all 4 tables *)
+  let p0_regret = read_hashtbl_chunked ic in
+  let p0_strat = read_hashtbl_chunked ic in
+  let p1_regret = read_hashtbl_chunked ic in
+  let p1_strat = read_hashtbl_chunked ic in
+  In_channel.close ic;
+  [| { regret_sum = p0_regret; strategy_sum = p0_strat }
+   ; { regret_sum = p1_regret; strategy_sum = p1_strat }
+  |]
+
+(* -- Auto-detecting load -------------------------------------------- *)
+
+let is_chunked_format ~(filename : string) : bool =
+  let ic = In_channel.create filename in
+  let buf = Bytes.create 8 in
+  let n = In_channel.input ic ~buf ~pos:0 ~len:8 in
+  In_channel.close ic;
+  n = 8 && String.equal (Bytes.to_string buf) chunked_magic
+
+(** [load_checkpoint] auto-detects the format (chunked vs Marshal). *)
+let load_checkpoint ~(filename : string) : cfr_state array =
+  match is_chunked_format ~filename with
+  | true  -> load_checkpoint_chunked ~filename
+  | false -> load_checkpoint_marshal ~filename
+
+(** [save_checkpoint] uses the chunked format by default. *)
+let save_checkpoint ~(filename : string) (cfr_states : cfr_state array) : unit =
+  save_checkpoint_chunked ~filename cfr_states
 
 let train_mccfr ~(config : Nolimit_holdem.config)
     ~(abstraction : Abstraction.abstraction_partial)
@@ -636,4 +824,154 @@ let train_mccfr ~(config : Nolimit_holdem.config)
   done;
   let p0_avg = average_strategy cfr_states.(0) in
   let p1_avg = average_strategy cfr_states.(1) in
+  (p0_avg, p1_avg)
+
+(* ------------------------------------------------------------------ *)
+(* Parallel MCCFR training                                            *)
+(* ------------------------------------------------------------------ *)
+
+(** Copy a cfr_state by deep-copying each hash table entry. *)
+let copy_cfr_state (src : cfr_state) : cfr_state =
+  let copy_tbl tbl =
+    let tbl2 = Hashtbl.create (module String) ~size:(Hashtbl.length tbl) in
+    Hashtbl.iteri tbl ~f:(fun ~key ~data ->
+      Hashtbl.set tbl2 ~key ~data:(Array.copy data));
+    tbl2
+  in
+  { regret_sum = copy_tbl src.regret_sum
+  ; strategy_sum = copy_tbl src.strategy_sum
+  }
+
+(** Merge [src] into [dst] by summing regret_sum and strategy_sum arrays
+    element-wise.  Mutates [dst] in place. *)
+let merge_cfr_state_into ~(dst : cfr_state) ~(src : cfr_state) : unit =
+  let merge_tbl ~dst_tbl ~src_tbl =
+    Hashtbl.iteri src_tbl ~f:(fun ~key ~data:src_arr ->
+      match Hashtbl.find dst_tbl key with
+      | Some dst_arr ->
+        Array.iteri src_arr ~f:(fun i v ->
+          dst_arr.(i) <- dst_arr.(i) +. v)
+      | None ->
+        Hashtbl.set dst_tbl ~key ~data:(Array.copy src_arr))
+  in
+  merge_tbl ~dst_tbl:dst.regret_sum ~src_tbl:src.regret_sum;
+  merge_tbl ~dst_tbl:dst.strategy_sum ~src_tbl:src.strategy_sum
+
+let train_mccfr_parallel ~(config : Nolimit_holdem.config)
+    ~(abstraction : Abstraction.abstraction_partial)
+    ~(iterations : int)
+    ?(report_every = 10_000)
+    ?(initial_size = 1_000_000)
+    ?(checkpoint_every = 0)
+    ?(checkpoint_prefix = "checkpoint")
+    ?(resume_from : string option)
+    ?(num_domains = Parallel.default_num_domains ())
+    ()
+  : strategy * strategy =
+  let num_workers = Int.max 1 num_domains in
+  printf "  [Parallel-MCCFR] Starting %d domains, %d iterations total\n%!"
+    num_workers iterations;
+  (* Load or create the base state *)
+  let base_states =
+    match resume_from with
+    | Some filename ->
+      printf "  [Resume] Loading checkpoint from %s ...\n%!" filename;
+      let states = load_checkpoint ~filename in
+      printf "  [Resume] Loaded P0=%d P1=%d info sets.\n%!"
+        (Hashtbl.length states.(0).regret_sum)
+        (Hashtbl.length states.(1).regret_sum);
+      states
+    | None ->
+      [| create ~size:initial_size (); create ~size:initial_size () |]
+  in
+  (* Divide iterations among workers *)
+  let iters_per_worker = iterations / num_workers in
+  let remainder = iterations % num_workers in
+  let worker_iters = Array.init num_workers ~f:(fun i ->
+    match i < remainder with
+    | true  -> iters_per_worker + 1
+    | false -> iters_per_worker)
+  in
+  (* Pre-allocate per-worker state arrays (done on main domain before
+     spawning, so no races) *)
+  let worker_states = Array.init num_workers ~f:(fun _i ->
+    [| copy_cfr_state base_states.(0)
+     ; copy_cfr_state base_states.(1)
+    |])
+  in
+  let worker_utils = Array.create ~len:num_workers 0.0 in
+  (* Atomic counter for progress reporting *)
+  let global_iter = Atomic.make 0 in
+  let pool = Domainslib.Task.setup_pool ~num_domains:num_workers () in
+  Domainslib.Task.run pool (fun () ->
+    Domainslib.Task.parallel_for pool ~start:0 ~finish:(num_workers - 1)
+      ~body:(fun worker_id ->
+        (* Seed each worker's domain-local RNG independently *)
+        Random.self_init ();
+        let my_states = worker_states.(worker_id) in
+        let my_iters = worker_iters.(worker_id) in
+        let local_util_sum = ref 0.0 in
+        for iter = 1 to my_iters do
+          let (p1_cards, p2_cards, board) = sample_deal () in
+          let p1_buckets =
+            precompute_buckets_equity ~abstraction ~hole_cards:p1_cards ~board
+          in
+          let p2_buckets =
+            precompute_buckets_equity ~abstraction ~hole_cards:p2_cards ~board
+          in
+          let traverser = (iter - 1) % 2 in
+          let p_invested = [| config.small_blind; config.big_blind |] in
+          let p_stack = [|
+            config.starting_stack - config.small_blind;
+            config.starting_stack - config.big_blind;
+          |] in
+          let round_start_invested = [| config.small_blind; config.big_blind |] in
+          let state = {
+            to_act = 0;
+            round_idx = 0;
+            num_raises = 1;
+            current_bet = config.big_blind;
+            p_invested;
+            p_stack;
+            round_start_invested;
+            actions_remaining = 2;
+          } in
+          let value = mccfr_traverse ~config ~p1_cards ~p2_cards ~board
+              ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser
+              ~cfr_states:my_states in
+          local_util_sum := !local_util_sum +. value;
+          let total = Atomic.fetch_and_add global_iter 1 + 1 in
+          (match total % report_every = 0 with
+           | true ->
+             let n0 = Hashtbl.length my_states.(0).regret_sum in
+             let n1 = Hashtbl.length my_states.(1).regret_sum in
+             printf "  [Parallel-MCCFR] ~%d/%d iters (worker %d: %d/%d)  infosets=(%d,%d)\n%!"
+               total iterations worker_id iter my_iters n0 n1
+           | false -> ())
+        done;
+        worker_utils.(worker_id) <- !local_util_sum));
+  Domainslib.Task.teardown_pool pool;
+  (* Merge all worker states into worker 0 *)
+  printf "  [Parallel-MCCFR] Merging %d worker states ...\n%!" num_workers;
+  let merged = worker_states.(0) in
+  for w = 1 to num_workers - 1 do
+    merge_cfr_state_into ~dst:merged.(0) ~src:worker_states.(w).(0);
+    merge_cfr_state_into ~dst:merged.(1) ~src:worker_states.(w).(1)
+  done;
+  let total_util = Array.fold worker_utils ~init:0.0 ~f:( +. ) in
+  let avg_util = total_util /. Float.of_int iterations in
+  printf "  [Parallel-MCCFR] Done. avg_util=%.4f  infosets=(%d, %d)\n%!"
+    avg_util
+    (Hashtbl.length merged.(0).regret_sum)
+    (Hashtbl.length merged.(1).regret_sum);
+  (* Optional final checkpoint *)
+  (match checkpoint_every > 0 with
+   | true ->
+     let filename = sprintf "%s_final_%d.dat" checkpoint_prefix iterations in
+     printf "  [Checkpoint] Saving final %s ...\n%!" filename;
+     save_checkpoint ~filename merged;
+     printf "  [Checkpoint] Done.\n%!"
+   | false -> ());
+  let p0_avg = average_strategy merged.(0) in
+  let p1_avg = average_strategy merged.(1) in
   (p0_avg, p1_avg)

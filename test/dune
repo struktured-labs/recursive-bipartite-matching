@@ -1,0 +1,6 @@
+(library
+ (name rbm_test)
+ (libraries rbm core core_unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane))
+ (flags :standard -open Core -open Rbm))

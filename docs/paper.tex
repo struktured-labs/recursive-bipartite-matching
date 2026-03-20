@@ -723,13 +723,14 @@ using RBM-based and EMD-based preflop abstractions, then evaluate in a
 \centering
 \caption{MCCFR bot tournament on full Limit Hold'em (20{,}000 hands,
 position-alternated). All trained bots beat both baselines. The RBM bot
-beats the EMD bot head-to-head.}
+beats the EMD bot head-to-head, though the margin is not statistically
+significant (see text).}
 \label{tab:holdem-cfr}
 \begin{tabular}{lc}
 \toprule
 Matchup & Result (bb/hand) \\
 \midrule
-RBM bot vs EMD bot & $+0.02$ (RBM wins) \\
+RBM bot vs EMD bot & $+0.02$ (RBM wins)\textsuperscript{$\dagger$} \\
 RBM bot vs Random & $+1.24$ \\
 EMD bot vs Random & $+1.12$ \\
 RBM bot vs Always-Call & $+0.30$ \\
@@ -742,6 +743,14 @@ Table~\ref{tab:holdem-cfr} confirms that better abstraction quality
 translates to stronger play. The RBM bot wins the head-to-head and shows
 larger margins against both baselines ($+1.24$ vs.\ $+1.12$ bb/hand
 against random; $+0.30$ vs.\ $+0.11$ against always-call).
+
+\noindent\textsuperscript{$\dagger$}\textit{Statistical note:} The
+$+0.02$ bb/hand head-to-head margin is not statistically significant.
+With $\sigma \approx 15$ bb/hand for Limit Hold'em, $\mathrm{SE}(20{,}000)
+\approx 0.11$ bb/hand, giving a 95\% CI of approximately
+$[-0.19, +0.23]$ bb/hand. The directional advantage is consistent with
+the abstraction quality results (Table~\ref{tab:holdem-preflop}) but
+a larger sample is needed to confirm statistical significance.
 
 \subsection{Full Limit Hold'em: Online Learner}
 
@@ -841,8 +850,10 @@ position-alternated matches.
 \centering
 \caption{MCCFR head-to-head on NL-HU at two stack depths (20{,}000
 hands each, position-alternated, 50K training iterations). EMD wins at
-both depths, but the 200bb result is confounded by severe
-undertraining (${\sim}$1M info sets with only 50K iterations).}
+both depths, but neither result is statistically significant: the 20bb
+margin is within noise (95\% CI includes zero), and the 200bb result is
+confounded by severe undertraining (${\sim}$1M info sets with only 50K
+iterations).}
 \label{tab:nl-cfr}
 \begin{tabular}{lccr}
 \toprule
@@ -855,14 +866,22 @@ Depth & Result (bb/hand) & Info Sets & Training \\
 \end{table}
 
 Table~\ref{tab:nl-cfr} shows that the EMD bot wins both head-to-head
-matches. At 20bb, the margin is small ($-0.12$ bb/hand) and consistent
-with the push/fold nature of short-stack play where raw equity is a
-strong predictor of optimal play. At 200bb, the margin is larger
-($-1.05$ bb/hand) but comes with a critical caveat: the 200bb game
+matches. At 20bb, the margin is small ($-0.12$ bb/hand) and not
+statistically significant: with $\sigma \approx 10$ bb/hand for 20bb
+push/fold, $\mathrm{SE}(20{,}000) \approx 0.07$ bb/hand, giving a
+95\% CI of approximately $[-0.26, +0.02]$ bb/hand---marginal, with the
+interval nearly including zero. The result is consistent with the
+push/fold nature of short-stack play where raw equity is a strong
+predictor of optimal play.
+
+At 200bb, the margin is larger ($-1.05$ bb/hand) but is not
+statistically reliable due to severe undertraining: the 200bb game
 produces ${\sim}$1M info sets per player, and with only 50K MCCFR
 iterations both bots are \emph{severely undertrained}---average utility
-was still fluctuating at training end, far from convergence. The 200bb
-game requires 500K+ iterations for meaningful head-to-head comparison.
+was still fluctuating at training end, far from convergence. The high
+variance of undertrained strategies makes the head-to-head outcome
+unreliable regardless of sample size. The 200bb game requires 500K+
+iterations for meaningful head-to-head comparison.
 The abstraction quality results (Table~\ref{tab:nl-200bb-preflop}),
 which do not depend on MCCFR training, are more reliable indicators of
 metric quality.
@@ -877,8 +896,8 @@ compression across both stack depths.}
 \toprule
 Depth & Nodes & Abstraction & Head-to-Head & Notes \\
 \midrule
-20bb & 2{,}988 & RBM 5--0 & EMD +0.12 bb/h & push/fold \\
-200bb & 186{,}174 & RBM 2--3 & EMD +1.05 bb/h & undertrained \\
+20bb & 2{,}988 & RBM 5--0 & EMD +0.12 bb/h & n.s.\ ($p > 0.05$) \\
+200bb & 186{,}174 & RBM 2--3 & EMD +1.05 bb/h & undertrained, n.s. \\
 \bottomrule
 \end{tabular}
 \end{table}

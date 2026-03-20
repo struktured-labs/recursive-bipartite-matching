@@ -1,0 +1,7 @@
+(lang dune 3.16)
+
+(env
+ (release
+  (ocamlopt_flags (:standard -O2)))
+ (dev
+  (ocamlopt_flags (:standard -O2))))
