@@ -16,15 +16,33 @@ total memory, not M. Single-threaded shares one table.
 **Rule of thumb**: For RBM with 169 buckets on 128GB, use single-threaded.
 Parallel RBM needs 256GB+ (for 2 workers) or 768GB (for 4+ workers).
 
-## 2026-03-20 11:50 UTC — 5M CHECKPOINT COMPLETE, Slumbot Eval Running!
+## 2026-03-20 12:15 UTC — 5M RBM RESULT: -1.11 bb/hand! 10M Training Launched
 
-**Training**: 5M iters in 18,325s (5.1hr). 247M info sets (P0=96M, P1=151M). 63GB RAM.
-**Checkpoint**: checkpoint_5M_5000000.dat saved successfully.
-**Slumbot eval**: 2,980/25,000 hands (12%). Running avg: **-634 mbb/hand**.
+### 5M RBM Slumbot Result (25K hands, STATISTICALLY SIGNIFICANT)
+| Metric | Value |
+|---|---|
+| **Result** | **-1107.56 mbb/hand (-1.11 bb/hand)** |
+| **95% CI** | **[-1.43, -0.79] bb/hand** |
+| Significant | YES |
+| Std dev | 25.86 bb/hand |
+| SE | 0.16 bb/hand |
+| Info sets | P0=95.9M, P1=151.3M (247M total) |
+| Training time | 18,325s (5.1 hr) |
+| Checkpoint | checkpoint_5M_5000000.dat (25GB) |
 
-**EARLY SIGNAL**: -634 mbb at 5M RBM iters vs -1275 mbb at 60M equity iters.
-RBM at 5M is already ~2x better than equity at 60M (12x more training!).
-Still very early (big variance at 3K hands) but the direction is extremely promising.
+### Comparison: RBM vs Equity
+| Method | Iters | bb/hand | 95% CI | Hands |
+|---|---|---|---|---|
+| Equity 60M | 60M | -1.28 | [-1.59, -0.96] | 25K |
+| **RBM 5M** | **5M** | **-1.11** | **[-1.43, -0.79]** | **25K** |
+
+**RBM at 5M iters (-1.11) matches or beats equity at 60M iters (-1.28) with 12x less training.**
+CIs overlap, so not a statistically significant difference between the two methods yet.
+But the training efficiency is dramatically better — same performance at 1/12th the compute.
+
+### 10M Training Launched
+Resuming from 5M checkpoint. Same config (single-threaded, 169b, ε=0.5).
+~5 hours to 10M checkpoint + 25K Slumbot eval.
 
 ---
 
@@ -55,7 +73,7 @@ Still very early (big variance at 3K hands) but the direction is extremely promi
 ### Scaling Curve (will populate as checkpoints complete)
 | Checkpoint | Total Iters | bb/hand | 95% CI | Significant? | Info Sets |
 |---|---|---|---|---|---|
-| 1 | 5M | pending | | | |
+| **1** | **5M** | **-1.11** | **[-1.43, -0.79]** | **YES** | **247M** |
 | 2 | 10M | pending | | | |
 | 3 | 15M | pending | | | |
 | 4 | 20M | pending | | | |
@@ -70,7 +88,8 @@ Still very early (big variance at 3K hands) but the direction is extremely promi
 | Equity 50M | equity | 50M | -1.16 | ±1.8 (est) | 2000 | NO |
 | Equity 60M | equity | 60M | -1.28 | [-1.59, -0.96] | 25000 | YES |
 | **RBM 50K (local)** | **RBM** | **50K** | **-2.27** | **[-2.77, -1.77]** | **25000** | **YES** |
-| RBM 5M (cloud) | RBM | 5M | pending | | 25K | |
+| **RBM 5M (cloud)** | **RBM** | **5M** | **-1.11** | **[-1.43, -0.79]** | **25K** | **YES** |
+| RBM 10M (cloud) | RBM | 10M | pending | | 25K | |
 
 ### Budget
 - Total budget: $600 ($500 original + $100 extra)
