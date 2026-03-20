@@ -10,11 +10,19 @@
 - 50M total checkpoint saved (28.9GB), 75M checkpoint failed (0 bytes)
 
 **Instance i-04b08cd89812cd100 (r6i.12xlarge, 384GB, on-demand)**
-- Evaluated 50M checkpoint vs Slumbot: -1164.93 mbb/hand (2000 hands)
+- Evaluated 50M checkpoint vs Slumbot: -1164.93 mbb/hand (2000 hands, NOT significant)
 - Resumed training from 50M, reached 70M total (20M into resume)
 - 60M checkpoint saved (31GB, peak RAM 239GB during serialization)
 - OOM killed at 70M during 20M checkpoint serialization (peak > 371GB)
 - Training exit code 137 (SIGKILL from OOM killer)
+
+**Instance i-08bffa26c3560a046 (r6i.12xlarge, 384GB, on-demand)**
+- Evaluated 60M checkpoint vs Slumbot: **-1275.55 mbb/hand (-1.28 bb/hand)**
+- **25,000 hands — FIRST STATISTICALLY SIGNIFICANT result**
+- 95% CI: **[-1.59, -0.96] bb/hand**, σ=25.43, SE=0.16
+- Instance terminated after eval, BEFORE parallel training started
+- Cause: likely self-terminated too early or hit an error in Phase 7 startup
+- **Training to 200M still needs to happen**
 
 ### Decision: OxCaml vs Flambda2 vs Vanilla OCaml
 
@@ -42,7 +50,17 @@ Rationale:
 - The actual bottleneck is tree traversal, not matching
 - 55 unit tests now cover correctness (20 Hungarian, 21 Distance, 14 Merge)
 
-### Implementations Completed
+### Decision: Epsilon parameter
+
+**Not theoretically motivated — it's a domain-specific hyperparameter**
+
+- `train_bot.ml`: rbm_epsilon = 0.5 (post-flop bucketing)
+- `online_learner.ml`: default epsilon = 200.0
+- `main.ml` demo: sweeps [0.0; 50.0; 200.0; 500.0; 1000.0; 2000.0]
+- `surface_sweep.ml`: sweeps [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
+- WRITEUP reports "~400 clusters emerge with ε=0.5" as observation, not derivation
+
+### Implementations Completed This Session
 
 1. **Streaming checkpoint serialization** (compact_cfr.ml)
    - New chunked binary format `RBMCFR01` — writes entries one at a time
@@ -55,18 +73,18 @@ Rationale:
    - `train_mccfr_parallel` using Domainslib.Task.parallel_for
    - Each domain gets independent cfr_state copy (no locks, no shared mutable state)
    - Post-parallel merge by summing regret_sum + strategy_sum (additive property of MCCFR)
+   - `--parallel` and `--domains N` flags in slumbot_client
    - Supports resume, checkpointing, progress reporting via Atomic counters
    - Expected 4-8x speedup on multicore instances
+   - **NOT YET TESTED ON CLOUD** — instance terminated before training phase
 
 3. **Hot-path key construction optimization** (compact_cfr.ml)
    - Replaced Buffer + Int.to_string with direct byte writing (zero intermediate allocations)
    - Replaced Hashtbl.find + Hashtbl.set with find_or_add (single lookup)
    - Output format identical — checkpoint compatibility preserved
-   - All tests pass
 
 4. **Compiler optimization flags** (dune-workspace)
    - Added `-O2` for both dev and release profiles
-   - Clean build + all tests pass
 
 5. **Statistical CI reporting** (slumbot_client.ml)
    - Tracks per-hand winnings, computes σ, SE, 95% CI
@@ -94,11 +112,11 @@ Rationale:
 - All future experiments MUST report 95% CI
 - Slumbot client now computes these automatically
 
-### Performance Optimization Priority (not yet implemented)
+### Performance Optimization Priority
 
 | Optimization | Est. Impact | Status |
 |---|---|---|
-| Parallel MCCFR (multicore) | 4-8x | **Done** |
+| Parallel MCCFR (multicore) | 4-8x | **Done** (untested on cloud) |
 | `-O2` compiler flags | 10-15% | **Done** |
 | Zero-alloc key construction | 10-20% | **Done** |
 | find_or_add in hot path | 5-8% | **Done** |
@@ -112,5 +130,6 @@ Rationale:
 | Previous runs (20b-169b, various) | ~$200 |
 | 169b 100M run (terminated at 75M) | ~$70 |
 | Resume run (terminated at 70M) | ~$25 |
-| **Total spent** | **~$295** |
-| **Budget remaining** | **~$205 of $500** |
+| Parallel run (eval only, terminated) | ~$10 |
+| **Total spent** | **~$305** |
+| **Budget remaining** | **~$195 of $500** |
