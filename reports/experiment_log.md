@@ -49,11 +49,26 @@ Launched 10M from scratch instead — loses 5M warm start but avoids the bug.
 **Checkpoint resume bug FIXED** (commit f73a817): read_exact loops for large buffers.
 
 ### 10M Training Progress (fresh, no resume)
-- **75% (7.26M/10M)**, 315M info sets, 74GB/123GB RAM
-- Rate: ~4.5K iter/min (slowing with table growth)
-- Extrapolated peak: ~102GB at 10M — fits but tight
-- Instance cost so far: ~$26 (~26 hours × $1/hr)
-- ~3.5 hours to checkpoint + 25K Slumbot eval
+- **COMPLETE** (10M/10M), 392M info sets, 98GB peak RAM
+- Training time: 37,085s (10.3 hr)
+- Checkpoint: checkpoint_10M_10000000.dat (39GB)
+
+### 10M RBM Slumbot Result (25K hands, STATISTICALLY SIGNIFICANT)
+| Metric | Value |
+|---|---|
+| **Result** | **-1319.09 mbb/hand (-1.32 bb/hand)** |
+| **95% CI** | **[-1.63, -1.01] bb/hand** |
+| Significant | YES |
+| Info sets | P0=155.6M, P1=236.8M (392M total) |
+
+**Worse than 5M RBM (-1.11) but CIs overlap.** The 10M was fresh (no resume from 5M)
+so the first 5M "re-explored" info sets the 5M run had already found. Not a fair comparison.
+
+### 20M Training Launched (RESUMING from 10M checkpoint)
+- Rebuilt binary with checkpoint resume fix (read_exact looped reads)
+- Resuming from checkpoint_10M_10000000.dat (39GB)
+- If 20M improves over 10M → continue scaling. If not → stop.
+- Instance cost so far: ~$32
 
 ---
 
@@ -85,7 +100,7 @@ Launched 10M from scratch instead — loses 5M warm start but avoids the bug.
 | Checkpoint | Total Iters | bb/hand | 95% CI | Significant? | Info Sets |
 |---|---|---|---|---|---|
 | **1** | **5M** | **-1.11** | **[-1.43, -0.79]** | **YES** | **247M** |
-| 2 | 10M | pending | | | |
+| **2** | **10M** | **-1.32** | **[-1.63, -1.01]** | **YES** | **392M** |
 | 3 | 15M | pending | | | |
 | 4 | 20M | pending | | | |
 | 5 | 25M | pending | | | |
@@ -100,7 +115,8 @@ Launched 10M from scratch instead — loses 5M warm start but avoids the bug.
 | Equity 60M | equity | 60M | -1.28 | [-1.59, -0.96] | 25000 | YES |
 | **RBM 50K (local)** | **RBM** | **50K** | **-2.27** | **[-2.77, -1.77]** | **25000** | **YES** |
 | **RBM 5M (cloud)** | **RBM** | **5M** | **-1.11** | **[-1.43, -0.79]** | **25K** | **YES** |
-| RBM 10M (cloud) | RBM | 10M | pending | | 25K | |
+| **RBM 10M (cloud)** | **RBM** | **10M** | **-1.32** | **[-1.63, -1.01]** | **25K** | **YES** |
+| RBM 20M (cloud) | RBM | 20M | pending | | 25K | |
 
 ### Budget
 - Total budget: $600 ($500 original + $100 extra)
