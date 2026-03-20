@@ -186,7 +186,7 @@ dune exec -- rbm-slumbot-client \
   --checkpoint-every $CHECKPOINT_EVERY \
   --checkpoint-prefix checkpoint \
   --parallel \
-  --domains 8 \
+  --domains 4 \
   2>&1 | tee "$RESULTS_DIR/training_200M.log"
 TRAIN_EXIT=${PIPESTATUS[0]}
 set -e
