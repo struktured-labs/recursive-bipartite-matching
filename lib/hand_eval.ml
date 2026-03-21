@@ -16,7 +16,7 @@ module Hand_rank = struct
 end
 
 let is_flush (c1 : Card.t) (c2 : Card.t) (c3 : Card.t) =
-  Card.Suit.equal c1.suit c2.suit && Card.Suit.equal c2.suit c3.suit
+  Card.Suit.equal (Card.suit c1) (Card.suit c2) && Card.Suit.equal (Card.suit c2) (Card.suit c3)
 
 let is_straight ranks =
   let sorted = List.sort ranks ~compare:Int.compare in
@@ -32,9 +32,9 @@ let is_straight ranks =
   | _ -> false
 
 let evaluate (c1 : Card.t) (c2 : Card.t) (c3 : Card.t) =
-  let r1 = Card.Rank.to_int c1.rank in
-  let r2 = Card.Rank.to_int c2.rank in
-  let r3 = Card.Rank.to_int c3.rank in
+  let r1 = Card.Rank.to_int (Card.rank c1) in
+  let r2 = Card.Rank.to_int (Card.rank c2) in
+  let r3 = Card.Rank.to_int (Card.rank c3) in
   let ranks = [ r1; r2; r3 ] in
   let sorted = List.sort ranks ~compare:(fun a b -> Int.compare b a) in
   let flush = is_flush c1 c2 c3 in

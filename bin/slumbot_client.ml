@@ -69,17 +69,18 @@ let strategy_to_sexp (strat : Compact_cfr.strategy) : Sexp.t =
     Hashtbl.fold strat ~init:[] ~f:(fun ~key ~data acc ->
       let probs = List.map (Array.to_list data) ~f:(fun f ->
         Sexp.Atom (Float.to_string f)) in
-      Sexp.List [ Sexp.Atom key; Sexp.List probs ] :: acc)
+      Sexp.List [ Sexp.Atom (Int64.to_string key); Sexp.List probs ] :: acc)
   in
   Sexp.List entries
 
 let strategy_of_sexp (sexp : Sexp.t) : Compact_cfr.strategy =
-  let table = Hashtbl.create (module String) in
+  let table = Hashtbl.create (module Int64) in
   (match sexp with
    | Sexp.List entries ->
      List.iter entries ~f:(fun entry ->
        match entry with
-       | Sexp.List [ Sexp.Atom key; Sexp.List probs ] ->
+       | Sexp.List [ Sexp.Atom key_str; Sexp.List probs ] ->
+         let key = Int64.of_string key_str in
          let arr = Array.of_list
            (List.map probs ~f:(fun p ->
               match p with
@@ -123,7 +124,7 @@ let parse_card_string s =
   | true ->
     let rank = parse_rank (String.get s 0) in
     let suit = parse_suit (String.get s 1) in
-    { Card.rank; suit }
+    Card.create ~rank ~suit
   | false -> failwithf "parse_card_string: too short %S" s ()
 
 (* ------------------------------------------------------------------ *)
@@ -365,7 +366,7 @@ let select_slumbot_action
     ~(client_pos : int)
     ~(action : string)
     ~(action_state : action_state)
-  : string * string * float array =
+  : string * Compact_cfr.info_key * float array =
   (* Compute buckets *)
   let buckets =
     Compact_cfr.precompute_buckets_equity ~abstraction ~hole_cards ~board
@@ -886,7 +887,7 @@ let play_hand
          in
          (match verbose with
           | true ->
-            eprintf "[slumbot] action=%s our_incr=%s key=%s probs=[%s]\n%!"
+            eprintf "[slumbot] action=%s our_incr=%s key=%Ld probs=[%s]\n%!"
               action incr key
               (String.concat ~sep:"," (Array.to_list
                  (Array.map probs ~f:(sprintf "%.3f"))))
@@ -1222,7 +1223,7 @@ let () =
         (p0, p1)
       | false ->
         eprintf "[slumbot] WARNING: No strategy specified. Using uniform random.\n%!";
-        (Hashtbl.create (module String), Hashtbl.create (module String))
+        (Hashtbl.create (module Int64), Hashtbl.create (module Int64))
   in
 
   let mode =

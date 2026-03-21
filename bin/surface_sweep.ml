@@ -123,7 +123,7 @@ let parse_card_string s =
   | true ->
     let rank = parse_rank (String.get s 0) in
     let suit = parse_suit (String.get s 1) in
-    { Card.rank; suit }
+    Card.create ~rank ~suit
   | false -> failwithf "parse_card_string: too short %S" s ()
 
 (* ------------------------------------------------------------------ *)
@@ -834,16 +834,16 @@ let play_session
 let concrete_hole_cards (h : Equity.canonical_hand) : Card.t * Card.t =
   match Card.Rank.equal h.rank1 h.rank2 with
   | true ->
-    ({ Card.rank = h.rank1; suit = Card.Suit.Hearts },
-     { Card.rank = h.rank2; suit = Card.Suit.Spades })
+    (Card.create ~rank:h.rank1 ~suit:Card.Suit.Hearts,
+     Card.create ~rank:h.rank2 ~suit:Card.Suit.Spades)
   | false ->
     match h.suited with
     | true ->
-      ({ Card.rank = h.rank1; suit = Card.Suit.Hearts },
-       { Card.rank = h.rank2; suit = Card.Suit.Hearts })
+      (Card.create ~rank:h.rank1 ~suit:Card.Suit.Hearts,
+       Card.create ~rank:h.rank2 ~suit:Card.Suit.Hearts)
     | false ->
-      ({ Card.rank = h.rank1; suit = Card.Suit.Hearts },
-       { Card.rank = h.rank2; suit = Card.Suit.Diamonds })
+      (Card.create ~rank:h.rank1 ~suit:Card.Suit.Hearts,
+       Card.create ~rank:h.rank2 ~suit:Card.Suit.Diamonds)
 
 (* ------------------------------------------------------------------ *)
 (* Build showdown distribution trees for all 169 canonical hands       *)

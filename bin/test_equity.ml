@@ -29,12 +29,12 @@ let () =
   (* Test 2: Canonical hand mapping                                   *)
   (* ---------------------------------------------------------------- *)
   printf "\n--- Test 2: Canonical hand mapping ---\n";
-  let ah = { Card.rank = Card.Rank.Ace; suit = Card.Suit.Hearts } in
-  let as_ = { Card.rank = Card.Rank.Ace; suit = Card.Suit.Spades } in
-  let kh = { Card.rank = Card.Rank.King; suit = Card.Suit.Hearts } in
-  let kd = { Card.rank = Card.Rank.King; suit = Card.Suit.Diamonds } in
-  let seven_c = { Card.rank = Card.Rank.Seven; suit = Card.Suit.Clubs } in
-  let two_d = { Card.rank = Card.Rank.Two; suit = Card.Suit.Diamonds } in
+  let ah = Card.create ~rank:Card.Rank.Ace ~suit:Card.Suit.Hearts in
+  let as_ = Card.create ~rank:Card.Rank.Ace ~suit:Card.Suit.Spades in
+  let kh = Card.create ~rank:Card.Rank.King ~suit:Card.Suit.Hearts in
+  let kd = Card.create ~rank:Card.Rank.King ~suit:Card.Suit.Diamonds in
+  let seven_c = Card.create ~rank:Card.Rank.Seven ~suit:Card.Suit.Clubs in
+  let two_d = Card.create ~rank:Card.Rank.Two ~suit:Card.Suit.Diamonds in
 
   let aa_mapped = Equity.to_canonical (ah, as_) in
   printf "  AhAs -> %s (expected AA)\n" aa_mapped.name;
@@ -57,15 +57,15 @@ let () =
   (* ---------------------------------------------------------------- *)
   printf "\n--- Test 3: 7-card hand comparison ---\n";
   (* AA vs KK with a neutral board *)
-  let ac = { Card.rank = Card.Rank.Ace; suit = Card.Suit.Clubs } in
-  let ad = { Card.rank = Card.Rank.Ace; suit = Card.Suit.Diamonds } in
-  let kc = { Card.rank = Card.Rank.King; suit = Card.Suit.Clubs } in
-  let ks = { Card.rank = Card.Rank.King; suit = Card.Suit.Spades } in
-  let b1 = { Card.rank = Card.Rank.Five; suit = Card.Suit.Hearts } in
-  let b2 = { Card.rank = Card.Rank.Eight; suit = Card.Suit.Diamonds } in
-  let b3 = { Card.rank = Card.Rank.Ten; suit = Card.Suit.Spades } in
-  let b4 = { Card.rank = Card.Rank.Three; suit = Card.Suit.Clubs } in
-  let b5 = { Card.rank = Card.Rank.Jack; suit = Card.Suit.Hearts } in
+  let ac = Card.create ~rank:Card.Rank.Ace ~suit:Card.Suit.Clubs in
+  let ad = Card.create ~rank:Card.Rank.Ace ~suit:Card.Suit.Diamonds in
+  let kc = Card.create ~rank:Card.Rank.King ~suit:Card.Suit.Clubs in
+  let ks = Card.create ~rank:Card.Rank.King ~suit:Card.Suit.Spades in
+  let b1 = Card.create ~rank:Card.Rank.Five ~suit:Card.Suit.Hearts in
+  let b2 = Card.create ~rank:Card.Rank.Eight ~suit:Card.Suit.Diamonds in
+  let b3 = Card.create ~rank:Card.Rank.Ten ~suit:Card.Suit.Spades in
+  let b4 = Card.create ~rank:Card.Rank.Three ~suit:Card.Suit.Clubs in
+  let b5 = Card.create ~rank:Card.Rank.Jack ~suit:Card.Suit.Hearts in
 
   let cmp = Equity.compare_7card
       (ac, ad, b1, b2, b3, b4, b5)

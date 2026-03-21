@@ -10,17 +10,17 @@
  *  All other logic is identical to {!Cfr_nolimit}. *)
 
 (** Information set key *)
-type info_key = string
+type info_key = Int64.t
 
 (** Strategy: maps info_key -> action probabilities.
-    Uses monomorphic string hashtable (NOT Poly). *)
-type strategy = (string, float array) Hashtbl.t
+    Uses monomorphic Int64 hashtable (NOT Poly). *)
+type strategy = (Int64.t, float array) Hashtbl.t
 
 (** Mutable CFR state for one player.
-    Uses monomorphic string hashtables with pre-sizing. *)
+    Uses monomorphic Int64 hashtables with pre-sizing. *)
 type cfr_state = {
-  regret_sum : (string, float array) Hashtbl.t;
-  strategy_sum : (string, float array) Hashtbl.t;
+  regret_sum : (Int64.t, float array) Hashtbl.t;
+  strategy_sum : (Int64.t, float array) Hashtbl.t;
 }
 
 (** [create ~size ()] returns a fresh CFR state with tables pre-sized
@@ -105,9 +105,15 @@ val train_mccfr
     the average strategy. *)
 val average_strategy : cfr_state -> strategy
 
-(** [make_info_key ~buckets ~round_idx ~history] constructs the information set
-    key string from per-street bucket assignments and the action history. *)
+(** [make_info_key ~buckets ~round_idx ~history] hashes bucket assignments,
+    round index, and action history into a single [Int64.t] via FNV-1a.
+    Zero allocation --- no intermediate strings. *)
 val make_info_key : buckets:int array -> round_idx:int -> history:string -> info_key
+
+(** [make_info_key_string ~buckets ~round_idx ~history] constructs the old
+    human-readable string key (e.g. ["B34:29:78:3|cc/kk/kh"]) for debugging
+    and diagnostics.  Not used in the hot path. *)
+val make_info_key_string : buckets:int array -> round_idx:int -> history:string -> string
 
 (** [precompute_buckets_equity ~abstraction ~hole_cards ~board] returns a
     4-element array of bucket assignments using equity-based bucketing. *)

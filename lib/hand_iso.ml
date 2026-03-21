@@ -9,14 +9,14 @@ type hand_class = {
 }
 
 let classify (c1 : Card.t) (c2 : Card.t) =
-  let r1 = Card.Rank.to_int c1.rank in
-  let r2 = Card.Rank.to_int c2.rank in
+  let r1 = Card.Rank.to_int (Card.rank c1) in
+  let r2 = Card.Rank.to_int (Card.rank c2) in
   let high, low =
     match r1 >= r2 with
-    | true -> (c1.rank, c2.rank)
-    | false -> (c2.rank, c1.rank)
+    | true -> (Card.rank c1, Card.rank c2)
+    | false -> (Card.rank c2, Card.rank c1)
   in
-  let suited = Card.Suit.equal c1.suit c2.suit in
+  let suited = Card.Suit.equal (Card.suit c1) (Card.suit c2) in
   { rank1 = high; rank2 = low; suited }
 
 (** All 13 ranks in descending order (Ace first). *)
@@ -98,8 +98,8 @@ let hands_in_class hc =
         match Card.Suit.compare s1 s2 < 0 with
         | true ->
           combos :=
-            ({ Card.rank = hc.rank1; suit = s1 },
-             { Card.rank = hc.rank2; suit = s2 })
+            (Card.create ~rank:hc.rank1 ~suit:s1,
+             Card.create ~rank:hc.rank2 ~suit:s2)
             :: !combos
         | false -> ()));
     List.rev !combos
@@ -108,8 +108,8 @@ let hands_in_class hc =
     | true ->
       (* Suited: 4 combos (one per suit) *)
       List.map suits ~f:(fun s ->
-        ({ Card.rank = hc.rank1; suit = s },
-         { Card.rank = hc.rank2; suit = s }))
+        (Card.create ~rank:hc.rank1 ~suit:s,
+         Card.create ~rank:hc.rank2 ~suit:s))
     | false ->
       (* Offsuit: 4*3 = 12 combos *)
       let combos = ref [] in
@@ -119,7 +119,7 @@ let hands_in_class hc =
           | true -> ()
           | false ->
             combos :=
-              ({ Card.rank = hc.rank1; suit = s1 },
-               { Card.rank = hc.rank2; suit = s2 })
+              (Card.create ~rank:hc.rank1 ~suit:s1,
+               Card.create ~rank:hc.rank2 ~suit:s2)
               :: !combos));
       List.rev !combos

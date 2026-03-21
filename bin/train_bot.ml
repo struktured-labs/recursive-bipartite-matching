@@ -16,16 +16,16 @@ let fast_preflop_equities ~n_samples =
     let h1, h2 =
       match Card.Rank.equal hand.rank1 hand.rank2 with
       | true ->
-        ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-         { Card.rank = hand.rank2; suit = Card.Suit.Spades })
+        (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+         Card.create ~rank:hand.rank2 ~suit:Card.Suit.Spades)
       | false ->
         match hand.suited with
         | true ->
-          ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-           { Card.rank = hand.rank2; suit = Card.Suit.Hearts })
+          (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+           Card.create ~rank:hand.rank2 ~suit:Card.Suit.Hearts)
         | false ->
-          ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-           { Card.rank = hand.rank2; suit = Card.Suit.Diamonds })
+          (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+           Card.create ~rank:hand.rank2 ~suit:Card.Suit.Diamonds)
     in
     (* Build deck without hole cards *)
     let remaining =
@@ -113,7 +113,7 @@ let () =
     let bucket = Abstraction.get_bucket abstraction ~hole_cards in
     printf "  %-5s -> bucket %d\n%!" name bucket
   in
-  let card r s = { Card.rank = r; suit = s } in
+  let card r s = Card.create ~rank:r ~suit:s in
   show_hand "AA" (card Ace Hearts, card Ace Spades);
   show_hand "KK" (card King Hearts, card King Spades);
   show_hand "AKs" (card Ace Hearts, card King Hearts);

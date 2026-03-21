@@ -141,11 +141,11 @@ let hand_category5 p1_cards community =
 
 (** Describe P1's starting hand type. *)
 let starting_hand_type (h1 : Card.t) (h2 : Card.t) =
-  let r1 = Card.Rank.to_int h1.rank in
-  let r2 = Card.Rank.to_int h2.rank in
-  let suited = Card.Suit.equal h1.suit h2.suit in
+  let r1 = Card.Rank.to_int (Card.rank h1) in
+  let r2 = Card.Rank.to_int (Card.rank h2) in
+  let suited = Card.Suit.equal (Card.suit h1) (Card.suit h2) in
   match r1 = r2 with
-  | true -> sprintf "pair(%s)" (Card.Rank.to_string h1.rank)
+  | true -> sprintf "pair(%s)" (Card.Rank.to_string (Card.rank h1))
   | false ->
     let connected = Int.abs (r1 - r2) = 1 in
     match suited, connected with

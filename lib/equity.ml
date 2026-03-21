@@ -59,12 +59,12 @@ let all_canonical_hands =
   List.rev !hands
 
 let to_canonical ((c1, c2) : Card.t * Card.t) =
-  let i1 = Card.Rank.to_int c1.rank in
-  let i2 = Card.Rank.to_int c2.rank in
+  let i1 = Card.Rank.to_int (Card.rank c1) in
+  let i2 = Card.Rank.to_int (Card.rank c2) in
   let r1, r2, suited =
     match i1 >= i2 with
-    | true -> (c1.rank, c2.rank, Card.Suit.equal c1.suit c2.suit)
-    | false -> (c2.rank, c1.rank, Card.Suit.equal c1.suit c2.suit)
+    | true -> (Card.rank c1, Card.rank c2, Card.Suit.equal (Card.suit c1) (Card.suit c2))
+    | false -> (Card.rank c2, Card.rank c1, Card.Suit.equal (Card.suit c1) (Card.suit c2))
   in
   let is_pair = Card.Rank.equal r1 r2 in
   (* For pairs, suited is always false in canonical form *)
@@ -450,18 +450,18 @@ let equity_for_canonical (hand : canonical_hand) =
     match Card.Rank.equal hand.rank1 hand.rank2 with
     | true ->
       (* Pair: pick two fixed suits *)
-      ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-       { Card.rank = hand.rank2; suit = Card.Suit.Spades })
+      (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+       Card.create ~rank:hand.rank2 ~suit:Card.Suit.Spades)
     | false ->
       match hand.suited with
       | true ->
         (* Suited: same suit *)
-        ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-         { Card.rank = hand.rank2; suit = Card.Suit.Hearts })
+        (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+         Card.create ~rank:hand.rank2 ~suit:Card.Suit.Hearts)
       | false ->
         (* Offsuit: different suits *)
-        ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-         { Card.rank = hand.rank2; suit = Card.Suit.Diamonds })
+        (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+         Card.create ~rank:hand.rank2 ~suit:Card.Suit.Diamonds)
   in
   (* Use Monte Carlo with enough samples for good convergence *)
   hand_strength_mc ~hole_cards ~board:[] ~n_samples:50_000

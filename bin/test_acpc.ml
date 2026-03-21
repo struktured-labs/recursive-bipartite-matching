@@ -8,10 +8,10 @@ let () =
   (* Test card parsing *)
   let test_card s expected_rank expected_suit =
     let c = Acpc_protocol.parse_card s in
-    let ok = Card.Rank.equal c.rank expected_rank && Card.Suit.equal c.suit expected_suit in
-    printf "  parse_card %S -> %s%s %s\n%!" s (Card.Rank.to_string c.rank)
+    let ok = Card.Rank.equal (Card.rank c) expected_rank && Card.Suit.equal (Card.suit c) expected_suit in
+    printf "  parse_card %S -> %s%s %s\n%!" s (Card.Rank.to_string (Card.rank c))
       (match ok with true -> "" | false -> " FAIL!")
-      (Card.Suit.to_string c.suit);
+      (Card.Suit.to_string (Card.suit c));
     assert ok
   in
   printf "Card parsing:\n%!";

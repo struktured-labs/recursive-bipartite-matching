@@ -11,18 +11,18 @@
 (* Types                                                               *)
 (* ------------------------------------------------------------------ *)
 
-type info_key = string
+type info_key = Int64.t
 
-type strategy = (string, float array) Hashtbl.t
+type strategy = (Int64.t, float array) Hashtbl.t
 
 type cfr_state = {
-  regret_sum : (string, float array) Hashtbl.t;
-  strategy_sum : (string, float array) Hashtbl.t;
+  regret_sum : (Int64.t, float array) Hashtbl.t;
+  strategy_sum : (Int64.t, float array) Hashtbl.t;
 }
 
 let create ?(size = 1_000_000) () =
-  { regret_sum = Hashtbl.create ~size (module String)
-  ; strategy_sum = Hashtbl.create ~size (module String)
+  { regret_sum = Hashtbl.create ~size (module Int64)
+  ; strategy_sum = Hashtbl.create ~size (module Int64)
   }
 
 (* ------------------------------------------------------------------ *)
@@ -56,7 +56,7 @@ let accumulate_strategy (state : cfr_state) (key : info_key)
     current.(i) <- current.(i) +. weight *. p)
 
 let average_strategy (state : cfr_state) : strategy =
-  let result = Hashtbl.create ~size:(Hashtbl.length state.strategy_sum) (module String) in
+  let result = Hashtbl.create ~size:(Hashtbl.length state.strategy_sum) (module Int64) in
   Hashtbl.iteri state.strategy_sum ~f:(fun ~key ~data:sums ->
     let total = Array.fold sums ~init:0.0 ~f:( +. ) in
     let avg =
@@ -91,19 +91,63 @@ let sample_deal () =
   (p1, p2, board)
 
 (* ------------------------------------------------------------------ *)
-(* Bucket-based info-set key                                           *)
+(* Bucket-based info-set key (FNV-1a int64 hash)                       *)
 (* ------------------------------------------------------------------ *)
 
+(** FNV-1a constants for 64-bit hashing. *)
+let fnv_offset_basis = 0xcbf29ce484222325L
+let fnv_prime        = 0x100000001b3L
+
+(** [fnv1a_mix_byte h b] folds a single byte into FNV-1a state. *)
+let fnv1a_mix_byte (h : int64) (b : int) : int64 =
+  Int64.( * ) (Int64.( lxor ) h (Int64.of_int b)) fnv_prime
+
+(** [fnv1a_mix_int h n] folds a native int into the hash state
+    by feeding its 8 bytes (little-endian). *)
+let fnv1a_mix_int (h : int64) (n : int) : int64 =
+  let h = fnv1a_mix_byte h (n land 0xFF) in
+  let h = fnv1a_mix_byte h ((n lsr 8) land 0xFF) in
+  let h = fnv1a_mix_byte h ((n lsr 16) land 0xFF) in
+  let h = fnv1a_mix_byte h ((n lsr 24) land 0xFF) in
+  let h = fnv1a_mix_byte h ((n lsr 32) land 0xFF) in
+  let h = fnv1a_mix_byte h ((n lsr 40) land 0xFF) in
+  let h = fnv1a_mix_byte h ((n lsr 48) land 0xFF) in
+  fnv1a_mix_byte h ((n lsr 56) land 0xFF)
+
+(** [fnv1a_mix_string h s] folds every byte of [s] into the hash state. *)
+let fnv1a_mix_string (h : int64) (s : string) : int64 =
+  let len = String.length s in
+  let h = ref h in
+  for i = 0 to len - 1 do
+    h := fnv1a_mix_byte !h (Char.to_int (String.unsafe_get s i))
+  done;
+  !h
+
+(** [make_info_key ~buckets ~round_idx ~history] hashes bucket assignments,
+    round index, and action history into a single [Int64.t] via FNV-1a.
+    Zero allocation --- no intermediate strings on the hot path. *)
+let make_info_key ~(buckets : int array) ~(round_idx : int) ~(history : string) : info_key =
+  let last = Int.min round_idx 3 in
+  let h = ref fnv_offset_basis in
+  for i = 0 to last do
+    h := fnv1a_mix_int !h buckets.(i)
+  done;
+  (* Separator byte between structural components *)
+  let h = fnv1a_mix_byte !h 0xFF in
+  let h = fnv1a_mix_int h round_idx in
+  let h = fnv1a_mix_byte h 0xFE in
+  fnv1a_mix_string h history
+
+(* -- String-based key for debugging --------------------------------- *)
+
 (** Write the decimal digits of non-negative [n] into [buf] starting at [pos].
-    Returns the new position after the last digit written.
-    Avoids [Int.to_string] allocation on the hot path. *)
+    Returns the new position after the last digit written. *)
 let write_int_digits (buf : Bytes.t) (pos : int) (n : int) : int =
   match n with
   | 0 ->
     Bytes.set buf pos '0';
     pos + 1
   | _ ->
-    (* Count digits *)
     let nd = ref 0 in
     let v = ref n in
     while !v > 0 do
@@ -118,10 +162,10 @@ let write_int_digits (buf : Bytes.t) (pos : int) (n : int) : int =
     done;
     end_pos
 
-let make_info_key ~(buckets : int array) ~(round_idx : int) ~(history : string) : info_key =
+(** [make_info_key_string] produces the old human-readable string key
+    (e.g. ["B34:29:78:3|cc/kk/kh"]) for debugging and diagnostics. *)
+let make_info_key_string ~(buckets : int array) ~(round_idx : int) ~(history : string) : string =
   let history_len = String.length history in
-  (* Upper bound: 'B' + up to 4 bucket ints (max ~7 digits each) + 3 colons
-     + '|' + history.  40 bytes covers the prefix generously. *)
   let buf = Bytes.create (40 + history_len) in
   Bytes.set buf 0 'B';
   let pos = ref 1 in
@@ -708,21 +752,24 @@ and advance_to_next_round
 (* Checkpoint serialization                                            *)
 (* ------------------------------------------------------------------ *)
 
-(** Magic header for the chunked binary format (8 bytes). *)
-let chunked_magic = "RBMCFR01"
+(** Magic header for the v2 chunked binary format (int64 keys). *)
+let chunked_magic = "RBMCFR02"
 
-(* -- Legacy Marshal format (kept for backward compat) --------------- *)
+(** Magic header for the v1 chunked binary format (string keys). *)
+let chunked_magic_v1 = "RBMCFR01"
+
+(* -- Marshal format (int64 keys) ------------------------------------ *)
 
 let load_checkpoint_marshal ~(filename : string) : cfr_state array =
   let ic = In_channel.create filename in
   let (p0_regret, p0_strat, p1_regret, p1_strat) :
-    (string * float array) list * (string * float array) list *
-    (string * float array) list * (string * float array) list =
+    (int64 * float array) list * (int64 * float array) list *
+    (int64 * float array) list * (int64 * float array) list =
     Marshal.from_channel ic
   in
   In_channel.close ic;
   let to_hashtbl lst =
-    let tbl = Hashtbl.create (module String) ~size:(List.length lst) in
+    let tbl = Hashtbl.create (module Int64) ~size:(List.length lst) in
     List.iter lst ~f:(fun (k, v) -> Hashtbl.set tbl ~key:k ~data:v);
     tbl
   in
@@ -744,18 +791,17 @@ let save_checkpoint_marshal ~(filename : string) (cfr_states : cfr_state array) 
   Marshal.to_channel oc data [];
   Out_channel.close oc
 
-(* -- Chunked binary format (streaming, no memory spike) ------------- *)
+(* -- Chunked binary format v2 (streaming, int64 keys) --------------- *)
 
-(** Binary layout:
+(** Binary layout (v2):
     {[
-      magic      : 8 bytes  "RBMCFR01"
-      version    : 4 bytes  (int32-le, currently 1)
+      magic      : 8 bytes  "RBMCFR02"
+      version    : 4 bytes  (int32-le, currently 2)
       n_tables   : 4 bytes  (int32-le, always 4)
       -- for each table:
         n_entries  : 8 bytes (int64-le)
         -- for each entry:
-          key_len    : 4 bytes (int32-le)
-          key_bytes  : key_len bytes
+          key        : 8 bytes (int64-le, FNV-1a hash)
           arr_len    : 4 bytes (int32-le)
           arr_floats : arr_len * 8 bytes (float64, native endian)
     ]} *)
@@ -772,6 +818,18 @@ let write_int64_le (oc : Out_channel.t) (v : int) : unit =
   let buf = Bytes.create 8 in
   for i = 0 to 7 do
     Bytes.set buf i (Char.of_int_exn ((v lsr (i * 8)) land 0xFF))
+  done;
+  Out_channel.output oc ~buf ~pos:0 ~len:8
+
+let write_int64_le_raw (oc : Out_channel.t) (v : int64) : unit =
+  let buf = Bytes.create 8 in
+  for i = 0 to 7 do
+    Bytes.set buf i
+      (Char.of_int_exn
+         (Int64.to_int_exn
+            (Int64.( land )
+               (Int64.shift_right_logical v (i * 8))
+               0xFFL)))
   done;
   Out_channel.output oc ~buf ~pos:0 ~len:8
 
@@ -811,13 +869,25 @@ let read_int64_le (ic : In_channel.t) : int =
      !v
    | false -> failwith "read_int64_le: unexpected EOF")
 
-let write_hashtbl_chunked (oc : Out_channel.t) (tbl : (string, float array) Hashtbl.t) : unit =
+let read_int64_le_raw (ic : In_channel.t) : int64 =
+  let buf = Bytes.create 8 in
+  (match read_exact ic ~buf ~pos:0 ~len:8 with
+   | true ->
+     let v = ref 0L in
+     for i = 0 to 7 do
+       v := Int64.( lor ) !v
+         (Int64.shift_left
+            (Int64.of_int_exn (Char.to_int (Bytes.get buf i)))
+            (i * 8))
+     done;
+     !v
+   | false -> failwith "read_int64_le_raw: unexpected EOF")
+
+let write_hashtbl_chunked (oc : Out_channel.t) (tbl : (Int64.t, float array) Hashtbl.t) : unit =
   let n_entries = Hashtbl.length tbl in
   write_int64_le oc n_entries;
   Hashtbl.iteri tbl ~f:(fun ~key ~data ->
-    let key_len = String.length key in
-    write_int32_le oc key_len;
-    Out_channel.output_string oc key;
+    write_int64_le_raw oc key;
     let arr_len = Array.length data in
     write_int32_le oc arr_len;
     (* Write float array as raw bytes — 8 bytes per float, native endian *)
@@ -830,16 +900,11 @@ let write_hashtbl_chunked (oc : Out_channel.t) (tbl : (string, float array) Hash
       done);
     Out_channel.output oc ~buf:float_buf ~pos:0 ~len:(arr_len * 8))
 
-let read_hashtbl_chunked (ic : In_channel.t) : (string, float array) Hashtbl.t =
+let read_hashtbl_chunked (ic : In_channel.t) : (Int64.t, float array) Hashtbl.t =
   let n_entries = read_int64_le ic in
-  let tbl = Hashtbl.create (module String) ~size:n_entries in
+  let tbl = Hashtbl.create (module Int64) ~size:n_entries in
   for _ = 1 to n_entries do
-    let key_len = read_int32_le ic in
-    let key_buf = Bytes.create key_len in
-    (match read_exact ic ~buf:key_buf ~pos:0 ~len:key_len with
-     | true -> ()
-     | false -> failwith "read_hashtbl_chunked: unexpected EOF reading key");
-    let key = Bytes.to_string key_buf in
+    let key = read_int64_le_raw ic in
     let arr_len = read_int32_le ic in
     let float_buf = Bytes.create (arr_len * 8) in
     (match read_exact ic ~buf:float_buf ~pos:0 ~len:(arr_len * 8) with
@@ -858,13 +923,9 @@ let read_hashtbl_chunked (ic : In_channel.t) : (string, float array) Hashtbl.t =
 
 let save_checkpoint_chunked ~(filename : string) (cfr_states : cfr_state array) : unit =
   let oc = Out_channel.create filename in
-  (* Magic header *)
   Out_channel.output_string oc chunked_magic;
-  (* Version *)
-  write_int32_le oc 1;
-  (* Number of tables *)
+  write_int32_le oc 2;
   write_int32_le oc 4;
-  (* Write all 4 tables: P0 regret, P0 strategy, P1 regret, P1 strategy *)
   write_hashtbl_chunked oc cfr_states.(0).regret_sum;
   write_hashtbl_chunked oc cfr_states.(0).strategy_sum;
   write_hashtbl_chunked oc cfr_states.(1).regret_sum;
@@ -874,25 +935,29 @@ let save_checkpoint_chunked ~(filename : string) (cfr_states : cfr_state array) 
 
 let load_checkpoint_chunked ~(filename : string) : cfr_state array =
   let ic = In_channel.create filename in
-  (* Read and verify magic *)
   let magic_buf = Bytes.create 8 in
   (match read_exact ic ~buf:magic_buf ~pos:0 ~len:8 with
    | true -> ()
    | false -> failwithf "load_checkpoint_chunked: unexpected EOF reading magic in %s" filename ());
-  (match String.equal (Bytes.to_string magic_buf) chunked_magic with
+  let magic_str = Bytes.to_string magic_buf in
+  (match String.equal magic_str chunked_magic with
    | true -> ()
-   | false -> failwithf "load_checkpoint_chunked: bad magic in %s" filename ());
-  (* Version *)
+   | false ->
+     (match String.equal magic_str chunked_magic_v1 with
+      | true ->
+        failwithf "load_checkpoint_chunked: %s uses v1 string-key format \
+                    (RBMCFR01) which is incompatible with int64 keys. \
+                    Re-train or convert offline." filename ()
+      | false ->
+        failwithf "load_checkpoint_chunked: bad magic in %s" filename ()));
   let version = read_int32_le ic in
-  (match version = 1 with
+  (match version = 2 with
    | true -> ()
    | false -> failwithf "load_checkpoint_chunked: unsupported version %d" version ());
-  (* Number of tables *)
   let n_tables = read_int32_le ic in
   (match n_tables = 4 with
    | true -> ()
    | false -> failwithf "load_checkpoint_chunked: expected 4 tables, got %d" n_tables ());
-  (* Read all 4 tables *)
   let p0_regret = read_hashtbl_chunked ic in
   let p0_strat = read_hashtbl_chunked ic in
   let p1_regret = read_hashtbl_chunked ic in
@@ -909,7 +974,8 @@ let is_chunked_format ~(filename : string) : bool =
   let buf = Bytes.create 8 in
   let n = In_channel.input ic ~buf ~pos:0 ~len:8 in
   In_channel.close ic;
-  n = 8 && String.equal (Bytes.to_string buf) chunked_magic
+  let s = Bytes.to_string buf in
+  n = 8 && (String.equal s chunked_magic || String.equal s chunked_magic_v1)
 
 (** [load_checkpoint] auto-detects the format (chunked vs Marshal). *)
 let load_checkpoint ~(filename : string) : cfr_state array =
@@ -1028,7 +1094,7 @@ let train_mccfr ~(config : Nolimit_holdem.config)
 (** Copy a cfr_state by deep-copying each hash table entry. *)
 let copy_cfr_state (src : cfr_state) : cfr_state =
   let copy_tbl tbl =
-    let tbl2 = Hashtbl.create (module String) ~size:(Hashtbl.length tbl) in
+    let tbl2 = Hashtbl.create (module Int64) ~size:(Hashtbl.length tbl) in
     Hashtbl.iteri tbl ~f:(fun ~key ~data ->
       Hashtbl.set tbl2 ~key ~data:(Array.copy data));
     tbl2

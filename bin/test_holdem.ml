@@ -15,7 +15,7 @@ let mk card_str =
     | 'h' -> Card.Suit.Hearts | 'd' -> Diamonds | 'c' -> Clubs | 's' -> Spades
     | c -> failwithf "bad suit: %c" c ()
   in
-  { Card.rank; suit }
+  Card.create ~rank ~suit
 
 let () =
   printf "=== Phase 1a: Hand_eval7 tests ===\n\n%!";

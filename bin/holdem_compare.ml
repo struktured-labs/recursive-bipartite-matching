@@ -81,16 +81,16 @@ let sample_canonical_hands ~n ~preflop_eq =
 let concrete_hole_cards (h : Equity.canonical_hand) : Card.t * Card.t =
   match Card.Rank.equal h.rank1 h.rank2 with
   | true ->
-    ({ Card.rank = h.rank1; suit = Card.Suit.Hearts },
-     { Card.rank = h.rank2; suit = Card.Suit.Spades })
+    (Card.create ~rank:h.rank1 ~suit:Card.Suit.Hearts,
+     Card.create ~rank:h.rank2 ~suit:Card.Suit.Spades)
   | false ->
     match h.suited with
     | true ->
-      ({ Card.rank = h.rank1; suit = Card.Suit.Hearts },
-       { Card.rank = h.rank2; suit = Card.Suit.Hearts })
+      (Card.create ~rank:h.rank1 ~suit:Card.Suit.Hearts,
+       Card.create ~rank:h.rank2 ~suit:Card.Suit.Hearts)
     | false ->
-      ({ Card.rank = h.rank1; suit = Card.Suit.Hearts },
-       { Card.rank = h.rank2; suit = Card.Suit.Diamonds })
+      (Card.create ~rank:h.rank1 ~suit:Card.Suit.Hearts,
+       Card.create ~rank:h.rank2 ~suit:Card.Suit.Diamonds)
 
 (* ------------------------------------------------------------------ *)
 (* Fast preflop equity (fewer MC samples for speed)                    *)
@@ -925,16 +925,16 @@ let () =
     let hole_cards =
       match Card.Rank.equal r1 r2 with
       | true ->
-        ({ Card.rank = r1; suit = Card.Suit.Hearts },
-         { Card.rank = r2; suit = Card.Suit.Spades })
+        (Card.create ~rank:r1 ~suit:Card.Suit.Hearts,
+         Card.create ~rank:r2 ~suit:Card.Suit.Spades)
       | false ->
         match suited with
         | true ->
-          ({ Card.rank = r1; suit = Card.Suit.Hearts },
-           { Card.rank = r2; suit = Card.Suit.Hearts })
+          (Card.create ~rank:r1 ~suit:Card.Suit.Hearts,
+           Card.create ~rank:r2 ~suit:Card.Suit.Hearts)
         | false ->
-          ({ Card.rank = r1; suit = Card.Suit.Hearts },
-           { Card.rank = r2; suit = Card.Suit.Diamonds })
+          (Card.create ~rank:r1 ~suit:Card.Suit.Hearts,
+           Card.create ~rank:r2 ~suit:Card.Suit.Diamonds)
     in
     let rbm_b = Abstraction.get_bucket rbm_abs ~hole_cards in
     let emd_b = Abstraction.get_bucket emd_abs ~hole_cards in

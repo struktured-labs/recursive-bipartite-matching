@@ -4,7 +4,7 @@ open Rbm
 
 let () =
   let config = Limit_holdem.standard_config in
-  let card r s = { Card.rank = r; suit = s } in
+  let card r s = Card.create ~rank:r ~suit:s in
   let hole1 = (card Ace Hearts, card King Spades) in
   let hole2 = (card Queen Hearts, card Jack Spades) in
   let hole3 = (card Seven Clubs, card Two Diamonds) in

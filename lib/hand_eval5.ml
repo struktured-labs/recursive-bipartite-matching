@@ -58,10 +58,10 @@ let rank_counts ranks =
     | n -> n)
 
 let is_flush (c1 : Card.t) (c2 : Card.t) (c3 : Card.t) (c4 : Card.t) (c5 : Card.t) =
-  Card.Suit.equal c1.suit c2.suit
-  && Card.Suit.equal c2.suit c3.suit
-  && Card.Suit.equal c3.suit c4.suit
-  && Card.Suit.equal c4.suit c5.suit
+  Card.Suit.equal (Card.suit c1) (Card.suit c2)
+  && Card.Suit.equal (Card.suit c2) (Card.suit c3)
+  && Card.Suit.equal (Card.suit c3) (Card.suit c4)
+  && Card.Suit.equal (Card.suit c4) (Card.suit c5)
 
 (** Check if 5 sorted ranks form a straight. Returns Some high_card if yes. *)
 let check_straight sorted_ranks =
@@ -78,11 +78,11 @@ let check_straight sorted_ranks =
   | _ -> None
 
 let evaluate (c1 : Card.t) (c2 : Card.t) (c3 : Card.t) (c4 : Card.t) (c5 : Card.t) =
-  let r1 = Card.Rank.to_int c1.rank in
-  let r2 = Card.Rank.to_int c2.rank in
-  let r3 = Card.Rank.to_int c3.rank in
-  let r4 = Card.Rank.to_int c4.rank in
-  let r5 = Card.Rank.to_int c5.rank in
+  let r1 = Card.Rank.to_int (Card.rank c1) in
+  let r2 = Card.Rank.to_int (Card.rank c2) in
+  let r3 = Card.Rank.to_int (Card.rank c3) in
+  let r4 = Card.Rank.to_int (Card.rank c4) in
+  let r5 = Card.Rank.to_int (Card.rank c5) in
   let ranks = [ r1; r2; r3; r4; r5 ] in
   let sorted = List.sort ranks ~compare:Int.compare in
   let flush = is_flush c1 c2 c3 c4 c5 in

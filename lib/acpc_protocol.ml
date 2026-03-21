@@ -50,7 +50,7 @@ let parse_card s =
   | true ->
     let rank = parse_rank (String.get s 0) in
     let suit = parse_suit (String.get s 1) in
-    { Card.rank; suit }
+    Card.create ~rank ~suit
   | false -> failwithf "parse_card: expected 2 chars, got %d in %S"
                (String.length s) s ()
 

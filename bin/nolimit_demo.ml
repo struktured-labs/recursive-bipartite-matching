@@ -15,7 +15,7 @@ let mk card_str =
     | 'h' -> Card.Suit.Hearts | 'd' -> Diamonds | 'c' -> Clubs | 's' -> Spades
     | c -> failwithf "bad suit: %c" c ()
   in
-  { Card.rank; suit }
+  Card.create ~rank ~suit
 
 let tree_stats label tree =
   let size = Tree.size tree in

@@ -5,35 +5,35 @@ let float_eq ?(eps = 1e-15) a b = Float.( < ) (Float.abs (a -. b)) eps
 let make_test_states () : Compact_cfr.cfr_state array =
   let p0 = Compact_cfr.create ~size:16 () in
   let p1 = Compact_cfr.create ~size:16 () in
-  (* P0 regret_sum *)
-  Hashtbl.set p0.regret_sum ~key:"B0|" ~data:[| 1.5; -2.3; 0.0 |];
-  Hashtbl.set p0.regret_sum ~key:"B1:2|kc" ~data:[| 100.0; 200.0 |];
-  Hashtbl.set p0.regret_sum ~key:"B3:4:5:6|kk/kc" ~data:[| 0.001; 99999.9; -1e10 |];
+  (* P0 regret_sum --- use raw int64 keys *)
+  Hashtbl.set p0.regret_sum ~key:100L ~data:[| 1.5; -2.3; 0.0 |];
+  Hashtbl.set p0.regret_sum ~key:201L ~data:[| 100.0; 200.0 |];
+  Hashtbl.set p0.regret_sum ~key:302L ~data:[| 0.001; 99999.9; -1e10 |];
   (* P0 strategy_sum *)
-  Hashtbl.set p0.strategy_sum ~key:"B0|" ~data:[| 10.0; 20.0; 30.0 |];
-  Hashtbl.set p0.strategy_sum ~key:"B1:2|kc" ~data:[| 50.0; 50.0 |];
+  Hashtbl.set p0.strategy_sum ~key:100L ~data:[| 10.0; 20.0; 30.0 |];
+  Hashtbl.set p0.strategy_sum ~key:201L ~data:[| 50.0; 50.0 |];
   (* P1 regret_sum *)
-  Hashtbl.set p1.regret_sum ~key:"B7|f" ~data:[| 42.0 |];
+  Hashtbl.set p1.regret_sum ~key:700L ~data:[| 42.0 |];
   (* P1 strategy_sum *)
-  Hashtbl.set p1.strategy_sum ~key:"B7|f" ~data:[| 42.0 |];
-  Hashtbl.set p1.strategy_sum ~key:"B8:9|kk/kb0.5c" ~data:[| 1.0; 2.0; 3.0; 4.0 |];
+  Hashtbl.set p1.strategy_sum ~key:700L ~data:[| 42.0 |];
+  Hashtbl.set p1.strategy_sum ~key:809L ~data:[| 1.0; 2.0; 3.0; 4.0 |];
   [| p0; p1 |]
 
 let assert_hashtbl_equal
-    (expected : (string, float array) Hashtbl.t)
-    (actual : (string, float array) Hashtbl.t)
+    (expected : (Int64.t, float array) Hashtbl.t)
+    (actual : (Int64.t, float array) Hashtbl.t)
     ~(label : string) =
   [%test_eq: int] (Hashtbl.length expected) (Hashtbl.length actual);
   Hashtbl.iteri expected ~f:(fun ~key ~data:exp_arr ->
     match Hashtbl.find actual key with
-    | None -> failwithf "%s: missing key %S" label key ()
+    | None -> failwithf "%s: missing key %Ld" label key ()
     | Some act_arr ->
       [%test_eq: int] (Array.length exp_arr) (Array.length act_arr);
       Array.iteri exp_arr ~f:(fun i e ->
         match float_eq e act_arr.(i) with
         | true -> ()
         | false ->
-          failwithf "%s: key %S index %d: expected %f got %f"
+          failwithf "%s: key %Ld index %d: expected %f got %f"
             label key i e act_arr.(i) ()))
 
 let assert_states_equal
@@ -64,7 +64,6 @@ let%test_unit "autodetect_chunked" =
   let states = make_test_states () in
   let filename = "test_autodetect_chunked.dat" in
   Compact_cfr.save_checkpoint_chunked ~filename states;
-  (* load_checkpoint should auto-detect chunked format *)
   let loaded = Compact_cfr.load_checkpoint ~filename in
   assert_states_equal states loaded;
   Core_unix.unlink filename
@@ -73,7 +72,6 @@ let%test_unit "autodetect_marshal" =
   let states = make_test_states () in
   let filename = "test_autodetect_marshal.dat" in
   Compact_cfr.save_checkpoint_marshal ~filename states;
-  (* load_checkpoint should auto-detect marshal format *)
   let loaded = Compact_cfr.load_checkpoint ~filename in
   assert_states_equal states loaded;
   Core_unix.unlink filename
@@ -101,13 +99,10 @@ let%test_unit "empty_state_roundtrip" =
   Core_unix.unlink filename
 
 let%test_unit "cross_format_roundtrip" =
-  (* Save with marshal, load with chunked should fail detection but
-     save with chunked should produce identical reload *)
   let states = make_test_states () in
   let filename = "test_cross_format.dat" in
   Compact_cfr.save_checkpoint_chunked ~filename states;
   let loaded = Compact_cfr.load_checkpoint_chunked ~filename in
-  (* Now save the loaded state with marshal and reload *)
   let filename2 = "test_cross_format2.dat" in
   Compact_cfr.save_checkpoint_marshal ~filename:filename2 loaded;
   let reloaded = Compact_cfr.load_checkpoint_marshal ~filename:filename2 in
@@ -116,14 +111,10 @@ let%test_unit "cross_format_roundtrip" =
   Core_unix.unlink filename2
 
 let%test_unit "large_checkpoint_roundtrip" =
-  (* Stress test: 100K entries with varying key/array sizes to exercise
-     read_exact across buffer boundaries. *)
   let p0 = Compact_cfr.create ~size:100_000 () in
   let p1 = Compact_cfr.create ~size:100_000 () in
   for i = 0 to 99_999 do
-    let key = Printf.sprintf "B%d:%d:%d:%d|%s"
-      (i mod 169) (i mod 50) (i mod 30) (i mod 20)
-      (String.make (1 + i mod 20) 'k') in
+    let key = Int64.of_int (i * 1_000_003 + 42) in
     let n_actions = 3 + (i mod 5) in
     let regrets = Array.init n_actions ~f:(fun j ->
       Float.of_int (i * 7 + j) *. 0.001 -. 50.0) in
@@ -139,10 +130,26 @@ let%test_unit "large_checkpoint_roundtrip" =
   Compact_cfr.save_checkpoint_chunked ~filename states;
   let loaded = Compact_cfr.load_checkpoint_chunked ~filename in
   assert_states_equal states loaded;
-  (* Also test save→load→save→load for double round-trip *)
   let filename2 = "test_large_roundtrip2.dat" in
   Compact_cfr.save_checkpoint_chunked ~filename:filename2 loaded;
   let reloaded = Compact_cfr.load_checkpoint_chunked ~filename:filename2 in
   assert_states_equal states reloaded;
   Core_unix.unlink filename;
   Core_unix.unlink filename2
+
+let%test_unit "make_info_key_deterministic" =
+  let buckets = [| 34; 29; 78; 3 |] in
+  let k1 = Compact_cfr.make_info_key ~buckets ~round_idx:3 ~history:"cc/kk/kh" in
+  let k2 = Compact_cfr.make_info_key ~buckets ~round_idx:3 ~history:"cc/kk/kh" in
+  [%test_eq: int64] k1 k2
+
+let%test_unit "make_info_key_different_inputs" =
+  let buckets1 = [| 34; 29; 78; 3 |] in
+  let buckets2 = [| 34; 29; 78; 4 |] in
+  let k1 = Compact_cfr.make_info_key ~buckets:buckets1 ~round_idx:3 ~history:"cc/kk/kh" in
+  let k2 = Compact_cfr.make_info_key ~buckets:buckets2 ~round_idx:3 ~history:"cc/kk/kh" in
+  let k3 = Compact_cfr.make_info_key ~buckets:buckets1 ~round_idx:2 ~history:"cc/kk/kh" in
+  let k4 = Compact_cfr.make_info_key ~buckets:buckets1 ~round_idx:3 ~history:"cc/kk/kc" in
+  [%test_eq: bool] (Int64.equal k1 k2) false;
+  [%test_eq: bool] (Int64.equal k1 k3) false;
+  [%test_eq: bool] (Int64.equal k1 k4) false

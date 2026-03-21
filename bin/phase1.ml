@@ -197,7 +197,7 @@ let () =
   printf "Target samples: %d community card pairs\n\n%!" n_samples;
 
   (* Fix P1's hole card to Ace of spades *)
-  let p1_card = { Card.rank = Ace; suit = Spades } in
+  let p1_card = Card.create ~rank:Ace ~suit:Spades in
   printf "P1 hole card: %s (strong starting hand)\n\n%!"
     (Card.to_string p1_card);
 

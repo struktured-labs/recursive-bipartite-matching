@@ -52,16 +52,16 @@ let fast_equity_for_canonical ~n_samples (hand : Equity.canonical_hand) : float 
   let hole_cards =
     match Card.Rank.equal hand.rank1 hand.rank2 with
     | true ->
-      ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-       { Card.rank = hand.rank2; suit = Card.Suit.Spades })
+      (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+       Card.create ~rank:hand.rank2 ~suit:Card.Suit.Spades)
     | false ->
       match hand.suited with
       | true ->
-        ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-         { Card.rank = hand.rank2; suit = Card.Suit.Hearts })
+        (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+         Card.create ~rank:hand.rank2 ~suit:Card.Suit.Hearts)
       | false ->
-        ({ Card.rank = hand.rank1; suit = Card.Suit.Hearts },
-         { Card.rank = hand.rank2; suit = Card.Suit.Diamonds })
+        (Card.create ~rank:hand.rank1 ~suit:Card.Suit.Hearts,
+         Card.create ~rank:hand.rank2 ~suit:Card.Suit.Diamonds)
   in
   let (h1, h2) = hole_cards in
   let dealt = [ h1; h2 ] in
