@@ -23,6 +23,9 @@ val num_leaves : _ t -> int
 (** Map over labels *)
 val map_label : 'a t -> f:('a -> 'b) -> 'b t
 
+(** Transform all leaf values *)
+val map_values : 'a t -> f:(float -> float) -> 'a t
+
 (** Fold over all leaf values *)
 val fold_leaves : _ t -> init:'b -> f:('b -> float -> 'b) -> 'b
 

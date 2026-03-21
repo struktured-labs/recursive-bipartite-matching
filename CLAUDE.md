@@ -49,6 +49,8 @@ lib/
 ├── limit_holdem.ml/mli      # Full 2-player Limit Hold'em game trees
 ├── mini_holdem.ml/mli       # Mini Hold'em variants
 ├── abstraction.ml/mli       # Game abstraction (RBM + EMD clustering)
+├── action_subtree.ml/mli   # Bet-response subtrees for action abstraction
+├── action_abstraction.ml/mli # Action merging via RBM distance
 ├── cfr.ml/mli               # Counterfactual regret minimization
 ├── cfr_abstract.ml/mli      # CFR on abstracted games
 ├── emd_baseline.ml/mli      # EMD baseline (Rhode Island)

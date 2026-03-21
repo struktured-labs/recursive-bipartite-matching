@@ -29,6 +29,12 @@ let rec map_label t ~f =
   | Node { children; label } ->
     Node { children = List.map children ~f:(map_label ~f); label = f label }
 
+let rec map_values t ~f =
+  match t with
+  | Leaf { value; label } -> Leaf { value = f value; label }
+  | Node { children; label } ->
+    Node { children = List.map children ~f:(map_values ~f); label }
+
 let rec fold_leaves t ~init ~f =
   match t with
   | Leaf { value; _ } -> f init value
