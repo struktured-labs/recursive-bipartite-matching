@@ -64,11 +64,14 @@ Launched 10M from scratch instead — loses 5M warm start but avoids the bug.
 **Worse than 5M RBM (-1.11) but CIs overlap.** The 10M was fresh (no resume from 5M)
 so the first 5M "re-explored" info sets the 5M run had already found. Not a fair comparison.
 
-### 20M Training Launched (RESUMING from 10M checkpoint)
-- Rebuilt binary with checkpoint resume fix (read_exact looped reads)
-- Resuming from checkpoint_10M_10000000.dat (39GB)
-- If 20M improves over 10M → continue scaling. If not → stop.
-- Instance cost so far: ~$32
+### 20M Resume FAILED — read_int32_le EOF
+Resume from 10M checkpoint failed again. Fix only covered read_hashtbl_chunked,
+not read_int32_le/read_int64_le. Checkpoint may also be truncated (saved at 98GB/123GB RAM).
+
+### 20M Fresh Launch (epsilon=1.0, coarser clusters)
+- **Key change**: epsilon 0.5 → 1.0 (fewer clusters → more visits per cluster → better convergence)
+- Tests the hypothesis that ε=0.5 creates too many clusters for the training budget
+- Instance cost so far: ~$34
 
 ---
 
