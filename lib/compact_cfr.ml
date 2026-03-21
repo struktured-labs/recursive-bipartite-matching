@@ -16,8 +16,8 @@ type info_key = Int64.t
 type strategy = (Int64.t, float array) Hashtbl.t
 
 type cfr_entry = {
-  mutable regrets : float array;
-  mutable strategy : float array;
+  data : float array;  (* first n_actions = regrets, second n_actions = strategy *)
+  n_actions : int;
 }
 
 type cfr_state = {
@@ -26,6 +26,22 @@ type cfr_state = {
 
 let create ?(size = 1_000_000) () =
   { entries = Hashtbl.create ~size (module Int64) }
+
+(* ------------------------------------------------------------------ *)
+(* cfr_entry accessors                                                 *)
+(* ------------------------------------------------------------------ *)
+
+let entry_regret (entry : cfr_entry) (i : int) : float = entry.data.(i)
+let entry_strategy (entry : cfr_entry) (i : int) : float = entry.data.(entry.n_actions + i)
+let set_entry_regret (entry : cfr_entry) (i : int) (v : float) : unit = entry.data.(i) <- v
+let set_entry_strategy (entry : cfr_entry) (i : int) (v : float) : unit =
+  entry.data.(entry.n_actions + i) <- v
+
+let entry_regrets_sub (entry : cfr_entry) : float array =
+  Array.sub entry.data ~pos:0 ~len:entry.n_actions
+
+let entry_strategy_sub (entry : cfr_entry) : float array =
+  Array.sub entry.data ~pos:entry.n_actions ~len:entry.n_actions
 
 (* ------------------------------------------------------------------ *)
 (* Regret matching                                                     *)
@@ -44,31 +60,34 @@ let regret_matching (regrets : float array) : float array =
 let find_or_add_entry (state : cfr_state) (key : info_key) ~(num_actions : int) : cfr_entry =
   Hashtbl.find_or_add state.entries key
     ~default:(fun () ->
-      { regrets = Array.create ~len:num_actions 0.0
-      ; strategy = Array.create ~len:num_actions 0.0
+      { data = Array.create ~len:(2 * num_actions) 0.0
+      ; n_actions = num_actions
       })
 
 let get_strategy (state : cfr_state) (key : info_key) ~(num_actions : int) : float array =
   let entry = find_or_add_entry state key ~num_actions in
-  regret_matching entry.regrets
+  regret_matching (entry_regrets_sub entry)
 
 let accumulate_strategy (state : cfr_state) (key : info_key)
     (strat : float array) (weight : float) =
   let num_actions = Array.length strat in
   let entry = find_or_add_entry state key ~num_actions in
   Array.iteri strat ~f:(fun i p ->
-    entry.strategy.(i) <- entry.strategy.(i) +. weight *. p)
+    set_entry_strategy entry i (entry_strategy entry i +. weight *. p))
 
 let average_strategy (state : cfr_state) : strategy =
   let result = Hashtbl.create ~size:(Hashtbl.length state.entries) (module Int64) in
   Hashtbl.iteri state.entries ~f:(fun ~key ~data:entry ->
-    let sums = entry.strategy in
-    let total = Array.fold sums ~init:0.0 ~f:( +. ) in
+    let n = entry.n_actions in
+    let total = ref 0.0 in
+    for i = 0 to n - 1 do
+      total := !total +. entry_strategy entry i
+    done;
     let avg =
-      match Float.( > ) total 0.0 with
-      | true  -> Array.map sums ~f:(fun s -> s /. total)
+      match Float.( > ) !total 0.0 with
+      | true  ->
+        Array.init n ~f:(fun i -> entry_strategy entry i /. !total)
       | false ->
-        let n = Array.length sums in
         Array.create ~len:n (1.0 /. Float.of_int n)
     in
     Hashtbl.set result ~key ~data:avg);
@@ -692,11 +711,12 @@ and handle_decision ~(player : int) ~(traverser : int) ~(cfr_st : cfr_state)
     in
     let entry = find_or_add_entry cfr_st key ~num_actions in
     Array.iteri action_values ~f:(fun i v ->
-      entry.regrets.(i) <- entry.regrets.(i) +. (v -. node_value));
-    Array.iteri entry.regrets ~f:(fun i r ->
-      match Float.( < ) r 0.0 with
-      | true  -> entry.regrets.(i) <- 0.0
-      | false -> ignore r);
+      set_entry_regret entry i (entry_regret entry i +. (v -. node_value)));
+    for i = 0 to num_actions - 1 do
+      match Float.( < ) (entry_regret entry i) 0.0 with
+      | true  -> set_entry_regret entry i 0.0
+      | false -> ()
+    done;
     node_value
   | false ->
     accumulate_strategy cfr_st key strat 1.0;
@@ -773,19 +793,25 @@ let load_checkpoint_marshal ~(filename : string) : cfr_state array =
   let merge_to_entries regret_list strat_list =
     let tbl = Hashtbl.create (module Int64) ~size:(List.length regret_list) in
     List.iter regret_list ~f:(fun (k, regrets) ->
+      let n = Array.length regrets in
       let strategy =
         match List.Assoc.find strat_list ~equal:Int64.equal k with
         | Some s -> s
-        | None -> Array.create ~len:(Array.length regrets) 0.0
+        | None -> Array.create ~len:n 0.0
       in
-      Hashtbl.set tbl ~key:k ~data:{ regrets; strategy });
+      let combined = Array.create ~len:(2 * n) 0.0 in
+      Array.blit ~src:regrets ~dst:combined ~src_pos:0 ~dst_pos:0 ~len:n;
+      Array.blit ~src:strategy ~dst:combined ~src_pos:0 ~dst_pos:n ~len:n;
+      Hashtbl.set tbl ~key:k ~data:{ data = combined; n_actions = n });
     (* Add strategy-only entries not in regret_list *)
     List.iter strat_list ~f:(fun (k, strategy) ->
       match Hashtbl.mem tbl k with
       | true -> ()
       | false ->
-        let regrets = Array.create ~len:(Array.length strategy) 0.0 in
-        Hashtbl.set tbl ~key:k ~data:{ regrets; strategy });
+        let n = Array.length strategy in
+        let combined = Array.create ~len:(2 * n) 0.0 in
+        Array.blit ~src:strategy ~dst:combined ~src_pos:0 ~dst_pos:n ~len:n;
+        Hashtbl.set tbl ~key:k ~data:{ data = combined; n_actions = n });
     tbl
   in
   [| { entries = merge_to_entries p0_regret p0_strat }
@@ -795,7 +821,7 @@ let load_checkpoint_marshal ~(filename : string) : cfr_state array =
 let save_checkpoint_marshal ~(filename : string) (cfr_states : cfr_state array) : unit =
   let entries_to_alists entries =
     Hashtbl.fold entries ~init:([], []) ~f:(fun ~key ~data (racc, sacc) ->
-      ((key, data.regrets) :: racc, (key, data.strategy) :: sacc))
+      ((key, entry_regrets_sub data) :: racc, (key, entry_strategy_sub data) :: sacc))
   in
   let (p0_regret, p0_strat) = entries_to_alists cfr_states.(0).entries in
   let (p1_regret, p1_strat) = entries_to_alists cfr_states.(1).entries in
@@ -947,10 +973,10 @@ let save_checkpoint_chunked ~(filename : string) (cfr_states : cfr_state array) 
   Out_channel.output_string oc chunked_magic;
   write_int32_le oc 2;
   write_int32_le oc 4;
-  write_entries_as_table oc cfr_states.(0).entries ~project:(fun e -> e.regrets);
-  write_entries_as_table oc cfr_states.(0).entries ~project:(fun e -> e.strategy);
-  write_entries_as_table oc cfr_states.(1).entries ~project:(fun e -> e.regrets);
-  write_entries_as_table oc cfr_states.(1).entries ~project:(fun e -> e.strategy);
+  write_entries_as_table oc cfr_states.(0).entries ~project:entry_regrets_sub;
+  write_entries_as_table oc cfr_states.(0).entries ~project:entry_strategy_sub;
+  write_entries_as_table oc cfr_states.(1).entries ~project:entry_regrets_sub;
+  write_entries_as_table oc cfr_states.(1).entries ~project:entry_strategy_sub;
   Out_channel.flush oc;
   Out_channel.close oc
 
@@ -987,18 +1013,24 @@ let load_checkpoint_chunked ~(filename : string) : cfr_state array =
   let merge_tables regret_list strat_list =
     let tbl = Hashtbl.create (module Int64) ~size:(List.length regret_list) in
     List.iter regret_list ~f:(fun (k, regrets) ->
+      let n = Array.length regrets in
       let strategy =
         match List.Assoc.find strat_list ~equal:Int64.equal k with
         | Some s -> s
-        | None -> Array.create ~len:(Array.length regrets) 0.0
+        | None -> Array.create ~len:n 0.0
       in
-      Hashtbl.set tbl ~key:k ~data:{ regrets; strategy });
+      let combined = Array.create ~len:(2 * n) 0.0 in
+      Array.blit ~src:regrets ~dst:combined ~src_pos:0 ~dst_pos:0 ~len:n;
+      Array.blit ~src:strategy ~dst:combined ~src_pos:0 ~dst_pos:n ~len:n;
+      Hashtbl.set tbl ~key:k ~data:{ data = combined; n_actions = n });
     List.iter strat_list ~f:(fun (k, strategy) ->
       match Hashtbl.mem tbl k with
       | true -> ()
       | false ->
-        let regrets = Array.create ~len:(Array.length strategy) 0.0 in
-        Hashtbl.set tbl ~key:k ~data:{ regrets; strategy });
+        let n = Array.length strategy in
+        let combined = Array.create ~len:(2 * n) 0.0 in
+        Array.blit ~src:strategy ~dst:combined ~src_pos:0 ~dst_pos:n ~len:n;
+        Hashtbl.set tbl ~key:k ~data:{ data = combined; n_actions = n });
     tbl
   in
   [| { entries = merge_tables p0_regret p0_strat }
@@ -1024,6 +1056,41 @@ let load_checkpoint ~(filename : string) : cfr_state array =
 (** [save_checkpoint] uses the chunked format by default. *)
 let save_checkpoint ~(filename : string) (cfr_states : cfr_state array) : unit =
   save_checkpoint_chunked ~filename cfr_states
+
+(* ------------------------------------------------------------------ *)
+(* Inline regret pruning (avoids dependency cycle with Cfr_pruning)    *)
+(* ------------------------------------------------------------------ *)
+
+(** Remove entries where all regrets are strictly negative. *)
+let prune_dominated_entries (state : cfr_state) : int =
+  let keys_to_remove =
+    Hashtbl.fold state.entries ~init:[] ~f:(fun ~key ~data acc ->
+      let dominated = ref true in
+      (match data.n_actions = 0 with
+       | true -> dominated := false
+       | false ->
+         for i = 0 to data.n_actions - 1 do
+           match Float.( >= ) (entry_regret data i) 0.0 with
+           | true -> dominated := false
+           | false -> ()
+         done);
+      match !dominated with
+      | true -> key :: acc
+      | false -> acc)
+  in
+  List.iter keys_to_remove ~f:(fun key ->
+    Hashtbl.remove state.entries key);
+  List.length keys_to_remove
+
+let prune_periodically_inline ~(every : int) ~(iter : int) (state : cfr_state) : unit =
+  match iter % every = 0 with
+  | true ->
+    let pruned = prune_dominated_entries state in
+    (match pruned > 0 with
+     | true ->
+       printf "CFR pruning (iter %d): removed %d dominated info sets\n%!" iter pruned
+     | false -> ())
+  | false -> ()
 
 let train_mccfr ~(config : Nolimit_holdem.config)
     ~(abstraction : Abstraction.abstraction_partial)
@@ -1119,7 +1186,10 @@ let train_mccfr ~(config : Nolimit_holdem.config)
        printf "  [Checkpoint] Saving %s ...\n%!" filename;
        save_checkpoint ~filename cfr_states;
        printf "  [Checkpoint] Done.\n%!"
-     | false -> ())
+     | false -> ());
+    (* Prune dominated info sets every 500K iterations *)
+    prune_periodically_inline ~every:500_000 ~iter cfr_states.(0);
+    prune_periodically_inline ~every:500_000 ~iter cfr_states.(1)
   done;
   let p0_avg = average_strategy cfr_states.(0) in
   let p1_avg = average_strategy cfr_states.(1) in
@@ -1134,8 +1204,8 @@ let copy_cfr_state (src : cfr_state) : cfr_state =
   let tbl2 = Hashtbl.create (module Int64) ~size:(Hashtbl.length src.entries) in
   Hashtbl.iteri src.entries ~f:(fun ~key ~data ->
     Hashtbl.set tbl2 ~key
-      ~data:{ regrets = Array.copy data.regrets
-            ; strategy = Array.copy data.strategy
+      ~data:{ data = Array.copy data.data
+            ; n_actions = data.n_actions
             });
   { entries = tbl2 }
 
@@ -1145,14 +1215,13 @@ let merge_cfr_state_into ~(dst : cfr_state) ~(src : cfr_state) : unit =
   Hashtbl.iteri src.entries ~f:(fun ~key ~data:src_entry ->
     match Hashtbl.find dst.entries key with
     | Some dst_entry ->
-      Array.iteri src_entry.regrets ~f:(fun i v ->
-        dst_entry.regrets.(i) <- dst_entry.regrets.(i) +. v);
-      Array.iteri src_entry.strategy ~f:(fun i v ->
-        dst_entry.strategy.(i) <- dst_entry.strategy.(i) +. v)
+      (* Sum the entire combined data array (regrets + strategy) *)
+      Array.iteri src_entry.data ~f:(fun i v ->
+        dst_entry.data.(i) <- dst_entry.data.(i) +. v)
     | None ->
       Hashtbl.set dst.entries ~key
-        ~data:{ regrets = Array.copy src_entry.regrets
-              ; strategy = Array.copy src_entry.strategy
+        ~data:{ data = Array.copy src_entry.data
+              ; n_actions = src_entry.n_actions
               })
 
 let train_mccfr_parallel ~(config : Nolimit_holdem.config)
@@ -1267,7 +1336,10 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
              let n1 = Hashtbl.length my_states.(1).entries in
              printf "  [Parallel-MCCFR] ~%d/%d iters (worker %d: %d/%d)  infosets=(%d,%d)\n%!"
                total iterations worker_id iter my_iters n0 n1
-           | false -> ())
+           | false -> ());
+          (* Prune dominated info sets every 500K iterations *)
+          prune_periodically_inline ~every:500_000 ~iter my_states.(0);
+          prune_periodically_inline ~every:500_000 ~iter my_states.(1)
         done;
         worker_utils.(worker_id) <- !local_util_sum));
   Domainslib.Task.teardown_pool pool;

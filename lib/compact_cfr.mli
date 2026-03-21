@@ -16,11 +16,14 @@ type info_key = Int64.t
     Uses monomorphic Int64 hashtable (NOT Poly). *)
 type strategy = (Int64.t, float array) Hashtbl.t
 
-(** Paired regret + strategy arrays for a single information set.
-    Stored together in one hash table entry to halve per-entry overhead. *)
+(** Paired regret + strategy data for a single information set.
+    Both regret and strategy values are packed into a single [data] array
+    of length [2 * n_actions]: the first [n_actions] floats are regrets,
+    the second [n_actions] floats are strategy sums.  This halves the
+    number of OCaml heap allocations per entry (one array instead of two). *)
 type cfr_entry = {
-  mutable regrets : float array;
-  mutable strategy : float array;
+  data : float array;
+  n_actions : int;
 }
 
 (** Mutable CFR state for one player.
@@ -32,6 +35,24 @@ type cfr_state = {
 (** [create ~size ()] returns a fresh CFR state with tables pre-sized
     to [size] entries.  Default [size] is 1_000_000. *)
 val create : ?size:int -> unit -> cfr_state
+
+(** [entry_regret entry i] returns [entry.data.(i)] (the i-th regret). *)
+val entry_regret : cfr_entry -> int -> float
+
+(** [entry_strategy entry i] returns [entry.data.(n_actions + i)] (the i-th strategy sum). *)
+val entry_strategy : cfr_entry -> int -> float
+
+(** [set_entry_regret entry i v] sets the i-th regret to [v]. *)
+val set_entry_regret : cfr_entry -> int -> float -> unit
+
+(** [set_entry_strategy entry i v] sets the i-th strategy sum to [v]. *)
+val set_entry_strategy : cfr_entry -> int -> float -> unit
+
+(** [entry_regrets_sub entry] returns a fresh copy of the regret portion. *)
+val entry_regrets_sub : cfr_entry -> float array
+
+(** [entry_strategy_sub entry] returns a fresh copy of the strategy portion. *)
+val entry_strategy_sub : cfr_entry -> float array
 
 (** [sample_deal ()] draws 2 + 2 + 5 = 9 distinct cards uniformly at random
     from a 52-card deck.  Returns (p1_hole, p2_hole, board). *)
