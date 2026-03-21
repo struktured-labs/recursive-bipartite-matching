@@ -854,14 +854,17 @@ let save_checkpoint_chunked ~(filename : string) (cfr_states : cfr_state array) 
   write_hashtbl_chunked oc cfr_states.(0).strategy_sum;
   write_hashtbl_chunked oc cfr_states.(1).regret_sum;
   write_hashtbl_chunked oc cfr_states.(1).strategy_sum;
+  Out_channel.flush oc;
   Out_channel.close oc
 
 let load_checkpoint_chunked ~(filename : string) : cfr_state array =
   let ic = In_channel.create filename in
   (* Read and verify magic *)
   let magic_buf = Bytes.create 8 in
-  let n = In_channel.input ic ~buf:magic_buf ~pos:0 ~len:8 in
-  (match n = 8 && String.equal (Bytes.to_string magic_buf) chunked_magic with
+  (match read_exact ic ~buf:magic_buf ~pos:0 ~len:8 with
+   | true -> ()
+   | false -> failwithf "load_checkpoint_chunked: unexpected EOF reading magic in %s" filename ());
+  (match String.equal (Bytes.to_string magic_buf) chunked_magic with
    | true -> ()
    | false -> failwithf "load_checkpoint_chunked: bad magic in %s" filename ());
   (* Version *)

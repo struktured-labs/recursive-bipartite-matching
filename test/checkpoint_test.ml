@@ -114,3 +114,35 @@ let%test_unit "cross_format_roundtrip" =
   assert_states_equal states reloaded;
   Core_unix.unlink filename;
   Core_unix.unlink filename2
+
+let%test_unit "large_checkpoint_roundtrip" =
+  (* Stress test: 100K entries with varying key/array sizes to exercise
+     read_exact across buffer boundaries. *)
+  let p0 = Compact_cfr.create ~size:100_000 () in
+  let p1 = Compact_cfr.create ~size:100_000 () in
+  for i = 0 to 99_999 do
+    let key = Printf.sprintf "B%d:%d:%d:%d|%s"
+      (i mod 169) (i mod 50) (i mod 30) (i mod 20)
+      (String.make (1 + i mod 20) 'k') in
+    let n_actions = 3 + (i mod 5) in
+    let regrets = Array.init n_actions ~f:(fun j ->
+      Float.of_int (i * 7 + j) *. 0.001 -. 50.0) in
+    let strats = Array.init n_actions ~f:(fun j ->
+      Float.of_int (i * 3 + j + 1) *. 0.01) in
+    Hashtbl.set p0.regret_sum ~key ~data:regrets;
+    Hashtbl.set p0.strategy_sum ~key ~data:strats;
+    Hashtbl.set p1.regret_sum ~key ~data:(Array.map regrets ~f:Float.neg);
+    Hashtbl.set p1.strategy_sum ~key ~data:strats
+  done;
+  let states = [| p0; p1 |] in
+  let filename = "test_large_roundtrip.dat" in
+  Compact_cfr.save_checkpoint_chunked ~filename states;
+  let loaded = Compact_cfr.load_checkpoint_chunked ~filename in
+  assert_states_equal states loaded;
+  (* Also test save→load→save→load for double round-trip *)
+  let filename2 = "test_large_roundtrip2.dat" in
+  Compact_cfr.save_checkpoint_chunked ~filename:filename2 loaded;
+  let reloaded = Compact_cfr.load_checkpoint_chunked ~filename:filename2 in
+  assert_states_equal states reloaded;
+  Core_unix.unlink filename;
+  Core_unix.unlink filename2
