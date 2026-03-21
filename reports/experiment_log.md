@@ -88,6 +88,10 @@ not read_int32_le/read_int64_le. Checkpoint may also be truncated (saved at 98GB
 **Config**: 169 buckets, RBM ε=0.5, 50M total, checkpoint every 5M, 25K Slumbot hands per checkpoint
 **Expected**: should fit 15-20M iterations in 128GB (vs 10M before optimizations)
 
+Parallel (15 workers) still OOMs — 54GB at 34%, extrapolated 158GB.
+Killed and relaunched single-threaded. Int64 keys reduce per-entry overhead
+by ~30 bytes → single-threaded should reach 15-20M before OOM.
+
 ---
 
 ## 2026-03-20 05:03 UTC — RBM Cloud Experiment Launched
