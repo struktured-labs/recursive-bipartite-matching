@@ -71,7 +71,9 @@ not read_int32_le/read_int64_le. Checkpoint may also be truncated (saved at 98GB
 ### 20M Fresh Launch (epsilon=1.0, coarser clusters)
 - **Key change**: epsilon 0.5 → 1.0 (fewer clusters → more visits per cluster → better convergence)
 - Tests the hypothesis that ε=0.5 creates too many clusters for the training budget
-- Instance cost so far: ~$34
+- **20% progress** (4.09M/20M), 50GB RAM, 213M info sets
+- Instance running ~40 hours total, cost ~$40
+- ~6 hours to checkpoint + 25K Slumbot eval
 
 ---
 
