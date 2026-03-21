@@ -72,10 +72,21 @@ not read_int32_le/read_int64_le. Checkpoint may also be truncated (saved at 98GB
 - **Key change**: epsilon 0.5 → 1.0 (fewer clusters → more visits per cluster → better convergence)
 - Tests the hypothesis that ε=0.5 creates too many clusters for the training budget
 - Killed at 25% (5M/20M, 64GB RAM) — extrapolated 256GB at 20M, would OOM
-- Relaunched with --checkpoint-every 10000000 to get 10M checkpoint before OOM
-- **25% (5.13M/20M)**, 65GB RAM, 253M info sets, ~5hr to 10M checkpoint
-- RAM growth sub-linear: est. ~95GB at 10M (fits 123GB)
-- Instance cost so far: ~$50
+- 10M checkpoint saved (23GB) but TRUNCATED — OOM during write
+- Eval failed: read_int32_le unexpected EOF
+- Instance terminated. Total cost: ~$55
+
+## 2026-03-21 12:47 UTC — Optimized Run Launched
+
+**Instance**: i-069f1bd5fe1207152 (r6i.4xlarge, 128GB)
+**IP**: 18.208.192.234
+**Optimizations** (40-60% less memory per entry):
+- Int64 FNV-1a keys (zero-alloc, 8 bytes vs ~40 bytes string)
+- Bitpacked Card.t (unboxed int vs boxed record)
+- Checkpoint format v2 (RBMCFR02)
+
+**Config**: 169 buckets, RBM ε=0.5, 50M total, checkpoint every 5M, 25K Slumbot hands per checkpoint
+**Expected**: should fit 15-20M iterations in 128GB (vs 10M before optimizations)
 
 ---
 
