@@ -73,8 +73,9 @@ not read_int32_le/read_int64_le. Checkpoint may also be truncated (saved at 98GB
 - Tests the hypothesis that ε=0.5 creates too many clusters for the training budget
 - Killed at 25% (5M/20M, 64GB RAM) — extrapolated 256GB at 20M, would OOM
 - Relaunched with --checkpoint-every 10000000 to get 10M checkpoint before OOM
-- Will give ε=1.0 vs ε=0.5 comparison at 10M iters
-- Instance cost so far: ~$44
+- **25% (5.13M/20M)**, 65GB RAM, 253M info sets, ~5hr to 10M checkpoint
+- RAM growth sub-linear: est. ~95GB at 10M (fits 123GB)
+- Instance cost so far: ~$50
 
 ---
 
