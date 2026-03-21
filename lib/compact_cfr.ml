@@ -760,28 +760,41 @@ let write_int64_le (oc : Out_channel.t) (v : int) : unit =
   done;
   Out_channel.output oc ~buf ~pos:0 ~len:8
 
+(** Read exactly [len] bytes from [ic] into [buf] starting at [pos].
+    Loops to handle partial reads from In_channel.input. *)
+let read_exact (ic : In_channel.t) ~(buf : Bytes.t) ~(pos : int) ~(len : int) : bool =
+  let remaining = ref len in
+  let offset = ref pos in
+  while !remaining > 0 do
+    let n = In_channel.input ic ~buf ~pos:!offset ~len:!remaining in
+    match n = 0 with
+    | true -> remaining := -1  (* EOF *)
+    | false ->
+      offset := !offset + n;
+      remaining := !remaining - n
+  done;
+  !remaining = 0
+
 let read_int32_le (ic : In_channel.t) : int =
   let buf = Bytes.create 4 in
-  let n = In_channel.input ic ~buf ~pos:0 ~len:4 in
-  match n = 4 with
-  | true ->
-    Char.to_int (Bytes.get buf 0)
-    lor (Char.to_int (Bytes.get buf 1) lsl 8)
-    lor (Char.to_int (Bytes.get buf 2) lsl 16)
-    lor (Char.to_int (Bytes.get buf 3) lsl 24)
-  | false -> failwith "read_int32_le: unexpected EOF"
+  (match read_exact ic ~buf ~pos:0 ~len:4 with
+   | true ->
+     Char.to_int (Bytes.get buf 0)
+     lor (Char.to_int (Bytes.get buf 1) lsl 8)
+     lor (Char.to_int (Bytes.get buf 2) lsl 16)
+     lor (Char.to_int (Bytes.get buf 3) lsl 24)
+   | false -> failwith "read_int32_le: unexpected EOF")
 
 let read_int64_le (ic : In_channel.t) : int =
   let buf = Bytes.create 8 in
-  let n = In_channel.input ic ~buf ~pos:0 ~len:8 in
-  match n = 8 with
-  | true ->
-    let v = ref 0 in
-    for i = 0 to 7 do
-      v := !v lor (Char.to_int (Bytes.get buf i) lsl (i * 8))
-    done;
-    !v
-  | false -> failwith "read_int64_le: unexpected EOF"
+  (match read_exact ic ~buf ~pos:0 ~len:8 with
+   | true ->
+     let v = ref 0 in
+     for i = 0 to 7 do
+       v := !v lor (Char.to_int (Bytes.get buf i) lsl (i * 8))
+     done;
+     !v
+   | false -> failwith "read_int64_le: unexpected EOF")
 
 let write_hashtbl_chunked (oc : Out_channel.t) (tbl : (string, float array) Hashtbl.t) : unit =
   let n_entries = Hashtbl.length tbl in
@@ -801,21 +814,6 @@ let write_hashtbl_chunked (oc : Out_channel.t) (tbl : (string, float array) Hash
           (Char.of_int_exn (Int64.to_int_exn (Int64.( land ) (Int64.shift_right_logical bits (b * 8)) 0xFFL)))
       done);
     Out_channel.output oc ~buf:float_buf ~pos:0 ~len:(arr_len * 8))
-
-(** Read exactly [len] bytes from [ic] into [buf] starting at [pos].
-    Loops to handle partial reads from In_channel.input. *)
-let read_exact (ic : In_channel.t) ~(buf : Bytes.t) ~(pos : int) ~(len : int) : bool =
-  let remaining = ref len in
-  let offset = ref pos in
-  while !remaining > 0 do
-    let n = In_channel.input ic ~buf ~pos:!offset ~len:!remaining in
-    match n = 0 with
-    | true -> remaining := -1  (* EOF *)
-    | false ->
-      offset := !offset + n;
-      remaining := !remaining - n
-  done;
-  !remaining = 0
 
 let read_hashtbl_chunked (ic : In_channel.t) : (string, float array) Hashtbl.t =
   let n_entries = read_int64_le ic in
