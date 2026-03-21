@@ -370,7 +370,9 @@ type nl_state = {
 (* Action generation for inline traversal                              *)
 (* ------------------------------------------------------------------ *)
 
-let available_actions_inline (config : Nolimit_holdem.config) (state : nl_state)
+let available_actions_inline
+    ?(action_table : Action_abstraction.t option)
+    (config : Nolimit_holdem.config) (state : nl_state)
   : (Nolimit_holdem.Action.t * string) list =
   let seat = state.to_act in
   let stack = state.p_stack.(seat) in
@@ -399,7 +401,17 @@ let available_actions_inline (config : Nolimit_holdem.config) (state : nl_state)
   (match can_raise with
    | true ->
      let pot_after_call = pot + to_call in
-     List.iter config.bet_fractions ~f:(fun frac ->
+     (* Use action table for context-dependent bet sizes, or config default *)
+     let bet_fracs =
+       match action_table with
+       | Some tbl ->
+         let effective_stack = Int.min state.p_stack.(0) state.p_stack.(1) in
+         Action_abstraction.lookup tbl ~big_blind:config.big_blind
+           ~street:state.round_idx ~pot ~effective_stack
+           ~raise_count:state.num_raises
+       | None -> config.bet_fractions
+     in
+     List.iter bet_fracs ~f:(fun frac ->
        let raise_amount =
          Int.max 1 (Float.to_int (Float.of_int pot_after_call *. frac))
        in
@@ -534,6 +546,9 @@ let showdown_payoff ~(p1_cards : Card.t * Card.t) ~(p2_cards : Card.t * Card.t)
 (* Inline betting tree traversal                                       *)
 (* ------------------------------------------------------------------ *)
 
+(* Module-level action table — set before training, used by available_actions_inline *)
+let global_action_table : Action_abstraction.t option ref = ref None
+
 let rec mccfr_traverse
     ~(config : Nolimit_holdem.config)
     ~(p1_cards : Card.t * Card.t)
@@ -553,7 +568,7 @@ let rec mccfr_traverse
     | _ -> p2_buckets
   in
   let key = make_info_key ~buckets ~round_idx:state.round_idx ~history in
-  let actions = available_actions_inline config state in
+  let actions = available_actions_inline ?action_table:!global_action_table config state in
   let num_actions = List.length actions in
 
   match num_actions with
@@ -915,8 +930,16 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     ?(checkpoint_prefix = "checkpoint")
     ?(resume_from : string option)
     ?(bucket_method : bucket_method = Equity_based)
+    ?(action_table : Action_abstraction.t option)
     ()
   : strategy * strategy =
+  global_action_table := action_table;
+  (match action_table with
+   | Some tbl ->
+     printf "  [Action table] %d contexts, %.1f avg bet sizes\n%!"
+       (Action_abstraction.num_contexts tbl)
+       (Action_abstraction.avg_actions_per_context tbl)
+   | None -> ());
   let cfr_states =
     match resume_from with
     | Some filename ->
@@ -1039,8 +1062,10 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
     ?(resume_from : string option)
     ?(num_domains = Parallel.default_num_domains ())
     ?(bucket_method : bucket_method = Equity_based)
+    ?(action_table : Action_abstraction.t option)
     ()
   : strategy * strategy =
+  global_action_table := action_table;
   let num_workers = Int.max 1 num_domains in
   printf "  [Parallel-MCCFR] Starting %d domains, %d iterations total\n%!"
     num_workers iterations;

@@ -44,12 +44,14 @@ let build_bet_response_tree
   let bet_amount = Int.max 1 (Float.to_int (Float.of_int pot *. bet_frac)) in
   let bet_capped = Int.min bet_amount effective_stack in
   let pot_after_call = pot + bet_capped * 2 in  (* both players matched *)
+  let pot_f = Float.of_int (Int.max 1 pot) in  (* for normalization *)
 
-  (* Fold leaf: we win the pot *)
+  (* All values normalized by pot so that epsilon is in "pots".
+     fold = 1.0 (win 1 pot), call = pot_after_call/pot * {-0.5, 0, +0.5} *)
   let fold_value =
     match player with
-    | 0 -> Float.of_int pot
-    | _ -> Float.of_int (-pot)
+    | 0 -> 1.0         (* win 1 pot *)
+    | _ -> -1.0
   in
   let fold_leaf =
     Tree.leaf
@@ -72,8 +74,9 @@ let build_bet_response_tree
         ~max_opponents ~max_board_samples ~config
         ~player ~hole_cards ~board_visible ()
     in
-    (* Scale values by pot_after_call / 2 to reflect actual payoff *)
-    let scale = Float.of_int pot_after_call /. 2.0 in
+    (* Scale values: raw is {-1, 0, +1}, multiply by pot_after_call/(2*pot)
+       to get "pots won/lost" at this bet size *)
+    let scale = Float.of_int pot_after_call /. (2.0 *. pot_f) in
     Tree.map_values raw_tree ~f:(fun v -> v *. scale)
   in
 
@@ -102,7 +105,7 @@ let build_bet_response_tree
             ~max_board_samples:(Int.max 1 (max_board_samples / 2))
             ~config ~player ~hole_cards ~board_visible ()
         in
-        let scale = Float.of_int pot_after_raise /. 2.0 in
+        let scale = Float.of_int pot_after_raise /. (2.0 *. pot_f) in
         let scaled = Tree.map_values raw_tree ~f:(fun v -> v *. scale) in
         Some (Tree.node
           ~label:(Nolimit_holdem.Node_label.Chance {

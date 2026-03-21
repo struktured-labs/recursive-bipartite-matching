@@ -97,6 +97,7 @@ val train_mccfr
   -> ?checkpoint_prefix:string
   -> ?resume_from:string
   -> ?bucket_method:bucket_method
+  -> ?action_table:Action_abstraction.t
   -> unit
   -> strategy * strategy
 
@@ -196,5 +197,6 @@ val train_mccfr_parallel
   -> ?resume_from:string
   -> ?num_domains:int
   -> ?bucket_method:bucket_method
+  -> ?action_table:Action_abstraction.t
   -> unit
   -> strategy * strategy

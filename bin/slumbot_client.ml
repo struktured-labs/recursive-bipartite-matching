@@ -1059,6 +1059,7 @@ let () =
   let bucket_method_str = ref "equity" in
   let rbm_epsilon = ref 0.5 in
   let bet_fracs_str = ref "" in
+  let action_epsilon = ref 0.0 in
 
   let args = [
     ("--train", Arg.Set_int train_iters,
@@ -1097,6 +1098,8 @@ let () =
      "FLOAT  RBM clustering epsilon (default: 0.5)");
     ("--bet-fractions", Arg.Set_string bet_fracs_str,
      "LIST  Comma-separated bet fractions (default: 0.5,1.0,2.0; expanded: 0.25,0.33,0.5,0.75,1.0,1.5,2.0)");
+    ("--action-epsilon", Arg.Set_float action_epsilon,
+     "FLOAT  Action abstraction epsilon (0 = disabled, >0 = precompute RBM action table from 12 candidates)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-slumbot-client [--train N | --strategy FILE] [--hands N] [--mock] [--verbose]";
@@ -1137,6 +1140,32 @@ let () =
   eprintf "[slumbot] Bet fractions: [%s]\n%!"
     (String.concat ~sep:"; " (List.map config.bet_fractions ~f:Float.to_string));
 
+  (* Precompute action table if requested *)
+  let action_table =
+    match Float.( > ) !action_epsilon 0.0 with
+    | false -> None
+    | true ->
+      eprintf "[slumbot] Precomputing action table (epsilon=%.3f)...\n%!" !action_epsilon;
+      let sample_hands = List.init 10 ~f:(fun _ ->
+        let (h, _, _) = Compact_cfr.sample_deal () in h) in
+      let bb = config.big_blind in
+      let pot_values = [ 2*bb; 4*bb; 10*bb; 20*bb; 50*bb ] in
+      let stack_values = [ 20*bb; 50*bb; 100*bb; 200*bb ] in
+      let candidate_fracs =
+        [ 0.1; 0.2; 0.25; 0.33; 0.5; 0.67; 0.75; 1.0; 1.25; 1.5; 2.0; 3.0 ]
+      in
+      let (tbl, tbl_time) = time (fun () ->
+        Action_abstraction.precompute ~big_blind:bb
+          ~epsilon:!action_epsilon ~candidate_fracs
+          ~sample_hands ~pot_values ~stack_values ())
+      in
+      eprintf "[slumbot] Action table: %d contexts, %.1f avg sizes, %.1fs\n%!"
+        (Action_abstraction.num_contexts tbl)
+        (Action_abstraction.avg_actions_per_context tbl)
+        tbl_time;
+      Some tbl
+  in
+
   (* Get strategy *)
   let (p0_strat, p1_strat) =
     match String.length !strategy_file > 0 with
@@ -1172,6 +1201,7 @@ let () =
               ~checkpoint_every:!checkpoint_every
               ~checkpoint_prefix:!checkpoint_prefix
               ~bucket_method
+              ?action_table
               ?resume_from ?num_domains:n_domains ()
           | false ->
             Compact_cfr.train_mccfr ~config ~abstraction:preflop_abs
@@ -1179,6 +1209,7 @@ let () =
               ~checkpoint_every:!checkpoint_every
               ~checkpoint_prefix:!checkpoint_prefix
               ~bucket_method
+              ?action_table
               ?resume_from ())
         in
         eprintf "[slumbot] Training complete in %.2fs. P0: %d, P1: %d info sets\n%!"
