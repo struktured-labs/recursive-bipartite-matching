@@ -92,6 +92,12 @@ Parallel (15 workers) still OOMs — 54GB at 34%, extrapolated 158GB.
 Killed and relaunched single-threaded. Int64 keys reduce per-entry overhead
 by ~30 bytes → single-threaded should reach 15-20M before OOM.
 
+### Optimized 5M Training Progress
+- **51% (2.56M/5M)**, 35GB/123GB RAM, 154M info sets
+- Extrapolated: ~38GB at 5M (was 63GB with old binary — **40% reduction**)
+- Rate: ~10K iter/min, ~40 min to checkpoint + 25K Slumbot eval
+- Additional optimizations committed (for next run): merged tables, flattened arrays, regret pruning, open-addressing hash table
+
 ---
 
 ## 2026-03-20 05:03 UTC — RBM Cloud Experiment Launched
