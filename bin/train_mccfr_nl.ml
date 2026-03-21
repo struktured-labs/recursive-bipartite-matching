@@ -181,8 +181,8 @@ let () =
        let avg_util = !util_sum /. Float.of_int iter in
        let elapsed = Core_unix.gettimeofday () -. t_train_start in
        let rate = Float.of_int iter /. elapsed in
-       let n0 = Hashtbl.length cfr_states.(0).regret_sum in
-       let n1 = Hashtbl.length cfr_states.(1).regret_sum in
+       let n0 = Hashtbl.length cfr_states.(0).entries in
+       let n1 = Hashtbl.length cfr_states.(1).entries in
        printf "  [%d/%d] avg_util=%.4f infosets=(%d,%d) %.0f iter/s\n%!"
          iter !iterations avg_util n0 n1 rate
      | false -> ());
@@ -200,16 +200,12 @@ let () =
   let t_train_end = Core_unix.gettimeofday () in
   let train_elapsed = t_train_end -. t_train_start in
 
-  let n0 = Hashtbl.length cfr_states.(0).regret_sum in
-  let n1 = Hashtbl.length cfr_states.(1).regret_sum in
+  let n0 = Hashtbl.length cfr_states.(0).entries in
+  let n1 = Hashtbl.length cfr_states.(1).entries in
   printf "\nTraining complete in %.1fs (%.0f iter/s)\n%!"
     train_elapsed (Float.of_int !iterations /. train_elapsed);
-  printf "  P0: %d info sets (%d regret + %d strategy)\n%!" n0
-    (Hashtbl.length cfr_states.(0).regret_sum)
-    (Hashtbl.length cfr_states.(0).strategy_sum);
-  printf "  P1: %d info sets (%d regret + %d strategy)\n%!" n1
-    (Hashtbl.length cfr_states.(1).regret_sum)
-    (Hashtbl.length cfr_states.(1).strategy_sum);
+  printf "  P0: %d info sets\n%!" n0;
+  printf "  P1: %d info sets\n%!" n1;
 
   (* Save final raw cfr_state *)
   printf "\nSaving raw cfr_state to %s...\n%!" !output_file;

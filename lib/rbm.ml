@@ -29,3 +29,4 @@ module Cfr_nolimit = Cfr_nolimit
 module Compact_cfr = Compact_cfr
 module Action_subtree = Action_subtree
 module Action_abstraction = Action_abstraction
+module Cfr_pruning = Cfr_pruning

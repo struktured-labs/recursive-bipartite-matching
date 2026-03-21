@@ -5,44 +5,60 @@ let float_eq ?(eps = 1e-15) a b = Float.( < ) (Float.abs (a -. b)) eps
 let make_test_states () : Compact_cfr.cfr_state array =
   let p0 = Compact_cfr.create ~size:16 () in
   let p1 = Compact_cfr.create ~size:16 () in
-  (* P0 regret_sum --- use raw int64 keys *)
-  Hashtbl.set p0.regret_sum ~key:100L ~data:[| 1.5; -2.3; 0.0 |];
-  Hashtbl.set p0.regret_sum ~key:201L ~data:[| 100.0; 200.0 |];
-  Hashtbl.set p0.regret_sum ~key:302L ~data:[| 0.001; 99999.9; -1e10 |];
-  (* P0 strategy_sum *)
-  Hashtbl.set p0.strategy_sum ~key:100L ~data:[| 10.0; 20.0; 30.0 |];
-  Hashtbl.set p0.strategy_sum ~key:201L ~data:[| 50.0; 50.0 |];
-  (* P1 regret_sum *)
-  Hashtbl.set p1.regret_sum ~key:700L ~data:[| 42.0 |];
-  (* P1 strategy_sum *)
-  Hashtbl.set p1.strategy_sum ~key:700L ~data:[| 42.0 |];
-  Hashtbl.set p1.strategy_sum ~key:809L ~data:[| 1.0; 2.0; 3.0; 4.0 |];
+  (* P0 entries *)
+  Hashtbl.set p0.entries ~key:100L
+    ~data:{ Compact_cfr.regrets = [| 1.5; -2.3; 0.0 |]
+          ; strategy = [| 10.0; 20.0; 30.0 |] };
+  Hashtbl.set p0.entries ~key:201L
+    ~data:{ Compact_cfr.regrets = [| 100.0; 200.0 |]
+          ; strategy = [| 50.0; 50.0 |] };
+  Hashtbl.set p0.entries ~key:302L
+    ~data:{ Compact_cfr.regrets = [| 0.001; 99999.9; -1e10 |]
+          ; strategy = [| 0.0; 0.0; 0.0 |] };
+  (* P1 entries *)
+  Hashtbl.set p1.entries ~key:700L
+    ~data:{ Compact_cfr.regrets = [| 42.0 |]
+          ; strategy = [| 42.0 |] };
+  Hashtbl.set p1.entries ~key:809L
+    ~data:{ Compact_cfr.regrets = [| 0.0; 0.0; 0.0; 0.0 |]
+          ; strategy = [| 1.0; 2.0; 3.0; 4.0 |] };
   [| p0; p1 |]
 
-let assert_hashtbl_equal
-    (expected : (Int64.t, float array) Hashtbl.t)
-    (actual : (Int64.t, float array) Hashtbl.t)
+let assert_entry_equal
+    (expected : Compact_cfr.cfr_entry)
+    (actual : Compact_cfr.cfr_entry)
+    ~(label : string) ~(key : int64) =
+  [%test_eq: int] (Array.length expected.regrets) (Array.length actual.regrets);
+  Array.iteri expected.regrets ~f:(fun i e ->
+    match float_eq e actual.regrets.(i) with
+    | true -> ()
+    | false ->
+      failwithf "%s: key %Ld regrets[%d]: expected %f got %f"
+        label key i e actual.regrets.(i) ());
+  [%test_eq: int] (Array.length expected.strategy) (Array.length actual.strategy);
+  Array.iteri expected.strategy ~f:(fun i e ->
+    match float_eq e actual.strategy.(i) with
+    | true -> ()
+    | false ->
+      failwithf "%s: key %Ld strategy[%d]: expected %f got %f"
+        label key i e actual.strategy.(i) ())
+
+let assert_entries_equal
+    (expected : (Int64.t, Compact_cfr.cfr_entry) Hashtbl.t)
+    (actual : (Int64.t, Compact_cfr.cfr_entry) Hashtbl.t)
     ~(label : string) =
   [%test_eq: int] (Hashtbl.length expected) (Hashtbl.length actual);
-  Hashtbl.iteri expected ~f:(fun ~key ~data:exp_arr ->
+  Hashtbl.iteri expected ~f:(fun ~key ~data:exp_entry ->
     match Hashtbl.find actual key with
     | None -> failwithf "%s: missing key %Ld" label key ()
-    | Some act_arr ->
-      [%test_eq: int] (Array.length exp_arr) (Array.length act_arr);
-      Array.iteri exp_arr ~f:(fun i e ->
-        match float_eq e act_arr.(i) with
-        | true -> ()
-        | false ->
-          failwithf "%s: key %Ld index %d: expected %f got %f"
-            label key i e act_arr.(i) ()))
+    | Some act_entry ->
+      assert_entry_equal exp_entry act_entry ~label ~key)
 
 let assert_states_equal
     (expected : Compact_cfr.cfr_state array)
     (actual : Compact_cfr.cfr_state array) =
-  assert_hashtbl_equal expected.(0).regret_sum actual.(0).regret_sum ~label:"P0.regret_sum";
-  assert_hashtbl_equal expected.(0).strategy_sum actual.(0).strategy_sum ~label:"P0.strategy_sum";
-  assert_hashtbl_equal expected.(1).regret_sum actual.(1).regret_sum ~label:"P1.regret_sum";
-  assert_hashtbl_equal expected.(1).strategy_sum actual.(1).strategy_sum ~label:"P1.strategy_sum"
+  assert_entries_equal expected.(0).entries actual.(0).entries ~label:"P0";
+  assert_entries_equal expected.(1).entries actual.(1).entries ~label:"P1"
 
 let%test_unit "chunked_roundtrip" =
   let states = make_test_states () in
@@ -120,10 +136,11 @@ let%test_unit "large_checkpoint_roundtrip" =
       Float.of_int (i * 7 + j) *. 0.001 -. 50.0) in
     let strats = Array.init n_actions ~f:(fun j ->
       Float.of_int (i * 3 + j + 1) *. 0.01) in
-    Hashtbl.set p0.regret_sum ~key ~data:regrets;
-    Hashtbl.set p0.strategy_sum ~key ~data:strats;
-    Hashtbl.set p1.regret_sum ~key ~data:(Array.map regrets ~f:Float.neg);
-    Hashtbl.set p1.strategy_sum ~key ~data:strats
+    Hashtbl.set p0.entries ~key
+      ~data:{ Compact_cfr.regrets; strategy = strats };
+    Hashtbl.set p1.entries ~key
+      ~data:{ Compact_cfr.regrets = Array.map regrets ~f:Float.neg
+            ; strategy = strats }
   done;
   let states = [| p0; p1 |] in
   let filename = "test_large_roundtrip.dat" in

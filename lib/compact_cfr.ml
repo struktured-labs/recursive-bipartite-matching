@@ -15,15 +15,17 @@ type info_key = Int64.t
 
 type strategy = (Int64.t, float array) Hashtbl.t
 
+type cfr_entry = {
+  mutable regrets : float array;
+  mutable strategy : float array;
+}
+
 type cfr_state = {
-  regret_sum : (Int64.t, float array) Hashtbl.t;
-  strategy_sum : (Int64.t, float array) Hashtbl.t;
+  entries : (Int64.t, cfr_entry) Hashtbl.t;
 }
 
 let create ?(size = 1_000_000) () =
-  { regret_sum = Hashtbl.create ~size (module Int64)
-  ; strategy_sum = Hashtbl.create ~size (module Int64)
-  }
+  { entries = Hashtbl.create ~size (module Int64) }
 
 (* ------------------------------------------------------------------ *)
 (* Regret matching                                                     *)
@@ -39,25 +41,28 @@ let regret_matching (regrets : float array) : float array =
     let uniform = 1.0 /. Float.of_int n in
     Array.create ~len:n uniform
 
+let find_or_add_entry (state : cfr_state) (key : info_key) ~(num_actions : int) : cfr_entry =
+  Hashtbl.find_or_add state.entries key
+    ~default:(fun () ->
+      { regrets = Array.create ~len:num_actions 0.0
+      ; strategy = Array.create ~len:num_actions 0.0
+      })
+
 let get_strategy (state : cfr_state) (key : info_key) ~(num_actions : int) : float array =
-  let regrets =
-    Hashtbl.find_or_add state.regret_sum key
-      ~default:(fun () -> Array.create ~len:num_actions 0.0)
-  in
-  regret_matching regrets
+  let entry = find_or_add_entry state key ~num_actions in
+  regret_matching entry.regrets
 
 let accumulate_strategy (state : cfr_state) (key : info_key)
     (strat : float array) (weight : float) =
-  let current =
-    Hashtbl.find_or_add state.strategy_sum key
-      ~default:(fun () -> Array.create ~len:(Array.length strat) 0.0)
-  in
+  let num_actions = Array.length strat in
+  let entry = find_or_add_entry state key ~num_actions in
   Array.iteri strat ~f:(fun i p ->
-    current.(i) <- current.(i) +. weight *. p)
+    entry.strategy.(i) <- entry.strategy.(i) +. weight *. p)
 
 let average_strategy (state : cfr_state) : strategy =
-  let result = Hashtbl.create ~size:(Hashtbl.length state.strategy_sum) (module Int64) in
-  Hashtbl.iteri state.strategy_sum ~f:(fun ~key ~data:sums ->
+  let result = Hashtbl.create ~size:(Hashtbl.length state.entries) (module Int64) in
+  Hashtbl.iteri state.entries ~f:(fun ~key ~data:entry ->
+    let sums = entry.strategy in
     let total = Array.fold sums ~init:0.0 ~f:( +. ) in
     let avg =
       match Float.( > ) total 0.0 with
@@ -685,15 +690,12 @@ and handle_decision ~(player : int) ~(traverser : int) ~(cfr_st : cfr_state)
     let node_value = Array.foldi action_values ~init:0.0 ~f:(fun i acc v ->
       acc +. strat.(i) *. v)
     in
-    let regrets =
-      Hashtbl.find_or_add cfr_st.regret_sum key
-        ~default:(fun () -> Array.create ~len:num_actions 0.0)
-    in
+    let entry = find_or_add_entry cfr_st key ~num_actions in
     Array.iteri action_values ~f:(fun i v ->
-      regrets.(i) <- regrets.(i) +. (v -. node_value));
-    Array.iteri regrets ~f:(fun i r ->
+      entry.regrets.(i) <- entry.regrets.(i) +. (v -. node_value));
+    Array.iteri entry.regrets ~f:(fun i r ->
       match Float.( < ) r 0.0 with
-      | true  -> regrets.(i) <- 0.0
+      | true  -> entry.regrets.(i) <- 0.0
       | false -> ignore r);
     node_value
   | false ->
@@ -768,25 +770,36 @@ let load_checkpoint_marshal ~(filename : string) : cfr_state array =
     Marshal.from_channel ic
   in
   In_channel.close ic;
-  let to_hashtbl lst =
-    let tbl = Hashtbl.create (module Int64) ~size:(List.length lst) in
-    List.iter lst ~f:(fun (k, v) -> Hashtbl.set tbl ~key:k ~data:v);
+  let merge_to_entries regret_list strat_list =
+    let tbl = Hashtbl.create (module Int64) ~size:(List.length regret_list) in
+    List.iter regret_list ~f:(fun (k, regrets) ->
+      let strategy =
+        match List.Assoc.find strat_list ~equal:Int64.equal k with
+        | Some s -> s
+        | None -> Array.create ~len:(Array.length regrets) 0.0
+      in
+      Hashtbl.set tbl ~key:k ~data:{ regrets; strategy });
+    (* Add strategy-only entries not in regret_list *)
+    List.iter strat_list ~f:(fun (k, strategy) ->
+      match Hashtbl.mem tbl k with
+      | true -> ()
+      | false ->
+        let regrets = Array.create ~len:(Array.length strategy) 0.0 in
+        Hashtbl.set tbl ~key:k ~data:{ regrets; strategy });
     tbl
   in
-  [| { regret_sum = to_hashtbl p0_regret; strategy_sum = to_hashtbl p0_strat }
-   ; { regret_sum = to_hashtbl p1_regret; strategy_sum = to_hashtbl p1_strat }
+  [| { entries = merge_to_entries p0_regret p0_strat }
+   ; { entries = merge_to_entries p1_regret p1_strat }
   |]
 
 let save_checkpoint_marshal ~(filename : string) (cfr_states : cfr_state array) : unit =
-  let hashtbl_to_alist tbl =
-    Hashtbl.fold tbl ~init:[] ~f:(fun ~key ~data acc -> (key, data) :: acc)
+  let entries_to_alists entries =
+    Hashtbl.fold entries ~init:([], []) ~f:(fun ~key ~data (racc, sacc) ->
+      ((key, data.regrets) :: racc, (key, data.strategy) :: sacc))
   in
-  let data =
-    ( hashtbl_to_alist cfr_states.(0).regret_sum
-    , hashtbl_to_alist cfr_states.(0).strategy_sum
-    , hashtbl_to_alist cfr_states.(1).regret_sum
-    , hashtbl_to_alist cfr_states.(1).strategy_sum )
-  in
+  let (p0_regret, p0_strat) = entries_to_alists cfr_states.(0).entries in
+  let (p1_regret, p1_strat) = entries_to_alists cfr_states.(1).entries in
+  let data = (p0_regret, p0_strat, p1_regret, p1_strat) in
   let oc = Out_channel.create filename in
   Marshal.to_channel oc data [];
   Out_channel.close oc
@@ -883,53 +896,61 @@ let read_int64_le_raw (ic : In_channel.t) : int64 =
      !v
    | false -> failwith "read_int64_le_raw: unexpected EOF")
 
-let write_hashtbl_chunked (oc : Out_channel.t) (tbl : (Int64.t, float array) Hashtbl.t) : unit =
-  let n_entries = Hashtbl.length tbl in
-  write_int64_le oc n_entries;
-  Hashtbl.iteri tbl ~f:(fun ~key ~data ->
-    write_int64_le_raw oc key;
-    let arr_len = Array.length data in
-    write_int32_le oc arr_len;
-    (* Write float array as raw bytes — 8 bytes per float, native endian *)
-    let float_buf = Bytes.create (arr_len * 8) in
-    Array.iteri data ~f:(fun i f ->
-      let bits = Int64.bits_of_float f in
-      for b = 0 to 7 do
-        Bytes.set float_buf ((i * 8) + b)
-          (Char.of_int_exn (Int64.to_int_exn (Int64.( land ) (Int64.shift_right_logical bits (b * 8)) 0xFFL)))
-      done);
-    Out_channel.output oc ~buf:float_buf ~pos:0 ~len:(arr_len * 8))
+let write_float_array_chunked (oc : Out_channel.t) (data : float array) : unit =
+  let arr_len = Array.length data in
+  write_int32_le oc arr_len;
+  let float_buf = Bytes.create (arr_len * 8) in
+  Array.iteri data ~f:(fun i f ->
+    let bits = Int64.bits_of_float f in
+    for b = 0 to 7 do
+      Bytes.set float_buf ((i * 8) + b)
+        (Char.of_int_exn (Int64.to_int_exn (Int64.( land ) (Int64.shift_right_logical bits (b * 8)) 0xFFL)))
+    done);
+  Out_channel.output oc ~buf:float_buf ~pos:0 ~len:(arr_len * 8)
 
-let read_hashtbl_chunked (ic : In_channel.t) : (Int64.t, float array) Hashtbl.t =
+let read_float_array_chunked (ic : In_channel.t) : float array =
+  let arr_len = read_int32_le ic in
+  let float_buf = Bytes.create (arr_len * 8) in
+  (match read_exact ic ~buf:float_buf ~pos:0 ~len:(arr_len * 8) with
+   | true -> ()
+   | false -> failwith "read_float_array_chunked: unexpected EOF reading floats");
+  Array.init arr_len ~f:(fun i ->
+    let bits = ref 0L in
+    for b = 0 to 7 do
+      bits := Int64.( lor ) !bits
+        (Int64.shift_left (Int64.of_int_exn (Char.to_int (Bytes.get float_buf ((i * 8) + b)))) (b * 8))
+    done;
+    Int64.float_of_bits !bits)
+
+(** Write one "table" from entries by extracting a field with [project]. *)
+let write_entries_as_table (oc : Out_channel.t) (entries : (Int64.t, cfr_entry) Hashtbl.t)
+    ~(project : cfr_entry -> float array) : unit =
+  let n_entries = Hashtbl.length entries in
+  write_int64_le oc n_entries;
+  Hashtbl.iteri entries ~f:(fun ~key ~data ->
+    write_int64_le_raw oc key;
+    write_float_array_chunked oc (project data))
+
+(** Read one "table" back into a [(Int64.t, float array) list] of (key, array) pairs. *)
+let read_table_chunked (ic : In_channel.t) : (int64 * float array) list =
   let n_entries = read_int64_le ic in
-  let tbl = Hashtbl.create (module Int64) ~size:n_entries in
+  let acc = ref [] in
   for _ = 1 to n_entries do
     let key = read_int64_le_raw ic in
-    let arr_len = read_int32_le ic in
-    let float_buf = Bytes.create (arr_len * 8) in
-    (match read_exact ic ~buf:float_buf ~pos:0 ~len:(arr_len * 8) with
-     | true -> ()
-     | false -> failwith "read_hashtbl_chunked: unexpected EOF reading floats");
-    let data = Array.init arr_len ~f:(fun i ->
-      let bits = ref 0L in
-      for b = 0 to 7 do
-        bits := Int64.( lor ) !bits
-          (Int64.shift_left (Int64.of_int_exn (Char.to_int (Bytes.get float_buf ((i * 8) + b)))) (b * 8))
-      done;
-      Int64.float_of_bits !bits) in
-    Hashtbl.set tbl ~key ~data
+    let data = read_float_array_chunked ic in
+    acc := (key, data) :: !acc
   done;
-  tbl
+  !acc
 
 let save_checkpoint_chunked ~(filename : string) (cfr_states : cfr_state array) : unit =
   let oc = Out_channel.create filename in
   Out_channel.output_string oc chunked_magic;
   write_int32_le oc 2;
   write_int32_le oc 4;
-  write_hashtbl_chunked oc cfr_states.(0).regret_sum;
-  write_hashtbl_chunked oc cfr_states.(0).strategy_sum;
-  write_hashtbl_chunked oc cfr_states.(1).regret_sum;
-  write_hashtbl_chunked oc cfr_states.(1).strategy_sum;
+  write_entries_as_table oc cfr_states.(0).entries ~project:(fun e -> e.regrets);
+  write_entries_as_table oc cfr_states.(0).entries ~project:(fun e -> e.strategy);
+  write_entries_as_table oc cfr_states.(1).entries ~project:(fun e -> e.regrets);
+  write_entries_as_table oc cfr_states.(1).entries ~project:(fun e -> e.strategy);
   Out_channel.flush oc;
   Out_channel.close oc
 
@@ -958,13 +979,30 @@ let load_checkpoint_chunked ~(filename : string) : cfr_state array =
   (match n_tables = 4 with
    | true -> ()
    | false -> failwithf "load_checkpoint_chunked: expected 4 tables, got %d" n_tables ());
-  let p0_regret = read_hashtbl_chunked ic in
-  let p0_strat = read_hashtbl_chunked ic in
-  let p1_regret = read_hashtbl_chunked ic in
-  let p1_strat = read_hashtbl_chunked ic in
+  let p0_regret = read_table_chunked ic in
+  let p0_strat = read_table_chunked ic in
+  let p1_regret = read_table_chunked ic in
+  let p1_strat = read_table_chunked ic in
   In_channel.close ic;
-  [| { regret_sum = p0_regret; strategy_sum = p0_strat }
-   ; { regret_sum = p1_regret; strategy_sum = p1_strat }
+  let merge_tables regret_list strat_list =
+    let tbl = Hashtbl.create (module Int64) ~size:(List.length regret_list) in
+    List.iter regret_list ~f:(fun (k, regrets) ->
+      let strategy =
+        match List.Assoc.find strat_list ~equal:Int64.equal k with
+        | Some s -> s
+        | None -> Array.create ~len:(Array.length regrets) 0.0
+      in
+      Hashtbl.set tbl ~key:k ~data:{ regrets; strategy });
+    List.iter strat_list ~f:(fun (k, strategy) ->
+      match Hashtbl.mem tbl k with
+      | true -> ()
+      | false ->
+        let regrets = Array.create ~len:(Array.length strategy) 0.0 in
+        Hashtbl.set tbl ~key:k ~data:{ regrets; strategy });
+    tbl
+  in
+  [| { entries = merge_tables p0_regret p0_strat }
+   ; { entries = merge_tables p1_regret p1_strat }
   |]
 
 (* -- Auto-detecting load -------------------------------------------- *)
@@ -1012,8 +1050,8 @@ let train_mccfr ~(config : Nolimit_holdem.config)
       printf "  [Resume] Loading checkpoint from %s ...\n%!" filename;
       let states = load_checkpoint ~filename in
       printf "  [Resume] Loaded P0=%d P1=%d info sets. Continuing training.\n%!"
-        (Hashtbl.length states.(0).regret_sum)
-        (Hashtbl.length states.(1).regret_sum);
+        (Hashtbl.length states.(0).entries)
+        (Hashtbl.length states.(1).entries);
       states
     | None ->
       [| create ~size:initial_size (); create ~size:initial_size () |]
@@ -1070,8 +1108,8 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     (match iter % report_every = 0 with
      | true ->
        let avg_util = !util_sum /. Float.of_int iter in
-       let n_infosets_0 = Hashtbl.length cfr_states.(0).regret_sum in
-       let n_infosets_1 = Hashtbl.length cfr_states.(1).regret_sum in
+       let n_infosets_0 = Hashtbl.length cfr_states.(0).entries in
+       let n_infosets_1 = Hashtbl.length cfr_states.(1).entries in
        printf "  [Compact-MCCFR-NL] iter %d/%d  avg_util=%.4f  infosets=(%d, %d)\n%!"
          iter iterations avg_util n_infosets_0 n_infosets_1
      | false -> ());
@@ -1093,30 +1131,29 @@ let train_mccfr ~(config : Nolimit_holdem.config)
 
 (** Copy a cfr_state by deep-copying each hash table entry. *)
 let copy_cfr_state (src : cfr_state) : cfr_state =
-  let copy_tbl tbl =
-    let tbl2 = Hashtbl.create (module Int64) ~size:(Hashtbl.length tbl) in
-    Hashtbl.iteri tbl ~f:(fun ~key ~data ->
-      Hashtbl.set tbl2 ~key ~data:(Array.copy data));
-    tbl2
-  in
-  { regret_sum = copy_tbl src.regret_sum
-  ; strategy_sum = copy_tbl src.strategy_sum
-  }
+  let tbl2 = Hashtbl.create (module Int64) ~size:(Hashtbl.length src.entries) in
+  Hashtbl.iteri src.entries ~f:(fun ~key ~data ->
+    Hashtbl.set tbl2 ~key
+      ~data:{ regrets = Array.copy data.regrets
+            ; strategy = Array.copy data.strategy
+            });
+  { entries = tbl2 }
 
-(** Merge [src] into [dst] by summing regret_sum and strategy_sum arrays
+(** Merge [src] into [dst] by summing regret and strategy arrays
     element-wise.  Mutates [dst] in place. *)
 let merge_cfr_state_into ~(dst : cfr_state) ~(src : cfr_state) : unit =
-  let merge_tbl ~dst_tbl ~src_tbl =
-    Hashtbl.iteri src_tbl ~f:(fun ~key ~data:src_arr ->
-      match Hashtbl.find dst_tbl key with
-      | Some dst_arr ->
-        Array.iteri src_arr ~f:(fun i v ->
-          dst_arr.(i) <- dst_arr.(i) +. v)
-      | None ->
-        Hashtbl.set dst_tbl ~key ~data:(Array.copy src_arr))
-  in
-  merge_tbl ~dst_tbl:dst.regret_sum ~src_tbl:src.regret_sum;
-  merge_tbl ~dst_tbl:dst.strategy_sum ~src_tbl:src.strategy_sum
+  Hashtbl.iteri src.entries ~f:(fun ~key ~data:src_entry ->
+    match Hashtbl.find dst.entries key with
+    | Some dst_entry ->
+      Array.iteri src_entry.regrets ~f:(fun i v ->
+        dst_entry.regrets.(i) <- dst_entry.regrets.(i) +. v);
+      Array.iteri src_entry.strategy ~f:(fun i v ->
+        dst_entry.strategy.(i) <- dst_entry.strategy.(i) +. v)
+    | None ->
+      Hashtbl.set dst.entries ~key
+        ~data:{ regrets = Array.copy src_entry.regrets
+              ; strategy = Array.copy src_entry.strategy
+              })
 
 let train_mccfr_parallel ~(config : Nolimit_holdem.config)
     ~(abstraction : Abstraction.abstraction_partial)
@@ -1142,8 +1179,8 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
       printf "  [Resume] Loading checkpoint from %s ...\n%!" filename;
       let states = load_checkpoint ~filename in
       printf "  [Resume] Loaded P0=%d P1=%d info sets.\n%!"
-        (Hashtbl.length states.(0).regret_sum)
-        (Hashtbl.length states.(1).regret_sum);
+        (Hashtbl.length states.(0).entries)
+        (Hashtbl.length states.(1).entries);
       states
     | None ->
       [| create ~size:initial_size (); create ~size:initial_size () |]
@@ -1226,8 +1263,8 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
           let total = Atomic.fetch_and_add global_iter 1 + 1 in
           (match total % report_every = 0 with
            | true ->
-             let n0 = Hashtbl.length my_states.(0).regret_sum in
-             let n1 = Hashtbl.length my_states.(1).regret_sum in
+             let n0 = Hashtbl.length my_states.(0).entries in
+             let n1 = Hashtbl.length my_states.(1).entries in
              printf "  [Parallel-MCCFR] ~%d/%d iters (worker %d: %d/%d)  infosets=(%d,%d)\n%!"
                total iterations worker_id iter my_iters n0 n1
            | false -> ())
@@ -1248,8 +1285,8 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
   let avg_util = total_util /. Float.of_int iterations in
   printf "  [Parallel-MCCFR] Done. avg_util=%.4f  infosets=(%d, %d)\n%!"
     avg_util
-    (Hashtbl.length merged.(0).regret_sum)
-    (Hashtbl.length merged.(1).regret_sum);
+    (Hashtbl.length merged.(0).entries)
+    (Hashtbl.length merged.(1).entries);
   (* Optional final checkpoint *)
   (match checkpoint_every > 0 with
    | true ->

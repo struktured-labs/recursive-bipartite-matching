@@ -16,11 +16,17 @@ type info_key = Int64.t
     Uses monomorphic Int64 hashtable (NOT Poly). *)
 type strategy = (Int64.t, float array) Hashtbl.t
 
+(** Paired regret + strategy arrays for a single information set.
+    Stored together in one hash table entry to halve per-entry overhead. *)
+type cfr_entry = {
+  mutable regrets : float array;
+  mutable strategy : float array;
+}
+
 (** Mutable CFR state for one player.
-    Uses monomorphic Int64 hashtables with pre-sizing. *)
+    Uses a single monomorphic Int64 hashtable with paired entries. *)
 type cfr_state = {
-  regret_sum : (Int64.t, float array) Hashtbl.t;
-  strategy_sum : (Int64.t, float array) Hashtbl.t;
+  entries : (Int64.t, cfr_entry) Hashtbl.t;
 }
 
 (** [create ~size ()] returns a fresh CFR state with tables pre-sized
@@ -173,10 +179,10 @@ val mccfr_traverse
   -> float
 
 (** [copy_cfr_state state] returns a deep copy of [state], including
-    independent copies of all regret_sum and strategy_sum arrays. *)
+    independent copies of all regret and strategy arrays. *)
 val copy_cfr_state : cfr_state -> cfr_state
 
-(** [merge_cfr_state_into ~dst ~src] adds all regret_sum and strategy_sum
+(** [merge_cfr_state_into ~dst ~src] adds all regret and strategy
     values from [src] into [dst] element-wise.  Mutates [dst] in place.
     Keys present in [src] but not [dst] are copied. *)
 val merge_cfr_state_into : dst:cfr_state -> src:cfr_state -> unit
