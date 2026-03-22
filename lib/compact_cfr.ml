@@ -57,6 +57,98 @@ let regret_matching (regrets : float array) : float array =
     let uniform = 1.0 /. Float.of_int n in
     Array.create ~len:n uniform
 
+(* ------------------------------------------------------------------ *)
+(* Regret-Based Pruning (RBP) — per-action level                      *)
+(* ------------------------------------------------------------------ *)
+
+(** [regret_matching_with_pruning regrets ~prune_threshold] is like
+    [regret_matching] but also zeroes out actions whose cumulative
+    regret is below [prune_threshold].  Returns [(strategy, pruned)]
+    where [pruned.(i)] is [true] when action [i] was pruned. *)
+let regret_matching_with_pruning (regrets : float array)
+    ~(prune_threshold : float) : float array * bool array =
+  let n = Array.length regrets in
+  let pruned = Array.init n ~f:(fun i ->
+    Float.( < ) regrets.(i) prune_threshold) in
+  let positive = Array.init n ~f:(fun i ->
+    match pruned.(i) with
+    | true  -> 0.0
+    | false -> Float.max 0.0 regrets.(i)) in
+  let total = Array.fold positive ~init:0.0 ~f:( +. ) in
+  let strat =
+    match Float.( > ) total 0.0 with
+    | true  -> Array.map positive ~f:(fun p -> p /. total)
+    | false ->
+      (* Count unpruned actions for uniform fallback *)
+      let n_active = Array.count pruned ~f:(fun p ->
+        match p with true -> false | false -> true) in
+      match n_active > 0 with
+      | true ->
+        let u = 1.0 /. Float.of_int n_active in
+        Array.init n ~f:(fun i ->
+          match pruned.(i) with true -> 0.0 | false -> u)
+      | false ->
+        (* All pruned — fall back to full uniform *)
+        let uniform = 1.0 /. Float.of_int n in
+        Array.create ~len:n uniform
+  in
+  (strat, pruned)
+
+(* ------------------------------------------------------------------ *)
+(* Discounted CFR (DCFR) — Brown & Sandholm 2019                      *)
+(* ------------------------------------------------------------------ *)
+
+(** DCFR hyperparameters: [alpha] and [beta] control regret discount
+    for positive/negative regrets; [gamma] controls strategy-sum
+    discount. *)
+type dcfr_params = {
+  alpha : float;
+  beta  : float;
+  gamma : float;
+}
+
+let default_dcfr_params = { alpha = 1.5; beta = 0.0; gamma = 2.0 }
+
+(** [dcfr_weights params ~iter] computes the three discount factors
+    for iteration [iter]:
+    - [pos_regret_weight]: t^alpha / (t^alpha + 1)
+    - [neg_regret_weight]: t^beta / (t^beta + 1)
+    - [strategy_weight]:   (t / (t + 1))^gamma *)
+type dcfr_weights = {
+  pos_regret_weight : float;
+  neg_regret_weight : float;
+  strategy_weight   : float;
+}
+
+let compute_dcfr_weights (params : dcfr_params) ~(iter : int) : dcfr_weights =
+  let t = Float.of_int iter in
+  let t_alpha = Float.( ** ) t params.alpha in
+  let t_beta  = Float.( ** ) t params.beta in
+  let pos_regret_weight = t_alpha /. (t_alpha +. 1.0) in
+  let neg_regret_weight = t_beta  /. (t_beta  +. 1.0) in
+  let strategy_weight   = Float.( ** ) (t /. (t +. 1.0)) params.gamma in
+  { pos_regret_weight; neg_regret_weight; strategy_weight }
+
+(** [apply_dcfr_discount state weights] multiplies all existing regret
+    and strategy sums in [state] by the DCFR discount factors.
+    Positive regrets are scaled by [pos_regret_weight], negative by
+    [neg_regret_weight], and strategy sums by [strategy_weight]. *)
+let apply_dcfr_discount (state : cfr_state) (w : dcfr_weights) : unit =
+  Hashtbl.iter state.entries ~f:(fun entry ->
+    let n = entry.n_actions in
+    for i = 0 to n - 1 do
+      let r = entry_regret entry i in
+      let scaled =
+        match Float.( >= ) r 0.0 with
+        | true  -> r *. w.pos_regret_weight
+        | false -> r *. w.neg_regret_weight
+      in
+      set_entry_regret entry i scaled
+    done;
+    for i = 0 to n - 1 do
+      set_entry_strategy entry i (entry_strategy entry i *. w.strategy_weight)
+    done)
+
 let find_or_add_entry (state : cfr_state) (key : info_key) ~(num_actions : int) : cfr_entry =
   Hashtbl.find_or_add state.entries key
     ~default:(fun () ->
@@ -67,6 +159,16 @@ let find_or_add_entry (state : cfr_state) (key : info_key) ~(num_actions : int) 
 let get_strategy (state : cfr_state) (key : info_key) ~(num_actions : int) : float array =
   let entry = find_or_add_entry state key ~num_actions in
   regret_matching (entry_regrets_sub entry)
+
+(** [get_strategy_pruned state key ~num_actions ~prune_threshold] is
+    like [get_strategy] but also applies regret-based pruning at the
+    per-action level.  Returns [(strategy, pruned)] where [pruned.(i)]
+    indicates action [i] should be skipped during traversal. *)
+let get_strategy_pruned (state : cfr_state) (key : info_key)
+    ~(num_actions : int) ~(prune_threshold : float)
+  : float array * bool array =
+  let entry = find_or_add_entry state key ~num_actions in
+  regret_matching_with_pruning (entry_regrets_sub entry) ~prune_threshold
 
 let accumulate_strategy (state : cfr_state) (key : info_key)
     (strat : float array) (weight : float) =
@@ -617,6 +719,11 @@ let showdown_payoff ~(p1_cards : Card.t * Card.t) ~(p2_cards : Card.t * Card.t)
 (* Module-level action table — set before training, used by available_actions_inline *)
 let global_action_table : Action_abstraction.t option ref = ref None
 
+(* Module-level prune threshold — set before training, read by mccfr_traverse.
+   [None] disables per-action pruning; [Some c] prunes actions with
+   cumulative regret below [c]. *)
+let global_prune_threshold : float option ref = ref None
+
 let rec mccfr_traverse
     ~(config : Nolimit_holdem.config)
     ~(p1_cards : Card.t * Card.t)
@@ -645,7 +752,16 @@ let rec mccfr_traverse
       ~p1_buckets ~p2_buckets ~history ~state ~traverser ~cfr_states
   | _ ->
     let cfr_st = cfr_states.(player) in
-    let strat = get_strategy cfr_st key ~num_actions in
+    (* When the current player is the traverser and RBP is enabled,
+       use per-action pruning to skip subtrees for deeply negative
+       regret actions. *)
+    let strat, pruned =
+      match player = traverser, !global_prune_threshold with
+      | true, Some prune_threshold ->
+        get_strategy_pruned cfr_st key ~num_actions ~prune_threshold
+      | _, _ ->
+        (get_strategy cfr_st key ~num_actions, Array.create ~len:num_actions false)
+    in
     let action_arr = Array.of_list actions in
 
     let action_payoff i =
@@ -697,21 +813,33 @@ let rec mccfr_traverse
     in
 
     handle_decision ~player ~traverser ~cfr_st ~key ~strat ~num_actions
-      ~action_payoffs:action_payoff
+      ~action_payoffs:action_payoff ~pruned
 
 and handle_decision ~(player : int) ~(traverser : int) ~(cfr_st : cfr_state)
     ~(key : info_key) ~(strat : float array) ~(num_actions : int)
-    ~(action_payoffs : int -> float) : float =
+    ~(action_payoffs : int -> float) ~(pruned : bool array) : float =
   match player = traverser with
   | true ->
     accumulate_strategy cfr_st key strat 1.0;
-    let action_values = Array.init num_actions ~f:action_payoffs in
+    (* For pruned actions, skip the subtree traversal entirely and
+       use 0.0 as a placeholder value.  The action's probability is
+       already 0 in [strat], so the node_value calculation is
+       unaffected.  We still update regrets for pruned actions (their
+       regret delta is [0.0 - node_value]), allowing them to recover
+       if the node value shifts. *)
+    let action_values = Array.init num_actions ~f:(fun i ->
+      match pruned.(i) with
+      | true  -> 0.0
+      | false -> action_payoffs i) in
     let node_value = Array.foldi action_values ~init:0.0 ~f:(fun i acc v ->
       acc +. strat.(i) *. v)
     in
     let entry = find_or_add_entry cfr_st key ~num_actions in
     Array.iteri action_values ~f:(fun i v ->
-      set_entry_regret entry i (entry_regret entry i +. (v -. node_value)));
+      match pruned.(i) with
+      | true  -> ()  (* Leave pruned action regrets unchanged *)
+      | false ->
+        set_entry_regret entry i (entry_regret entry i +. (v -. node_value)));
     for i = 0 to num_actions - 1 do
       match Float.( < ) (entry_regret entry i) 0.0 with
       | true  -> set_entry_regret entry i 0.0
@@ -1102,14 +1230,30 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     ?(resume_from : string option)
     ?(bucket_method : bucket_method = Equity_based)
     ?(action_table : Action_abstraction.t option)
+    ?(dcfr = false)
+    ?(prune_threshold = -300_000_000.0)
     ()
   : strategy * strategy =
   global_action_table := action_table;
+  global_prune_threshold :=
+    (match Float.is_finite prune_threshold with
+     | true  -> Some prune_threshold
+     | false -> None);
   (match action_table with
    | Some tbl ->
      printf "  [Action table] %d contexts, %.1f avg bet sizes\n%!"
        (Action_abstraction.num_contexts tbl)
        (Action_abstraction.avg_actions_per_context tbl)
+   | None -> ());
+  (match dcfr with
+   | true ->
+     let p = default_dcfr_params in
+     printf "  [DCFR] enabled (alpha=%.1f, beta=%.1f, gamma=%.1f)\n%!"
+       p.alpha p.beta p.gamma
+   | false -> ());
+  (match !global_prune_threshold with
+   | Some c ->
+     printf "  [RBP] per-action pruning threshold=%.0f\n%!" c
    | None -> ());
   let cfr_states =
     match resume_from with
@@ -1172,6 +1316,13 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     let value = mccfr_traverse ~config ~p1_cards ~p2_cards ~board
         ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser ~cfr_states in
     util_sum := !util_sum +. value;
+    (* DCFR: discount regrets and strategy sums after each iteration *)
+    (match dcfr with
+     | true ->
+       let w = compute_dcfr_weights default_dcfr_params ~iter in
+       apply_dcfr_discount cfr_states.(0) w;
+       apply_dcfr_discount cfr_states.(1) w
+     | false -> ());
     (match iter % report_every = 0 with
      | true ->
        let avg_util = !util_sum /. Float.of_int iter in
@@ -1191,6 +1342,7 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     prune_periodically_inline ~every:500_000 ~iter cfr_states.(0);
     prune_periodically_inline ~every:500_000 ~iter cfr_states.(1)
   done;
+  global_prune_threshold := None;
   let p0_avg = average_strategy cfr_states.(0) in
   let p1_avg = average_strategy cfr_states.(1) in
   (p0_avg, p1_avg)
@@ -1235,12 +1387,28 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
     ?(num_domains = Parallel.default_num_domains ())
     ?(bucket_method : bucket_method = Equity_based)
     ?(action_table : Action_abstraction.t option)
+    ?(dcfr = false)
+    ?(prune_threshold = -300_000_000.0)
     ()
   : strategy * strategy =
   global_action_table := action_table;
+  global_prune_threshold :=
+    (match Float.is_finite prune_threshold with
+     | true  -> Some prune_threshold
+     | false -> None);
   let num_workers = Int.max 1 num_domains in
   printf "  [Parallel-MCCFR] Starting %d domains, %d iterations total\n%!"
     num_workers iterations;
+  (match dcfr with
+   | true ->
+     let p = default_dcfr_params in
+     printf "  [DCFR] enabled (alpha=%.1f, beta=%.1f, gamma=%.1f)\n%!"
+       p.alpha p.beta p.gamma
+   | false -> ());
+  (match !global_prune_threshold with
+   | Some c ->
+     printf "  [RBP] per-action pruning threshold=%.0f\n%!" c
+   | None -> ());
   (* Load or create the base state *)
   let base_states =
     match resume_from with
@@ -1263,7 +1431,7 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
     | false -> iters_per_worker)
   in
   (* Each worker starts with EMPTY state — do NOT copy the resume
-     checkpoint to every worker (that would use N × 90GB+ of RAM).
+     checkpoint to every worker (that would use N x 90GB+ of RAM).
      Workers accumulate fresh regrets independently, then we merge
      all worker states + the base state at the end. This is correct
      because MCCFR regret/strategy sums are additive. *)
@@ -1329,6 +1497,13 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
               ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser
               ~cfr_states:my_states in
           local_util_sum := !local_util_sum +. value;
+          (* DCFR: discount regrets and strategy sums after each iteration *)
+          (match dcfr with
+           | true ->
+             let w = compute_dcfr_weights default_dcfr_params ~iter in
+             apply_dcfr_discount my_states.(0) w;
+             apply_dcfr_discount my_states.(1) w
+           | false -> ());
           let total = Atomic.fetch_and_add global_iter 1 + 1 in
           (match total % report_every = 0 with
            | true ->
@@ -1343,6 +1518,7 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
         done;
         worker_utils.(worker_id) <- !local_util_sum));
   Domainslib.Task.teardown_pool pool;
+  global_prune_threshold := None;
   (* Merge all worker states into worker 0, then add the base (resume) state *)
   printf "  [Parallel-MCCFR] Merging %d worker states + base state ...\n%!" num_workers;
   let merged = worker_states.(0) in

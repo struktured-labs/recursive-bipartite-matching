@@ -112,6 +112,11 @@ val create_postflop_state : unit -> postflop_state
     [~checkpoint_every] saves raw CFR state every N iterations (default 0 = off).
     [~checkpoint_prefix] filename prefix for checkpoints (default "checkpoint").
     [~resume_from] loads a checkpoint file and continues training from that state.
+    [~dcfr] enables Discounted CFR (Brown & Sandholm 2019), which discounts
+    older regret and strategy sums each iteration (default false).
+    [~prune_threshold] enables per-action Regret-Based Pruning (RBP): during
+    traversal, actions with cumulative regret below this threshold are skipped
+    (default -300_000_000; pass [Float.infinity] to disable).
     Returns (p1_average_strategy, p2_average_strategy).
     Prints convergence diagnostics every [~report_every] iterations. *)
 val train_mccfr
@@ -125,6 +130,8 @@ val train_mccfr
   -> ?resume_from:string
   -> ?bucket_method:bucket_method
   -> ?action_table:Action_abstraction.t
+  -> ?dcfr:bool
+  -> ?prune_threshold:float
   -> unit
   -> strategy * strategy
 
@@ -169,6 +176,47 @@ val precompute_buckets_rbm
 (** [regret_matching regrets] converts cumulative regrets into a strategy
     via the standard regret-matching formula.  Exposed for testing. *)
 val regret_matching : float array -> float array
+
+(** [regret_matching_with_pruning regrets ~prune_threshold] is like
+    [regret_matching] but zeroes out actions whose cumulative regret
+    falls below [prune_threshold].  Returns [(strategy, pruned)] where
+    [pruned.(i)] is [true] when action [i] was pruned.  Exposed for
+    testing. *)
+val regret_matching_with_pruning
+  : float array -> prune_threshold:float -> float array * bool array
+
+(* ------------------------------------------------------------------ *)
+(* Discounted CFR (DCFR) — Brown & Sandholm 2019                      *)
+(* ------------------------------------------------------------------ *)
+
+(** DCFR hyperparameters.  [alpha] and [beta] control the discount
+    factor for positive/negative regrets respectively; [gamma] controls
+    the strategy-sum discount.  Recommended defaults from the paper:
+    alpha=1.5, beta=0.0, gamma=2.0. *)
+type dcfr_params = {
+  alpha : float;
+  beta  : float;
+  gamma : float;
+}
+
+(** Recommended DCFR hyperparameters (alpha=1.5, beta=0.0, gamma=2.0). *)
+val default_dcfr_params : dcfr_params
+
+(** Per-iteration discount factors computed from [dcfr_params]. *)
+type dcfr_weights = {
+  pos_regret_weight : float;
+  neg_regret_weight : float;
+  strategy_weight   : float;
+}
+
+(** [compute_dcfr_weights params ~iter] computes discount factors for
+    iteration [iter] from the given DCFR hyperparameters. *)
+val compute_dcfr_weights : dcfr_params -> iter:int -> dcfr_weights
+
+(** [apply_dcfr_discount state weights] multiplies all regret and
+    strategy sums in [state] by the corresponding DCFR discount
+    factors.  Mutates [state] in place. *)
+val apply_dcfr_discount : cfr_state -> dcfr_weights -> unit
 
 (** Internal NL game state, exposed for the standalone trainer. *)
 type nl_state = {
@@ -216,7 +264,7 @@ val merge_cfr_state_into : dst:cfr_state -> src:cfr_state -> unit
     (valid because MCCFR regret/strategy sums are additive).
 
     Parameters are identical to {!train_mccfr} with the addition of:
-    - [~num_domains] — number of worker domains (default: CPU count - 1)
+    - [~num_domains] -- number of worker domains (default: CPU count - 1)
 
     Returns (p1_average_strategy, p2_average_strategy). *)
 val train_mccfr_parallel
@@ -231,5 +279,7 @@ val train_mccfr_parallel
   -> ?num_domains:int
   -> ?bucket_method:bucket_method
   -> ?action_table:Action_abstraction.t
+  -> ?dcfr:bool
+  -> ?prune_threshold:float
   -> unit
   -> strategy * strategy
