@@ -157,12 +157,22 @@ RAM: **7.3GB** (was 35GB+ for monolithic at 5M iters). Each subgame ~2MB, fits i
 Worse than monolithic (-1.1 to -1.3) as expected — 1 cluster = no flop differentiation.
 **But pipeline works end-to-end in 81 min.** Architecture validated.
 
-### ε=2.0 Running — 8 Flop Clusters, 864 Subgames
-- **8 clusters** from 200 flops (vs 198 at ε=0.5, 1 at ε=5.0)
-- **864 subgames** (108 histories × 8 clusters), 100K iters each
-- 11GB RAM, 15 parallel workers
-- ~86.4M effective iterations
-- Estimated ~30-60 min training + 30 min Slumbot eval
+### ε=2.0 — OOM at ~35% (same merge problem)
+- **8 clusters**, **864 subgames** — good decomposition
+- 90GB at 35% → extrapolated 257GB → OOM at ~47%
+- Killed. Same root cause as ε=0.5: merge-into-memory defeats decomposition
+
+### Root Cause Analysis
+The merge step in `train_decomposed` accumulates ALL subgame strategies into
+one global hash table. Each subgame with RBM bucketing creates ~50-100K info
+sets (not 20K as initially estimated). 864 × 75K = ~65M entries, each with
+regret+strategy arrays = ~250 bytes → ~16GB just for the data. But OCaml
+Hashtbl overhead + GC = 4-5x → 65-80GB. Add the blueprint (13M entries) and
+the merge grows to 90GB+ with more subgames still to add.
+
+**The fix is architectural**: don't merge. Write each subgame to disk as it
+completes. At play time, load only the relevant subgame (~2MB) on demand.
+The decomposition must be preserved end-to-end.
 
 ### DCFR + RBP Implemented (not yet on cloud)
 - Discounted CFR: α=1.5, β=0.0, γ=2.0 (5-20x faster convergence)
