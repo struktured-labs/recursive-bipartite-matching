@@ -157,9 +157,12 @@ RAM: **7.3GB** (was 35GB+ for monolithic at 5M iters). Each subgame ~2MB, fits i
 Worse than monolithic (-1.1 to -1.3) as expected — 1 cluster = no flop differentiation.
 **But pipeline works end-to-end in 81 min.** Architecture validated.
 
-### ε=2.0 Launched (same instance)
-- Should produce ~20-80 flop clusters (sweet spot)
-- 108 × ~50 = ~5,400 subgames → ~100-150M entries → should fit in 128GB
+### ε=2.0 Running — 8 Flop Clusters, 864 Subgames
+- **8 clusters** from 200 flops (vs 198 at ε=0.5, 1 at ε=5.0)
+- **864 subgames** (108 histories × 8 clusters), 100K iters each
+- 11GB RAM, 15 parallel workers
+- ~86.4M effective iterations
+- Estimated ~30-60 min training + 30 min Slumbot eval
 
 ### DCFR + RBP Implemented (not yet on cloud)
 - Discounted CFR: α=1.5, β=0.0, γ=2.0 (5-20x faster convergence)
