@@ -128,6 +128,12 @@ Instance: i-0f070791b58564eff (18.209.20.136)
 **Key numbers**: 21,384 subgames × 50K iters = **1.07 BILLION effective iterations**.
 RAM: **7.3GB** (was 35GB+ for monolithic at 5M iters). Each subgame ~2MB, fits in L3 cache.
 
+### RAM Race — Likely OOM
+- 116GB at 280 min wall time, 8.6GB free, growing +9GB/15min
+- The merge-into-memory approach is the problem: 21K subgames × ~20K info sets each = ~400M entries in one global table
+- Same OOM pattern as monolithic training, just from a different direction
+- **Fix**: write subgame strategies to disk, streaming merge, or fewer subgames
+
 ### DCFR + RBP Implemented (not yet on cloud)
 - Discounted CFR: α=1.5, β=0.0, γ=2.0 (5-20x faster convergence)
 - Regret-Based Pruning: skip actions with regret < -300M (saves traversal time)
