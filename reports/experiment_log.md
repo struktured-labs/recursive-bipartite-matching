@@ -145,7 +145,21 @@ RAM: **7.3GB** (was 35GB+ for monolithic at 5M iters). Each subgame ~2MB, fits i
 - Only **108 subgames** (one per preflop history), 100K iters each
 - 10/108 complete (9%), 8.5GB RAM — will finish very fast
 - Strategy quality will be poor (no flop-specific play) but proves pipeline works
-- Next: try ε=2.0 for ~20-50 clusters (sweet spot)
+### ε=5.0 Slumbot Result
+| Metric | Value |
+|---|---|
+| **Result** | **-2567.67 mbb/hand (-2.57 bb/hand)** |
+| **95% CI** | **[-3.06, -2.07] bb/hand** |
+| Training time | **81 min** (vs 6+ hours monolithic) |
+| Info sets | 162M (P0=64M, P1=98M) |
+| Subgames | 108 (1 flop cluster — too coarse) |
+
+Worse than monolithic (-1.1 to -1.3) as expected — 1 cluster = no flop differentiation.
+**But pipeline works end-to-end in 81 min.** Architecture validated.
+
+### ε=2.0 Launched (same instance)
+- Should produce ~20-80 flop clusters (sweet spot)
+- 108 × ~50 = ~5,400 subgames → ~100-150M entries → should fit in 128GB
 
 ### DCFR + RBP Implemented (not yet on cloud)
 - Discounted CFR: α=1.5, β=0.0, γ=2.0 (5-20x faster convergence)
