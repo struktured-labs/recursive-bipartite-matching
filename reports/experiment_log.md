@@ -113,10 +113,25 @@ for 15M+ training run.
 - 5M checkpoint in ~3.5 hours, 15M completion in ~12 hours
 - Instance cost so far: ~$75
 
-### Subgame Decomposition Built (not yet tested on cloud)
-- 964 lines, 10 tests, full 3-phase pipeline
-- Expected 10-50x speedup from cache-friendly 2MB subgames
-- Ready for cloud experiment after 15M result
+### Subgame Decomposition — RUNNING ON CLOUD
+
+Instance: i-0f070791b58564eff (18.209.20.136)
+
+| Phase | Status | Details |
+|---|---|---|
+| Blueprint | Done | 100K preflop iters, 3.3GB RAM |
+| Flop clustering | Done | **198 clusters** from 200 flops (ε=0.5) |
+| Preflop histories | Done | **108** histories reaching the flop |
+| Subgame training | **In Progress** | **21,384 subgames** (108×198), 15 parallel workers |
+| Slumbot eval | Pending | 25K hands after training |
+
+**Key numbers**: 21,384 subgames × 50K iters = **1.07 BILLION effective iterations**.
+RAM: **7.3GB** (was 35GB+ for monolithic at 5M iters). Each subgame ~2MB, fits in L3 cache.
+
+### DCFR + RBP Implemented (not yet on cloud)
+- Discounted CFR: α=1.5, β=0.0, γ=2.0 (5-20x faster convergence)
+- Regret-Based Pruning: skip actions with regret < -300M (saves traversal time)
+- Both orthogonal to decomposition — next cloud run combines all three
 
 ---
 
