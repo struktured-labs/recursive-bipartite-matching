@@ -1061,6 +1061,11 @@ let () =
   let rbm_epsilon = ref 0.5 in
   let bet_fracs_str = ref "" in
   let action_epsilon = ref 0.0 in
+  let decomposed = ref false in
+  let blueprint_iters = ref 100_000 in
+  let subgame_iters = ref 50_000 in
+  let subgame_epsilon = ref 0.5 in
+  let n_flops = ref 200 in
 
   let args = [
     ("--train", Arg.Set_int train_iters,
@@ -1101,6 +1106,16 @@ let () =
      "LIST  Comma-separated bet fractions (default: 0.5,1.0,2.0; expanded: 0.25,0.33,0.5,0.75,1.0,1.5,2.0)");
     ("--action-epsilon", Arg.Set_float action_epsilon,
      "FLOAT  Action abstraction epsilon (0 = disabled, >0 = precompute RBM action table from 12 candidates)");
+    ("--decomposed", Arg.Set decomposed,
+     "  Use subgame-decomposed training (10-50x faster, parallel subgames)");
+    ("--blueprint-iters", Arg.Set_int blueprint_iters,
+     "N  Blueprint preflop iterations for decomposed mode (default: 100000)");
+    ("--subgame-iters", Arg.Set_int subgame_iters,
+     "N  Per-subgame iterations for decomposed mode (default: 50000)");
+    ("--subgame-epsilon", Arg.Set_float subgame_epsilon,
+     "FLOAT  Flop clustering epsilon for decomposed mode (default: 0.5)");
+    ("--n-flops", Arg.Set_int n_flops,
+     "N  Number of sampled flops for clustering (default: 200)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-slumbot-client [--train N | --strategy FILE] [--hands N] [--mock] [--verbose]";
@@ -1169,6 +1184,43 @@ let () =
 
   (* Get strategy *)
   let (p0_strat, p1_strat) =
+    match !decomposed with
+    | true ->
+      eprintf "[slumbot] DECOMPOSED training: blueprint=%d, subgame=%d, epsilon=%.2f, flops=%d\n%!"
+        !blueprint_iters !subgame_iters !subgame_epsilon !n_flops;
+      let n_parallel =
+        match !num_domains > 0 with
+        | true -> Some !num_domains
+        | false -> None
+      in
+      let (ds, dec_time) = time (fun () ->
+        Subgame.train_decomposed ~config ~abstraction:preflop_abs
+          ~blueprint_iterations:!blueprint_iters
+          ~subgame_iterations:!subgame_iters
+          ~epsilon:!subgame_epsilon
+          ~bucket_method
+          ?num_parallel:n_parallel
+          ?action_table
+          ~n_flops:!n_flops
+          ())
+      in
+      let n_subgames = Hashtbl.length ds.subgame_strategies in
+      eprintf "[slumbot] Decomposed training complete in %.2fs. %d subgames.\n%!"
+        dec_time n_subgames;
+      (* For Slumbot play, merge all subgame strategies into flat tables.
+         This loses the decomposition benefit but lets us reuse the existing
+         play infrastructure. A proper implementation would do per-subgame lookup. *)
+      let p0 = Hashtbl.create (module Int64) in
+      let p1 = Hashtbl.create (module Int64) in
+      Hashtbl.iteri ds.preflop_p0 ~f:(fun ~key ~data -> Hashtbl.set p0 ~key ~data);
+      Hashtbl.iteri ds.preflop_p1 ~f:(fun ~key ~data -> Hashtbl.set p1 ~key ~data);
+      Hashtbl.iteri ds.subgame_strategies ~f:(fun ~key:_ ~data:(sg_p0, sg_p1) ->
+        Hashtbl.iteri sg_p0 ~f:(fun ~key ~data -> Hashtbl.set p0 ~key ~data);
+        Hashtbl.iteri sg_p1 ~f:(fun ~key ~data -> Hashtbl.set p1 ~key ~data));
+      eprintf "[slumbot] Merged strategies: P0=%d, P1=%d info sets\n%!"
+        (Hashtbl.length p0) (Hashtbl.length p1);
+      (p0, p1)
+    | false ->
     match String.length !strategy_file > 0 with
     | true ->
       eprintf "[slumbot] Loading NL strategy from %s\n%!" !strategy_file;
