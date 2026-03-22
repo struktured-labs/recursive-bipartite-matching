@@ -162,6 +162,13 @@ Worse than monolithic (-1.1 to -1.3) as expected — 1 cluster = no flop differe
 - 90GB at 35% → extrapolated 257GB → OOM at ~47%
 - Killed. Same root cause as ε=0.5: merge-into-memory defeats decomposition
 
+### ε=2.0 Relaunched with Disk-Based Persistence
+- Same config: 8 clusters, 864 subgames, 100K iters each
+- Subgame strategies saved to disk as files, not accumulated in memory
+- Memory: O(blueprint + 1 subgame) ≈ 10-20GB regardless of subgame count
+- Instance: i-0bcda99c5cab819af (54.147.24.242)
+- Estimated: ~2 hours to Slumbot result
+
 ### Root Cause Analysis
 The merge step in `train_decomposed` accumulates ALL subgame strategies into
 one global hash table. Each subgame with RBM bucketing creates ~50-100K info
