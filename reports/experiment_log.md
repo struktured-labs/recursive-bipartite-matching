@@ -106,6 +106,18 @@ by ~30 bytes → single-threaded should reach 15-20M before OOM.
 Rebuilding with full optimizations (merged tables + flattened arrays + pruning)
 for 15M+ training run.
 
+### 15M Full-Optimized Training (merged tables + flattened arrays + pruning)
+- **25% (3.72M/15M)**, 38GB/123GB RAM, 204M info sets
+- Extrapolated: ~70GB at 15M (old binary would have OOM'd at ~10M)
+- Rate: ~15K iter/min
+- 5M checkpoint in ~3.5 hours, 15M completion in ~12 hours
+- Instance cost so far: ~$75
+
+### Subgame Decomposition Built (not yet tested on cloud)
+- 964 lines, 10 tests, full 3-phase pipeline
+- Expected 10-50x speedup from cache-friendly 2MB subgames
+- Ready for cloud experiment after 15M result
+
 ---
 
 ## 2026-03-20 05:03 UTC — RBM Cloud Experiment Launched
