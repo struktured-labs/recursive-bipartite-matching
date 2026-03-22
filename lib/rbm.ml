@@ -31,3 +31,4 @@ module Action_subtree = Action_subtree
 module Action_abstraction = Action_abstraction
 module Cfr_pruning = Cfr_pruning
 module Flat_htbl = Flat_htbl
+module Subgame = Subgame
