@@ -140,6 +140,13 @@ RAM: **7.3GB** (was 35GB+ for monolithic at 5M iters). Each subgame ~2MB, fits i
 
 **Alternative**: Reduce subgame count. 198 flop clusters is too many (ε=0.5 barely merged anything). Use ε=2.0+ to get ~50 clusters → 108×50 = 5,400 subgames → ~120M entries → fits in 128GB.
 
+### Decomposed ε=5.0 — Running (i-0bcda99c5cab819af)
+- ε=5.0 collapsed ALL 200 flops into **1 cluster** (too aggressive)
+- Only **108 subgames** (one per preflop history), 100K iters each
+- 10/108 complete (9%), 8.5GB RAM — will finish very fast
+- Strategy quality will be poor (no flop-specific play) but proves pipeline works
+- Next: try ε=2.0 for ~20-50 clusters (sweet spot)
+
 ### DCFR + RBP Implemented (not yet on cloud)
 - Discounted CFR: α=1.5, β=0.0, γ=2.0 (5-20x faster convergence)
 - Regret-Based Pruning: skip actions with regret < -300M (saves traversal time)
