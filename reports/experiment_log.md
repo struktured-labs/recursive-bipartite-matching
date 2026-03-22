@@ -128,11 +128,17 @@ Instance: i-0f070791b58564eff (18.209.20.136)
 **Key numbers**: 21,384 subgames × 50K iters = **1.07 BILLION effective iterations**.
 RAM: **7.3GB** (was 35GB+ for monolithic at 5M iters). Each subgame ~2MB, fits in L3 cache.
 
-### RAM Race — Likely OOM
-- 116GB at 280 min wall time, 8.6GB free, growing +9GB/15min
-- The merge-into-memory approach is the problem: 21K subgames × ~20K info sets each = ~400M entries in one global table
-- Same OOM pattern as monolithic training, just from a different direction
-- **Fix**: write subgame strategies to disk, streaming merge, or fewer subgames
+### OOM CONFIRMED — Merge-Into-Memory Failed
+- Trained 21,384 subgames successfully (~5 hours, 15 cores)
+- OOM at 124GB during the merge phase (accumulating all strategies into one table)
+- 21K subgames × ~20K info sets = ~400M entries — same as monolithic, just accumulated differently
+- Exit code 137 (Killed)
+
+**Root cause**: The merge step defeats the decomposition. Each subgame is small (~2MB) but merging ALL of them into one global table recreates the monolithic memory problem.
+
+**Fix needed**: Don't merge. Write each subgame's strategy to a file as it completes. At play time, load only the relevant subgame on demand. Zero merge memory. The decomposition should be preserved end-to-end.
+
+**Alternative**: Reduce subgame count. 198 flop clusters is too many (ε=0.5 barely merged anything). Use ε=2.0+ to get ~50 clusters → 108×50 = 5,400 subgames → ~120M entries → fits in 128GB.
 
 ### DCFR + RBP Implemented (not yet on cloud)
 - Discounted CFR: α=1.5, β=0.0, γ=2.0 (5-20x faster convergence)
