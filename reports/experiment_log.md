@@ -92,11 +92,19 @@ Parallel (15 workers) still OOMs — 54GB at 34%, extrapolated 158GB.
 Killed and relaunched single-threaded. Int64 keys reduce per-entry overhead
 by ~30 bytes → single-threaded should reach 15-20M before OOM.
 
-### Optimized 5M Training Progress
-- **51% (2.56M/5M)**, 35GB/123GB RAM, 154M info sets
-- Extrapolated: ~38GB at 5M (was 63GB with old binary — **40% reduction**)
-- Rate: ~10K iter/min, ~40 min to checkpoint + 25K Slumbot eval
-- Additional optimizations committed (for next run): merged tables, flattened arrays, regret pruning, open-addressing hash table
+### Optimized 5M Result (Int64 keys + bitpacked cards)
+| Metric | Value |
+|---|---|
+| **Result** | **-1306.79 mbb/hand (-1.31 bb/hand)** |
+| **95% CI** | **[-1.64, -0.98] bb/hand** |
+| Significant | YES |
+| Info sets | P0=95.7M, P1=150.6M (246M total) |
+| Training time | 21,864s (6.1 hr) |
+| Peak RAM | 61GB (was 63GB old binary — 3% less, but 40% less at midpoint) |
+| Checkpoint | checkpoint_5M_5000000.dat (16GB, RBMCFR02 format) |
+
+Rebuilding with full optimizations (merged tables + flattened arrays + pruning)
+for 15M+ training run.
 
 ---
 
