@@ -1,6 +1,6 @@
 (library
  (name rbm)
  (public_name rbm)
- (libraries core domainslib)
+ (libraries core core_unix core_unix.sys_unix domainslib)
  (preprocess (pps ppx_jane))
  (flags :standard -open Core))

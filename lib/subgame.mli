@@ -29,15 +29,22 @@ type subgame_state = {
   mutable iteration_count : int;
 }
 
-(** Assembled decomposed strategy: a preflop blueprint plus per-subgame
-    postflop strategies. *)
+(** Disk-backed decomposed strategy: a preflop blueprint plus a directory
+    of per-subgame postflop strategy files.  Subgame strategies are loaded
+    on demand from disk, avoiding the OOM that occurs when all 864+
+    subgames are held in memory simultaneously. *)
 type decomposed_strategy = {
   preflop_p0 : Compact_cfr.strategy;
   preflop_p1 : Compact_cfr.strategy;
-  subgame_strategies : (string, Compact_cfr.strategy * Compact_cfr.strategy) Hashtbl.t;
-  (** Key = serialized subgame_key *)
+  subgame_dir : string;
+  (** Directory containing per-subgame strategy files.
+      Each file is named [sg_{preflop_history}_{flop_cluster}.bin]. *)
   flop_cluster_map : (string, int) Hashtbl.t;
   (** Key = canonical flop string, value = cluster index *)
+  preflop_histories : string list;
+  (** All preflop histories that reach the flop. *)
+  n_clusters : int;
+  (** Number of flop clusters. *)
 }
 
 (** [cluster_flops ~epsilon ~n_sample_hands ~config ()] clusters
@@ -90,6 +97,42 @@ val reconstruct_state
     suitable for use as a hash table key. *)
 val subgame_key_to_string : subgame_key -> string
 
+(** [subgame_filename key] returns the filename stem for a subgame's
+    strategy file: ["sg_{preflop_history}_{flop_cluster}.bin"]. *)
+val subgame_filename : subgame_key -> string
+
+(** [save_subgame_strategy ~dir ~key ~cfr_states] averages the strategy
+    from a trained CFR state pair and writes it to a file in [dir].
+    Each subgame gets its own file, so parallel workers can write
+    concurrently without contention. *)
+val save_subgame_strategy
+  :  dir:string
+  -> key:subgame_key
+  -> cfr_states:Compact_cfr.cfr_state array
+  -> unit
+
+(** [load_subgame_strategy ~dir ~key] loads a single subgame's averaged
+    strategy pair from disk.  Returns [None] if the file does not exist. *)
+val load_subgame_strategy
+  :  dir:string
+  -> key:subgame_key
+  -> (Compact_cfr.strategy * Compact_cfr.strategy) option
+
+(** [lookup_strategy ds ~round_idx ~preflop_history ~board info_key]
+    looks up action probabilities for a game state.  For preflop
+    (round_idx=0), uses the in-memory blueprint.  For postflop,
+    determines the subgame from [preflop_history] and [board], loads
+    the subgame strategy file from disk, and looks up the info set.
+    Returns [None] if the info set is not found. *)
+val lookup_strategy
+  :  decomposed_strategy
+  -> player:int
+  -> round_idx:int
+  -> preflop_history:string
+  -> board:Card.t list
+  -> Compact_cfr.info_key
+  -> float array option
+
 (** [train_subgame ~config ~abstraction ~key ~entry_state ~flop_boards
       ~iterations ~bucket_method ()] trains MCCFR within a single
     subgame.  Samples deals: random hole cards + random board from
@@ -116,9 +159,15 @@ val train_subgame
     - Phase 2: Cluster flops via RBM distance
     - Phase 3: For each (preflop_history, flop_cluster) pair,
       train_subgame in parallel (each subgame is independent,
-      fits in ~2MB)
+      fits in ~2MB).  Each completed subgame is saved to a
+      separate file on disk and freed from memory, preventing
+      OOM when the number of subgames is large.
 
-    Returns the assembled [decomposed_strategy]. *)
+    Returns a disk-backed [decomposed_strategy] with the
+    preflop blueprint in memory and subgame strategies on disk.
+
+    [~subgame_dir] specifies the output directory for subgame files
+    (default: ["subgame_strategies"]). *)
 val train_decomposed
   :  config:Nolimit_holdem.config
   -> abstraction:Abstraction.abstraction_partial
@@ -131,5 +180,6 @@ val train_decomposed
   -> ?n_flops:int
   -> ?n_sample_hands:int
   -> ?distance_config:Distance.config
+  -> ?subgame_dir:string
   -> unit
   -> decomposed_strategy

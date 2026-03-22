@@ -22,8 +22,10 @@ type subgame_state = {
 type decomposed_strategy = {
   preflop_p0 : Compact_cfr.strategy;
   preflop_p1 : Compact_cfr.strategy;
-  subgame_strategies : (string, Compact_cfr.strategy * Compact_cfr.strategy) Hashtbl.t;
+  subgame_dir : string;
   flop_cluster_map : (string, int) Hashtbl.t;
+  preflop_histories : string list;
+  n_clusters : int;
 }
 
 (* ------------------------------------------------------------------ *)
@@ -264,6 +266,61 @@ let subgame_key_to_string (key : subgame_key) : string =
   sprintf "%s|%d" key.preflop_history key.flop_cluster
 
 (* ------------------------------------------------------------------ *)
+(* Disk-backed subgame strategy I/O                                    *)
+(* ------------------------------------------------------------------ *)
+
+let subgame_filename (key : subgame_key) : string =
+  let hist =
+    match String.length key.preflop_history with
+    | 0 -> "empty"
+    | _ -> key.preflop_history
+  in
+  sprintf "sg_%s_%d.bin" hist key.flop_cluster
+
+(** Convert a strategy hashtable to a marshal-safe list of pairs.
+    Core.Hashtbl contains closures that Marshal cannot serialize,
+    so we extract the data as a plain list. *)
+let strategy_to_alist (strat : Compact_cfr.strategy)
+  : (Int64.t * float array) list =
+  Hashtbl.fold strat ~init:[] ~f:(fun ~key ~data acc ->
+    (key, data) :: acc)
+
+(** Reconstruct a strategy hashtable from a list of pairs. *)
+let strategy_of_alist (entries : (Int64.t * float array) list)
+  : Compact_cfr.strategy =
+  let tbl = Hashtbl.create ~size:(List.length entries) (module Int64) in
+  List.iter entries ~f:(fun (key, data) ->
+    Hashtbl.set tbl ~key ~data);
+  tbl
+
+(** Save one subgame's averaged strategy pair to disk.
+    Serializes as lists of [(Int64.t * float array)] to avoid
+    marshaling closures inside Core.Hashtbl. *)
+let save_subgame_strategy ~(dir : string) ~(key : subgame_key)
+    ~(cfr_states : Compact_cfr.cfr_state array) : unit =
+  let p0_avg = Compact_cfr.average_strategy cfr_states.(0) in
+  let p1_avg = Compact_cfr.average_strategy cfr_states.(1) in
+  let p0_list = strategy_to_alist p0_avg in
+  let p1_list = strategy_to_alist p1_avg in
+  let filename = Filename.concat dir (subgame_filename key) in
+  Out_channel.with_file filename ~f:(fun oc ->
+    Marshal.to_channel oc (p0_list, p1_list) [])
+
+(** Load one subgame's averaged strategy pair from disk. *)
+let load_subgame_strategy ~(dir : string) ~(key : subgame_key)
+  : (Compact_cfr.strategy * Compact_cfr.strategy) option =
+  let filename = Filename.concat dir (subgame_filename key) in
+  match Sys_unix.file_exists filename with
+  | `Yes ->
+    let (p0_list, p1_list) :
+      (Int64.t * float array) list * (Int64.t * float array) list =
+      In_channel.with_file filename ~f:(fun ic ->
+        Marshal.from_channel ic)
+    in
+    Some (strategy_of_alist p0_list, strategy_of_alist p1_list)
+  | `No | `Unknown -> None
+
+(* ------------------------------------------------------------------ *)
 (* Reconstruct state from preflop history                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -497,6 +554,37 @@ let flop_to_cluster ~(cluster_map : (string, int) Hashtbl.t)
     0
 
 (* ------------------------------------------------------------------ *)
+(* Strategy lookup (disk-backed)                                       *)
+(* ------------------------------------------------------------------ *)
+
+(** Look up action probabilities for a game state.  Preflop decisions
+    use the in-memory blueprint; postflop decisions load the relevant
+    subgame from disk. *)
+let lookup_strategy (ds : decomposed_strategy) ~(player : int)
+    ~(round_idx : int) ~(preflop_history : string) ~(board : Card.t list)
+    (info_key : Compact_cfr.info_key) : float array option =
+  match round_idx with
+  | 0 ->
+    let strat =
+      match player with
+      | 0 -> ds.preflop_p0
+      | _ -> ds.preflop_p1
+    in
+    Hashtbl.find strat info_key
+  | _ ->
+    let cluster = flop_to_cluster ~cluster_map:ds.flop_cluster_map ~board in
+    let key = { preflop_history; flop_cluster = cluster } in
+    (match load_subgame_strategy ~dir:ds.subgame_dir ~key with
+     | None -> None
+     | Some (p0, p1) ->
+       let strat =
+         match player with
+         | 0 -> p0
+         | _ -> p1
+       in
+       Hashtbl.find strat info_key)
+
+(* ------------------------------------------------------------------ *)
 (* Sample a deal consistent with a flop cluster                        *)
 (* ------------------------------------------------------------------ *)
 
@@ -600,8 +688,14 @@ let train_decomposed ~(config : Nolimit_holdem.config)
     ?(n_flops = 200)
     ?(n_sample_hands = 5)
     ?(distance_config = Distance.default_config)
+    ?(subgame_dir = "subgame_strategies")
     ()
   : decomposed_strategy =
+  (* ---- Create output directory ---- *)
+  (match Sys_unix.file_exists subgame_dir with
+   | `Yes -> ()
+   | `No | `Unknown -> Core_unix.mkdir_p subgame_dir);
+
   (* ---- Phase 1: Train preflop blueprint ---- *)
   printf "[subgame] Phase 1: Training preflop blueprint (%d iterations) ...\n%!"
     blueprint_iterations;
@@ -637,8 +731,8 @@ let train_decomposed ~(config : Nolimit_holdem.config)
   let n_histories = List.length histories in
   printf "[subgame] Found %d preflop histories reaching the flop.\n%!" n_histories;
   let n_subgames = n_histories * n_clusters in
-  printf "[subgame] Phase 3: Training %d subgames (%d histories x %d clusters) ...\n%!"
-    n_subgames n_histories n_clusters;
+  printf "[subgame] Phase 3: Training %d subgames (%d histories x %d clusters), saving to %s ...\n%!"
+    n_subgames n_histories n_clusters subgame_dir;
 
   (* Build the list of all (key, entry_state, flop_boards) triples *)
   let subgame_specs = ref [] in
@@ -650,10 +744,7 @@ let train_decomposed ~(config : Nolimit_holdem.config)
   let specs = Array.of_list (List.rev !subgame_specs) in
   let n_specs = Array.length specs in
 
-  (* Train subgames in parallel *)
-  let subgame_results = Array.create ~len:n_specs
-    [| Compact_cfr.create ~size:1 (); Compact_cfr.create ~size:1 () |]
-  in
+  (* Train subgames in parallel — save each to disk and release memory *)
   let completed = Atomic.make 0 in
   let num_workers = Int.max 1 (Int.min num_parallel n_specs) in
   printf "[subgame] Starting %d parallel workers for %d subgames ...\n%!"
@@ -667,7 +758,9 @@ let train_decomposed ~(config : Nolimit_holdem.config)
         let cfr_pair = train_subgame ~config ~abstraction ~key:sg_key
             ~entry_state ~flop_boards ~iterations:subgame_iterations
             ~bucket_method ?action_table () in
-        subgame_results.(i) <- cfr_pair;
+        (* Save averaged strategy to disk — each worker writes a unique file *)
+        save_subgame_strategy ~dir:subgame_dir ~key:sg_key ~cfr_states:cfr_pair;
+        (* cfr_pair goes out of scope here — GC can reclaim it *)
         let done_count = Atomic.fetch_and_add completed 1 + 1 in
         (match done_count % (Int.max 1 (n_specs / 10)) = 0 with
          | true ->
@@ -676,23 +769,15 @@ let train_decomposed ~(config : Nolimit_holdem.config)
              (100.0 *. Float.of_int done_count /. Float.of_int n_specs)
          | false -> ())));
   Domainslib.Task.teardown_pool pool;
-  printf "[subgame] All %d subgames trained.\n%!" n_specs;
+  printf "[subgame] All %d subgames trained and saved to %s.\n%!" n_specs subgame_dir;
 
-  (* Assemble decomposed strategy *)
-  let subgame_strategies = Hashtbl.create (module String) ~size:n_specs in
-  Array.iteri specs ~f:(fun i (sg_key, _, _) ->
-    let cfr_pair = subgame_results.(i) in
-    let p0_avg = Compact_cfr.average_strategy cfr_pair.(0) in
-    let p1_avg = Compact_cfr.average_strategy cfr_pair.(1) in
-    let str_key = subgame_key_to_string sg_key in
-    Hashtbl.set subgame_strategies ~key:str_key ~data:(p0_avg, p1_avg));
-
-  printf "[subgame] Decomposed strategy assembled: %d preflop info sets, %d subgames.\n%!"
-    (Hashtbl.length preflop_p0 + Hashtbl.length preflop_p1)
-    (Hashtbl.length subgame_strategies);
+  printf "[subgame] Decomposed strategy: %d preflop info sets, %d subgame files on disk.\n%!"
+    (Hashtbl.length preflop_p0 + Hashtbl.length preflop_p1) n_specs;
 
   { preflop_p0
   ; preflop_p1
-  ; subgame_strategies
+  ; subgame_dir
   ; flop_cluster_map
+  ; preflop_histories = histories
+  ; n_clusters
   }

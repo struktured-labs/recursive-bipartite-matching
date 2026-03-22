@@ -93,3 +93,57 @@ let%test_unit "cluster_flops_basic" =
     assert (cid >= 0));
   (* At most n_flops entries *)
   assert (List.length result <= 10)
+
+(* ================================================================ *)
+(* Disk-backed subgame strategy tests                                *)
+(* ================================================================ *)
+
+(* subgame_filename produces expected filenames. *)
+let%test_unit "subgame_filename_normal" =
+  let key : Subgame.subgame_key = { preflop_history = "cc"; flop_cluster = 3 } in
+  [%test_eq: string] (Subgame.subgame_filename key) "sg_cc_3.bin"
+
+let%test_unit "subgame_filename_empty_history" =
+  let key : Subgame.subgame_key = { preflop_history = ""; flop_cluster = 0 } in
+  [%test_eq: string] (Subgame.subgame_filename key) "sg_empty_0.bin"
+
+(* save_subgame_strategy + load_subgame_strategy round-trip. *)
+let%test_unit "save_load_subgame_strategy_roundtrip" =
+  let dir = "tmp/test_subgame_io" in
+  Core_unix.mkdir_p dir;
+  let key : Subgame.subgame_key = { preflop_history = "cc"; flop_cluster = 1 } in
+  (* Create a dummy cfr_state pair with known entries *)
+  let cfr_states = [|
+    Compact_cfr.create ~size:10 ();
+    Compact_cfr.create ~size:10 ();
+  |] in
+  (* Add a few entries to P0 *)
+  let info_key = Compact_cfr.make_info_key ~buckets:[|5;10;15;20|]
+      ~round_idx:1 ~history:"cc/kk" in
+  let entry : Compact_cfr.cfr_entry = {
+    data = [| 1.0; 2.0; 3.0; 10.0; 20.0; 30.0 |];
+    n_actions = 3;
+  } in
+  Hashtbl.set cfr_states.(0).entries ~key:info_key ~data:entry;
+  (* Save *)
+  Subgame.save_subgame_strategy ~dir ~key ~cfr_states;
+  (* Load *)
+  let result = Subgame.load_subgame_strategy ~dir ~key in
+  assert (Option.is_some result);
+  let (p0, _p1) = Option.value_exn result in
+  (* Verify the averaged strategy was saved correctly *)
+  let probs = Hashtbl.find_exn p0 info_key in
+  (* strategy sums are [10, 20, 30], total=60, so probs = [1/6, 2/6, 3/6] *)
+  let expected = [| 10.0 /. 60.0; 20.0 /. 60.0; 30.0 /. 60.0 |] in
+  Array.iteri probs ~f:(fun i p ->
+    assert (Float.( < ) (Float.abs (p -. expected.(i))) 1e-6))
+
+(* load_subgame_strategy returns None for missing file. *)
+let%test_unit "load_subgame_strategy_missing_returns_none" =
+  let dir = "tmp/test_subgame_io_missing" in
+  Core_unix.mkdir_p dir;
+  let key : Subgame.subgame_key =
+    { preflop_history = "nonexistent"; flop_cluster = 99 }
+  in
+  let result = Subgame.load_subgame_strategy ~dir ~key in
+  assert (Option.is_none result)

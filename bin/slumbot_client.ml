@@ -797,6 +797,17 @@ let api_act ~(mode : api_mode) ~(token : string) ~(incr : string) =
   | Mock -> Mock_slumbot.act ~token ~incr
 
 (* ------------------------------------------------------------------ *)
+(* Decomposed strategy on-demand loader                                *)
+(* ------------------------------------------------------------------ *)
+
+(** When set, this function is called before each postflop action to
+    ensure the correct subgame strategy is loaded into the flat tables.
+    Set by the decomposed training path in the entry point. *)
+let decomposed_loader
+  : (board:Card.t list -> action:string -> unit) option ref
+  = ref None
+
+(* ------------------------------------------------------------------ *)
 (* Hand player                                                         *)
 (* ------------------------------------------------------------------ *)
 
@@ -880,6 +891,10 @@ let play_hand
           | false -> ());
          (Some token, 0)
        | true ->
+         (* If decomposed mode, load the relevant subgame before lookup *)
+         (match !decomposed_loader with
+          | Some loader -> loader ~board ~action
+          | None -> ());
          let (incr, key, probs) =
            select_slumbot_action
              ~p0_strat ~p1_strat ~abstraction
@@ -1204,22 +1219,86 @@ let () =
           ~n_flops:!n_flops
           ())
       in
-      let n_subgames = Hashtbl.length ds.subgame_strategies in
-      eprintf "[slumbot] Decomposed training complete in %.2fs. %d subgames.\n%!"
-        dec_time n_subgames;
-      (* For Slumbot play, merge all subgame strategies into flat tables.
-         This loses the decomposition benefit but lets us reuse the existing
-         play infrastructure. A proper implementation would do per-subgame lookup. *)
-      let p0 = Hashtbl.create (module Int64) in
-      let p1 = Hashtbl.create (module Int64) in
-      Hashtbl.iteri ds.preflop_p0 ~f:(fun ~key ~data -> Hashtbl.set p0 ~key ~data);
-      Hashtbl.iteri ds.preflop_p1 ~f:(fun ~key ~data -> Hashtbl.set p1 ~key ~data);
-      Hashtbl.iteri ds.subgame_strategies ~f:(fun ~key:_ ~data:(sg_p0, sg_p1) ->
-        Hashtbl.iteri sg_p0 ~f:(fun ~key ~data -> Hashtbl.set p0 ~key ~data);
-        Hashtbl.iteri sg_p1 ~f:(fun ~key ~data -> Hashtbl.set p1 ~key ~data));
-      eprintf "[slumbot] Merged strategies: P0=%d, P1=%d info sets\n%!"
-        (Hashtbl.length p0) (Hashtbl.length p1);
-      (p0, p1)
+      let n_subgames = ds.n_clusters * List.length ds.preflop_histories in
+      eprintf "[slumbot] Decomposed training complete in %.2fs. %d subgames on disk (%s).\n%!"
+        dec_time n_subgames ds.subgame_dir;
+      (* For play: start with preflop blueprint in flat tables.
+         Before each postflop decision, load the relevant subgame
+         from disk and merge it in (evicting the previous subgame).
+         Peak memory: preflop blueprint + 1 subgame. *)
+      let p0_flat = Hashtbl.copy ds.preflop_p0 in
+      let p1_flat = Hashtbl.copy ds.preflop_p1 in
+      let loaded_sg_key = ref "" in
+      let loaded_p0_keys : Int64.t list ref = ref [] in
+      let loaded_p1_keys : Int64.t list ref = ref [] in
+      let cached_sg_key = ref "" in
+      let cached_sg : (Compact_cfr.strategy * Compact_cfr.strategy) ref =
+        ref (Hashtbl.create (module Int64) ~size:0,
+             Hashtbl.create (module Int64) ~size:0)
+      in
+      (* Hook into the global decomposed_loader ref so that
+         select_slumbot_action can trigger on-demand loading. *)
+      decomposed_loader := Some (fun ~board ~action ->
+        let a_state = parse_slumbot_action action in
+        match a_state.street with
+        | 0 -> ()  (* preflop — flat tables already have the blueprint *)
+        | _ ->
+          let internal_history = slumbot_action_to_internal_history action in
+          let preflop_history =
+            match String.substr_index internal_history ~pattern:"/" with
+            | Some idx -> String.prefix internal_history idx
+            | None -> internal_history
+          in
+          let cluster =
+            Subgame.flop_to_cluster ~cluster_map:ds.flop_cluster_map ~board
+          in
+          let sg_key : Subgame.subgame_key =
+            { preflop_history; flop_cluster = cluster }
+          in
+          let str_key = Subgame.subgame_key_to_string sg_key in
+          match String.equal !loaded_sg_key str_key with
+          | true -> ()  (* already loaded *)
+          | false ->
+            (* Evict previous subgame entries *)
+            List.iter !loaded_p0_keys ~f:(Hashtbl.remove p0_flat);
+            List.iter !loaded_p1_keys ~f:(Hashtbl.remove p1_flat);
+            (* Load subgame (with single-entry cache) *)
+            let (sg_p0, sg_p1) =
+              match String.equal !cached_sg_key str_key with
+              | true -> !cached_sg
+              | false ->
+                let pair =
+                  match Subgame.load_subgame_strategy ~dir:ds.subgame_dir ~key:sg_key with
+                  | Some p -> p
+                  | None ->
+                    (Hashtbl.create (module Int64) ~size:0,
+                     Hashtbl.create (module Int64) ~size:0)
+                in
+                cached_sg_key := str_key;
+                cached_sg := pair;
+                pair
+            in
+            (* Merge subgame entries into flat tables *)
+            let new_p0_keys = ref [] in
+            let new_p1_keys = ref [] in
+            Hashtbl.iteri sg_p0 ~f:(fun ~key ~data ->
+              match Hashtbl.mem ds.preflop_p0 key with
+              | true -> ()
+              | false ->
+                Hashtbl.set p0_flat ~key ~data;
+                new_p0_keys := key :: !new_p0_keys);
+            Hashtbl.iteri sg_p1 ~f:(fun ~key ~data ->
+              match Hashtbl.mem ds.preflop_p1 key with
+              | true -> ()
+              | false ->
+                Hashtbl.set p1_flat ~key ~data;
+                new_p1_keys := key :: !new_p1_keys);
+            loaded_sg_key := str_key;
+            loaded_p0_keys := !new_p0_keys;
+            loaded_p1_keys := !new_p1_keys);
+      eprintf "[slumbot] Decomposed strategy ready: preflop P0=%d P1=%d, subgames loaded on demand from %s.\n%!"
+        (Hashtbl.length p0_flat) (Hashtbl.length p1_flat) ds.subgame_dir;
+      (p0_flat, p1_flat)
     | false ->
     match String.length !strategy_file > 0 with
     | true ->
