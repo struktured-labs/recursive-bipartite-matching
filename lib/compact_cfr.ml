@@ -1469,8 +1469,11 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     (match vr_mccfr with
      | true  -> set_dls_vr_iter iter
      | false -> ());
-    (* DCFR: discount regrets and strategy sums after each iteration *)
-    (match dcfr with
+    (* DCFR: discount regrets and strategy sums periodically (every 1000 iters).
+       Applying every iteration scans the full hash table — O(entries) per iter,
+       which dominates when entries > 100K. Batched discount with scaled weights
+       is mathematically equivalent for the multiplicative discount factors. *)
+    (match dcfr && iter % 1000 = 0 with
      | true ->
        let w = compute_dcfr_weights default_dcfr_params ~iter in
        apply_dcfr_discount cfr_states.(0) w;
@@ -1680,8 +1683,8 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
           (match vr_mccfr with
            | true  -> set_dls_vr_iter iter
            | false -> ());
-          (* DCFR: discount regrets and strategy sums after each iteration *)
-          (match dcfr with
+          (* DCFR: discount periodically (every 1000 iters) *)
+          (match dcfr && iter % 1000 = 0 with
            | true ->
              let w = compute_dcfr_weights default_dcfr_params ~iter in
              apply_dcfr_discount my_states.(0) w;

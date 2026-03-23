@@ -684,8 +684,8 @@ let train_subgame ~(config : Nolimit_holdem.config)
      | false -> ());
     let _value = Compact_cfr.mccfr_traverse ~config ~p1_cards ~p2_cards ~board
         ~p1_buckets ~p2_buckets ~history ~state ~traverser ~cfr_states in
-    (* Apply DCFR discounting *)
-    (match dcfr with
+    (* Apply DCFR discounting periodically *)
+    (match dcfr && iter % 1000 = 0 with
      | true ->
        let weights = Compact_cfr.compute_dcfr_weights
          Compact_cfr.default_dcfr_params ~iter in
