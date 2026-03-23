@@ -1081,6 +1081,7 @@ let () =
   let subgame_iters = ref 50_000 in
   let subgame_epsilon = ref 0.5 in
   let n_flops = ref 200 in
+  let vr_mccfr = ref false in
 
   let args = [
     ("--train", Arg.Set_int train_iters,
@@ -1131,6 +1132,8 @@ let () =
      "FLOAT  Flop clustering epsilon for decomposed mode (default: 0.5)");
     ("--n-flops", Arg.Set_int n_flops,
      "N  Number of sampled flops for clustering (default: 200)");
+    ("--vr-mccfr", Arg.Set vr_mccfr,
+     "  Enable Variance-Reduced MCCFR (Schmid et al., AAAI 2019)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-slumbot-client [--train N | --strategy FILE] [--hands N] [--mock] [--verbose]";
@@ -1334,6 +1337,7 @@ let () =
               ~checkpoint_prefix:!checkpoint_prefix
               ~bucket_method
               ?action_table
+              ~vr_mccfr:!vr_mccfr
               ?resume_from ?num_domains:n_domains ()
           | false ->
             Compact_cfr.train_mccfr ~config ~abstraction:preflop_abs
@@ -1342,6 +1346,7 @@ let () =
               ~checkpoint_prefix:!checkpoint_prefix
               ~bucket_method
               ?action_table
+              ~vr_mccfr:!vr_mccfr
               ?resume_from ())
         in
         eprintf "[slumbot] Training complete in %.2fs. P0: %d, P1: %d info sets\n%!"

@@ -36,6 +36,44 @@ type cfr_state = {
     to [size] entries.  Default [size] is 1_000_000. *)
 val create : ?size:int -> unit -> cfr_state
 
+(* ------------------------------------------------------------------ *)
+(* Variance-Reduced MCCFR (VR-MCCFR+)                                 *)
+(* Schmid et al., AAAI 2019                                            *)
+(* ------------------------------------------------------------------ *)
+
+(** Per-info-set baseline table for VR-MCCFR: maps [info_key] to
+    per-action baseline estimates (exponential moving averages of
+    observed counterfactual values).  Baselines are training-time only
+    and are NOT saved in checkpoints. *)
+type vr_baselines = (Int64.t, float array) Hashtbl.t
+
+(** [create_baselines ~size ()] returns a fresh baseline table
+    pre-sized to [size] entries.  Default [size] is 100_000. *)
+val create_baselines : ?size:int -> unit -> vr_baselines
+
+(** [get_baseline baselines key ~n_actions] returns the per-action
+    baseline array for [key], lazily creating a zero-filled array
+    of length [n_actions] if not present. *)
+val get_baseline : vr_baselines -> info_key -> n_actions:int -> float array
+
+(** [update_baseline baseline observed ~alpha] moves the baseline
+    towards [observed] using exponential moving average:
+    baseline[i] <- (1 - alpha) * baseline[i] + alpha * observed[i]. *)
+val update_baseline : float array -> float array -> alpha:float -> unit
+
+(** [get_dls_baselines ()] returns the domain-local VR baselines.
+    Returns [None] when VR-MCCFR is disabled.  Each OCaml 5 domain
+    has its own independent baselines. *)
+val get_dls_baselines : unit -> vr_baselines array option
+
+(** [set_dls_baselines v] sets the domain-local VR baselines. *)
+val set_dls_baselines : vr_baselines array option -> unit
+
+(** [find_or_add_entry state key ~num_actions] looks up the CFR entry
+    for [key], creating a zero-filled entry if absent.  Exposed for
+    testing. *)
+val find_or_add_entry : cfr_state -> info_key -> num_actions:int -> cfr_entry
+
 (** [entry_regret entry i] returns [entry.data.(i)] (the i-th regret). *)
 val entry_regret : cfr_entry -> int -> float
 
@@ -117,6 +155,10 @@ val create_postflop_state : unit -> postflop_state
     [~prune_threshold] enables per-action Regret-Based Pruning (RBP): during
     traversal, actions with cumulative regret below this threshold are skipped
     (default -300_000_000; pass [Float.infinity] to disable).
+    [~vr_mccfr] enables Variance-Reduced MCCFR (Schmid et al., AAAI 2019):
+    maintains per-info-set baselines that absorb value fluctuations, yielding
+    the same expected regret updates with dramatically lower variance (default
+    false).  Baselines use a harmonic EMA schedule (alpha = 1/(iter+1)).
     Returns (p1_average_strategy, p2_average_strategy).
     Prints convergence diagnostics every [~report_every] iterations. *)
 val train_mccfr
@@ -132,6 +174,7 @@ val train_mccfr
   -> ?action_table:Action_abstraction.t
   -> ?dcfr:bool
   -> ?prune_threshold:float
+  -> ?vr_mccfr:bool
   -> unit
   -> strategy * strategy
 
@@ -263,6 +306,9 @@ val merge_cfr_state_into : dst:cfr_state -> src:cfr_state -> unit
     states are merged by summing regret_sum and strategy_sum values
     (valid because MCCFR regret/strategy sums are additive).
 
+    When [~vr_mccfr:true], each domain creates independent baseline
+    tables via [Domain.DLS], avoiding cross-domain data races.
+
     Parameters are identical to {!train_mccfr} with the addition of:
     - [~num_domains] -- number of worker domains (default: CPU count - 1)
 
@@ -281,5 +327,6 @@ val train_mccfr_parallel
   -> ?action_table:Action_abstraction.t
   -> ?dcfr:bool
   -> ?prune_threshold:float
+  -> ?vr_mccfr:bool
   -> unit
   -> strategy * strategy

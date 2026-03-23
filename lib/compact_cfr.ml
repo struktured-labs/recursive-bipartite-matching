@@ -28,6 +28,60 @@ let create ?(size = 1_000_000) () =
   { entries = Hashtbl.create ~size (module Int64) }
 
 (* ------------------------------------------------------------------ *)
+(* Variance-Reduced MCCFR (VR-MCCFR+)                                 *)
+(* Schmid et al., "Variance Reduction in Monte Carlo Counterfactual    *)
+(* Regret Minimization", AAAI 2019.                                    *)
+(* ------------------------------------------------------------------ *)
+
+(** Per-info-set baseline table: maps info_key -> per-action baseline
+    estimates (exponential moving averages of observed counterfactual
+    values).  Separate from cfr_state to avoid breaking checkpoints. *)
+type vr_baselines = (Int64.t, float array) Hashtbl.t
+
+let create_baselines ?(size = 100_000) () : vr_baselines =
+  Hashtbl.create ~size (module Int64)
+
+(** Look up (or lazily create) the baseline array for [key]. *)
+let get_baseline (baselines : vr_baselines) (key : info_key)
+    ~(n_actions : int) : float array =
+  Hashtbl.find_or_add baselines key
+    ~default:(fun () -> Array.create ~len:n_actions 0.0)
+
+(** Update baseline towards observed counterfactual values using EMA:
+    baseline[a] <- (1 - alpha) * baseline[a] + alpha * observed[a] *)
+let update_baseline (baseline : float array) (observed : float array)
+    ~(alpha : float) : unit =
+  Array.iteri baseline ~f:(fun i b ->
+    baseline.(i) <- (1.0 -. alpha) *. b +. alpha *. observed.(i))
+
+(** Domain-local baselines — each OCaml 5 domain gets its own per-player
+    baseline tables (via [Domain.DLS]).  This is safe for parallel training
+    since no two domains share the same mutable baseline arrays.
+    [None] disables VR-MCCFR; [Some [| p0_bl; p1_bl |]] enables it. *)
+let dls_baselines : vr_baselines array option Domain.DLS.key =
+  Domain.DLS.new_key (fun () -> None)
+
+(** Domain-local VR-MCCFR iteration counter (for harmonic alpha). *)
+let dls_vr_iter : int Domain.DLS.key =
+  Domain.DLS.new_key (fun () -> 0)
+
+(** Convenience accessor: get domain-local baselines. *)
+let get_dls_baselines () : vr_baselines array option =
+  Domain.DLS.get dls_baselines
+
+(** Convenience accessor: get domain-local VR iteration counter. *)
+let get_dls_vr_iter () : int =
+  Domain.DLS.get dls_vr_iter
+
+(** Set domain-local baselines for the current domain. *)
+let set_dls_baselines (v : vr_baselines array option) : unit =
+  Domain.DLS.set dls_baselines v
+
+(** Set domain-local VR iteration counter for the current domain. *)
+let set_dls_vr_iter (v : int) : unit =
+  Domain.DLS.set dls_vr_iter v
+
+(* ------------------------------------------------------------------ *)
 (* cfr_entry accessors                                                 *)
 (* ------------------------------------------------------------------ *)
 
@@ -835,11 +889,41 @@ and handle_decision ~(player : int) ~(traverser : int) ~(cfr_st : cfr_state)
       acc +. strat.(i) *. v)
     in
     let entry = find_or_add_entry cfr_st key ~num_actions in
-    Array.iteri action_values ~f:(fun i v ->
-      match pruned.(i) with
-      | true  -> ()  (* Leave pruned action regrets unchanged *)
-      | false ->
-        set_entry_regret entry i (entry_regret entry i +. (v -. node_value)));
+    (* VR-MCCFR+: when baselines are available, subtract per-action
+       baselines from counterfactual values before computing regret
+       updates.  This is mathematically equivalent (unbiased) to
+       standard MCCFR but dramatically reduces variance.
+       See Schmid et al., AAAI 2019. *)
+    (match get_dls_baselines () with
+     | Some bl_arr ->
+       let bl = get_baseline bl_arr.(player) key ~n_actions:num_actions in
+       (* Compute variance-reduced node value:
+          vr_node_value = sum_j(strat[j] * (cfv[j] - baseline[j])) *)
+       let vr_node_value = ref 0.0 in
+       for i = 0 to num_actions - 1 do
+         vr_node_value := !vr_node_value
+           +. strat.(i) *. (action_values.(i) -. bl.(i))
+       done;
+       (* Variance-reduced regret update:
+          regret[a] += (cfv[a] - baseline[a]) - vr_node_value *)
+       Array.iteri action_values ~f:(fun i v ->
+         match pruned.(i) with
+         | true  -> ()
+         | false ->
+           let vr_regret = (v -. bl.(i)) -. !vr_node_value in
+           set_entry_regret entry i (entry_regret entry i +. vr_regret));
+       (* Update baselines towards observed cfvs using harmonic EMA:
+          alpha = 1 / (iter + 1) *)
+       let alpha = 1.0 /. Float.of_int (get_dls_vr_iter () + 1) in
+       update_baseline bl action_values ~alpha
+     | None ->
+       (* Standard MCCFR regret update *)
+       Array.iteri action_values ~f:(fun i v ->
+         match pruned.(i) with
+         | true  -> ()
+         | false ->
+           set_entry_regret entry i (entry_regret entry i +. (v -. node_value))));
+    (* MCCFR+: floor negative regrets to zero *)
     for i = 0 to num_actions - 1 do
       match Float.( < ) (entry_regret entry i) 0.0 with
       | true  -> set_entry_regret entry i 0.0
@@ -1232,6 +1316,7 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     ?(action_table : Action_abstraction.t option)
     ?(dcfr = false)
     ?(prune_threshold = -300_000_000.0)
+    ?(vr_mccfr = false)
     ()
   : strategy * strategy =
   global_action_table := action_table;
@@ -1239,6 +1324,17 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     (match Float.is_finite prune_threshold with
      | true  -> Some prune_threshold
      | false -> None);
+  (* VR-MCCFR+: create per-player baseline tables when enabled *)
+  (match vr_mccfr with
+   | true ->
+     set_dls_baselines
+       (Some [| create_baselines ~size:initial_size ()
+              ; create_baselines ~size:initial_size ()
+              |]);
+     set_dls_vr_iter 0;
+     printf "  [VR-MCCFR+] enabled (harmonic baseline schedule)\n%!"
+   | false ->
+     set_dls_baselines None);
   (match action_table with
    | Some tbl ->
      printf "  [Action table] %d contexts, %.1f avg bet sizes\n%!"
@@ -1316,6 +1412,10 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     let value = mccfr_traverse ~config ~p1_cards ~p2_cards ~board
         ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser ~cfr_states in
     util_sum := !util_sum +. value;
+    (* VR-MCCFR+: advance the iteration counter for harmonic alpha *)
+    (match vr_mccfr with
+     | true  -> set_dls_vr_iter iter
+     | false -> ());
     (* DCFR: discount regrets and strategy sums after each iteration *)
     (match dcfr with
      | true ->
@@ -1343,6 +1443,7 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     prune_periodically_inline ~every:500_000 ~iter cfr_states.(1)
   done;
   global_prune_threshold := None;
+  set_dls_baselines None;
   let p0_avg = average_strategy cfr_states.(0) in
   let p1_avg = average_strategy cfr_states.(1) in
   (p0_avg, p1_avg)
@@ -1389,6 +1490,7 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
     ?(action_table : Action_abstraction.t option)
     ?(dcfr = false)
     ?(prune_threshold = -300_000_000.0)
+    ?(vr_mccfr = false)
     ()
   : strategy * strategy =
   global_action_table := action_table;
@@ -1399,6 +1501,9 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
   let num_workers = Int.max 1 num_domains in
   printf "  [Parallel-MCCFR] Starting %d domains, %d iterations total\n%!"
     num_workers iterations;
+  (match vr_mccfr with
+   | true  -> printf "  [VR-MCCFR+] enabled (harmonic baseline schedule, per-domain)\n%!"
+   | false -> ());
   (match dcfr with
    | true ->
      let p = default_dcfr_params in
@@ -1451,6 +1556,16 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
         Random.self_init ();
         let my_states = worker_states.(worker_id) in
         let my_iters = worker_iters.(worker_id) in
+        (* VR-MCCFR+: each domain gets its own baseline tables via DLS *)
+        (match vr_mccfr with
+         | true ->
+           set_dls_baselines
+             (Some [| create_baselines ~size:initial_size ()
+                    ; create_baselines ~size:initial_size ()
+                    |]);
+           set_dls_vr_iter 0
+         | false ->
+           set_dls_baselines None);
         (* Each worker gets its own postflop cluster state (mutable, not shared) *)
         let my_postflop =
           match bucket_method with
@@ -1497,6 +1612,10 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
               ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser
               ~cfr_states:my_states in
           local_util_sum := !local_util_sum +. value;
+          (* VR-MCCFR+: advance the domain-local iteration counter *)
+          (match vr_mccfr with
+           | true  -> set_dls_vr_iter iter
+           | false -> ());
           (* DCFR: discount regrets and strategy sums after each iteration *)
           (match dcfr with
            | true ->
@@ -1516,6 +1635,8 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
           prune_periodically_inline ~every:500_000 ~iter my_states.(0);
           prune_periodically_inline ~every:500_000 ~iter my_states.(1)
         done;
+        (* Clean up domain-local baselines *)
+        set_dls_baselines None;
         worker_utils.(worker_id) <- !local_util_sum));
   Domainslib.Task.teardown_pool pool;
   global_prune_threshold := None;
