@@ -11,10 +11,11 @@ pub mod info_key;
 pub mod cfr_state;
 pub mod actions;
 
+pub mod hand_eval;
+pub mod traversal;
+
 // Phase 2 (TODO):
-// pub mod hand_eval;    // Two Plus Two lookup table
 // pub mod buckets;      // Equity-based bucket computation
-// pub mod traversal;    // mccfr_traverse, handle_decision
 // pub mod checkpoint;   // RBMCFR02 format read/write
 
 #[cfg(test)]
