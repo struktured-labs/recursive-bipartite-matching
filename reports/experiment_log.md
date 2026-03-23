@@ -167,10 +167,19 @@ Worse than monolithic (-1.1 to -1.3) as expected — 1 cluster = no flop differe
 - Training: 13,160s (3.7 hr), 26GB peak RAM, disk persistence flawless
 - 324 subgame files on disk, loaded on demand during play
 - **Slumbot eval running**: 1,030/25,000 hands, running avg **-1081 mbb/hand**
-- At 5,750/25K hands: **-2189 mbb/hand** — settling around -2.2 bb/hand
-- Worse than monolithic (-1.1 to -1.3). 3 flop clusters too coarse.
-- Architecture validated (disk persistence, on-demand loading) but strategy quality needs:
-  more clusters, stronger blueprint, and blueprint-subgame boundary correction
+### ε=2.0 FINAL RESULT (25K hands, statistically significant)
+| Metric | Value |
+|---|---|
+| **Result** | **-2356.62 mbb/hand (-2.36 bb/hand)** |
+| **95% CI** | **[-2.84, -1.88] bb/hand** |
+| Significant | YES |
+| Training | 3.7 hours, 324 subgames, 26GB peak RAM |
+
+Worse than monolithic (-1.1 to -1.3). Root causes:
+- Only 3 flop clusters (too coarse)
+- Weak 100K-iter blueprint (boundary values wrong)
+- No gadget game (subgames don't account for opponent range)
+- Architecture validated: disk persistence, on-demand loading, parallel training all work
 
 ### Root Cause Analysis
 The merge step in `train_decomposed` accumulates ALL subgame strategies into
