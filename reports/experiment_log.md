@@ -181,6 +181,14 @@ Worse than monolithic (-1.1 to -1.3). Root causes:
 - No gadget game (subgames don't account for opponent range)
 - Architecture validated: disk persistence, on-demand loading, parallel training all work
 
+### DCFR+LCFR Decomposed (i-098adbb6cd11f5c2c) — RUNNING
+- **Fixed DCFR** (apply every 1000 iters, not every iter — was 800x slower)
+- Blueprint: 200K iters, 23.5M info sets (2x previous)
+- 8 flop clusters, 864 subgames, 200K iters each with DCFR+LCFR
+- Disk persistence, 15 parallel workers, 10GB RAM
+- 200K DCFR ≈ 1-4M vanilla equivalent per subgame
+- **~1-2 hours to Slumbot result**
+
 ### Root Cause Analysis
 The merge step in `train_decomposed` accumulates ALL subgame strategies into
 one global hash table. Each subgame with RBM bucketing creates ~50-100K info
