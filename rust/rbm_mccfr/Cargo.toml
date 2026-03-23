@@ -1,0 +1,28 @@
+[package]
+name = "rbm-mccfr"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance MCCFR training engine for No-Limit Hold'em"
+
+[lib]
+name = "rbm_mccfr"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+rustc-hash = "2.1"
+rand = "0.8"
+rand_xoshiro = "0.6"
+arrayvec = "0.7"
+rayon = "1.10"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "mccfr_bench"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
