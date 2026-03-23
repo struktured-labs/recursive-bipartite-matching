@@ -645,6 +645,7 @@ let train_subgame ~(config : Nolimit_holdem.config)
          Compact_cfr.create_postflop_state () |]
     | Equity_based -> [||]
   in
+  let history_prefix = key.preflop_history ^ "/" in
   for iter = 1 to iterations do
     let (p1_cards, p2_cards, board) = sample_subgame_deal ~flop_boards in
     let p1_buckets =
@@ -666,7 +667,7 @@ let train_subgame ~(config : Nolimit_holdem.config)
     let traverser = (iter - 1) % 2 in
     (* Start traversal from the entry state (round_idx=1, postflop).
        The history prefix is the preflop_history + "/" to mark the round boundary. *)
-    let history = key.preflop_history ^ "/" in
+    let history = history_prefix in
     let state = {
       Compact_cfr.to_act = entry_state.to_act;
       round_idx = entry_state.round_idx;
@@ -787,7 +788,10 @@ let train_decomposed ~(config : Nolimit_holdem.config)
             ~bucket_method ?action_table ~dcfr ~vr_mccfr () in
         (* Save averaged strategy to disk — each worker writes a unique file *)
         save_subgame_strategy ~dir:subgame_dir ~key:sg_key ~cfr_states:cfr_pair;
-        (* cfr_pair goes out of scope here — GC can reclaim it *)
+        (* Force GC to reclaim cfr_pair + baselines between subgames.
+           Without this, 324 subgames per worker accumulate ~1GB of garbage
+           before GC kicks in, risking OOM on 128GB instances. *)
+        Gc.compact ();
         let done_count = Atomic.fetch_and_add completed 1 + 1 in
         (match done_count % (Int.max 1 (n_specs / 10)) = 0 with
          | true ->
