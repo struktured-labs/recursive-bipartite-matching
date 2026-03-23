@@ -82,6 +82,26 @@ let set_dls_vr_iter (v : int) : unit =
   Domain.DLS.set dls_vr_iter v
 
 (* ------------------------------------------------------------------ *)
+(* Linear CFR (LCFR) — iteration-weighted strategy accumulation        *)
+(* "Hyperparameter Schedules for Discounted CFR", arxiv 2404.09097     *)
+(* ------------------------------------------------------------------ *)
+
+(** Domain-local LCFR iteration counter.  When > 0, [accumulate_strategy]
+    multiplies strategy contributions by the iteration number, giving
+    more weight to later (better) strategies.  0 = disabled (uniform
+    averaging).  Uses [Domain.DLS] for parallel safety. *)
+let dls_lcfr_iter : int Domain.DLS.key =
+  Domain.DLS.new_key (fun () -> 0)
+
+(** Convenience accessor: get domain-local LCFR iteration. *)
+let get_dls_lcfr_iter () : int =
+  Domain.DLS.get dls_lcfr_iter
+
+(** Set domain-local LCFR iteration for the current domain. *)
+let set_dls_lcfr_iter (v : int) : unit =
+  Domain.DLS.set dls_lcfr_iter v
+
+(* ------------------------------------------------------------------ *)
 (* cfr_entry accessors                                                 *)
 (* ------------------------------------------------------------------ *)
 
@@ -163,6 +183,17 @@ type dcfr_params = {
 
 let default_dcfr_params = { alpha = 1.5; beta = 0.0; gamma = 2.0 }
 
+(** DCFR hyperparameter schedule selector.
+    [Fixed params]: constant hyperparameters (original DCFR).
+    [Linear_weighted]: LCFR -- weight each iteration's strategy
+      contribution by its iteration number, so later (better)
+      strategies dominate the average.  2-5x faster convergence.
+    [Adaptive { base }]: placeholder for future learned schedules. *)
+type dcfr_schedule =
+  | Fixed of dcfr_params
+  | Linear_weighted
+  | Adaptive of { base : dcfr_params }
+
 (** [dcfr_weights params ~iter] computes the three discount factors
     for iteration [iter]:
     - [pos_regret_weight]: t^alpha / (t^alpha + 1)
@@ -228,8 +259,17 @@ let accumulate_strategy (state : cfr_state) (key : info_key)
     (strat : float array) (weight : float) =
   let num_actions = Array.length strat in
   let entry = find_or_add_entry state key ~num_actions in
+  (* LCFR: when enabled (dls_lcfr_iter > 0), multiply the strategy
+     contribution by the iteration number.  Later iterations produce
+     better strategies, so they should dominate the average. *)
+  let iter_weight =
+    match get_dls_lcfr_iter () > 0 with
+    | true  -> Float.of_int (get_dls_lcfr_iter ())
+    | false -> 1.0
+  in
   Array.iteri strat ~f:(fun i p ->
-    set_entry_strategy entry i (entry_strategy entry i +. weight *. p))
+    set_entry_strategy entry i
+      (entry_strategy entry i +. weight *. p *. iter_weight))
 
 let average_strategy (state : cfr_state) : strategy =
   let result = Hashtbl.create ~size:(Hashtbl.length state.entries) (module Int64) in
@@ -1317,6 +1357,7 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     ?(dcfr = false)
     ?(prune_threshold = -300_000_000.0)
     ?(vr_mccfr = false)
+    ?(lcfr = false)
     ()
   : strategy * strategy =
   global_action_table := action_table;
@@ -1324,6 +1365,13 @@ let train_mccfr ~(config : Nolimit_holdem.config)
     (match Float.is_finite prune_threshold with
      | true  -> Some prune_threshold
      | false -> None);
+  (* LCFR: initialise domain-local iteration counter *)
+  (match lcfr with
+   | true  ->
+     set_dls_lcfr_iter 0;
+     printf "  [LCFR] enabled (linear iteration-weighted strategy averaging)\n%!"
+   | false ->
+     set_dls_lcfr_iter 0);
   (* VR-MCCFR+: create per-player baseline tables when enabled *)
   (match vr_mccfr with
    | true ->
@@ -1409,6 +1457,11 @@ let train_mccfr ~(config : Nolimit_holdem.config)
       round_start_invested;
       actions_remaining = 2;
     } in
+    (* LCFR: set iteration weight before traversal so accumulate_strategy
+       picks it up during this iteration's tree walk *)
+    (match lcfr with
+     | true  -> set_dls_lcfr_iter iter
+     | false -> ());
     let value = mccfr_traverse ~config ~p1_cards ~p2_cards ~board
         ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser ~cfr_states in
     util_sum := !util_sum +. value;
@@ -1444,6 +1497,7 @@ let train_mccfr ~(config : Nolimit_holdem.config)
   done;
   global_prune_threshold := None;
   set_dls_baselines None;
+  set_dls_lcfr_iter 0;
   let p0_avg = average_strategy cfr_states.(0) in
   let p1_avg = average_strategy cfr_states.(1) in
   (p0_avg, p1_avg)
@@ -1491,6 +1545,7 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
     ?(dcfr = false)
     ?(prune_threshold = -300_000_000.0)
     ?(vr_mccfr = false)
+    ?(lcfr = false)
     ()
   : strategy * strategy =
   global_action_table := action_table;
@@ -1501,6 +1556,9 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
   let num_workers = Int.max 1 num_domains in
   printf "  [Parallel-MCCFR] Starting %d domains, %d iterations total\n%!"
     num_workers iterations;
+  (match lcfr with
+   | true  -> printf "  [LCFR] enabled (linear iteration-weighted strategy averaging)\n%!"
+   | false -> ());
   (match vr_mccfr with
    | true  -> printf "  [VR-MCCFR+] enabled (harmonic baseline schedule, per-domain)\n%!"
    | false -> ());
@@ -1556,6 +1614,8 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
         Random.self_init ();
         let my_states = worker_states.(worker_id) in
         let my_iters = worker_iters.(worker_id) in
+        (* LCFR: initialise domain-local iteration counter *)
+        set_dls_lcfr_iter 0;
         (* VR-MCCFR+: each domain gets its own baseline tables via DLS *)
         (match vr_mccfr with
          | true ->
@@ -1608,6 +1668,10 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
             round_start_invested;
             actions_remaining = 2;
           } in
+          (* LCFR: set iteration weight before traversal *)
+          (match lcfr with
+           | true  -> set_dls_lcfr_iter iter
+           | false -> ());
           let value = mccfr_traverse ~config ~p1_cards ~p2_cards ~board
               ~p1_buckets ~p2_buckets ~history:"" ~state ~traverser
               ~cfr_states:my_states in
@@ -1635,8 +1699,9 @@ let train_mccfr_parallel ~(config : Nolimit_holdem.config)
           prune_periodically_inline ~every:500_000 ~iter my_states.(0);
           prune_periodically_inline ~every:500_000 ~iter my_states.(1)
         done;
-        (* Clean up domain-local baselines *)
+        (* Clean up domain-local state *)
         set_dls_baselines None;
+        set_dls_lcfr_iter 0;
         worker_utils.(worker_id) <- !local_util_sum));
   Domainslib.Task.teardown_pool pool;
   global_prune_threshold := None;

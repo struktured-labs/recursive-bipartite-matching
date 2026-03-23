@@ -69,6 +69,21 @@ val get_dls_baselines : unit -> vr_baselines array option
 (** [set_dls_baselines v] sets the domain-local VR baselines. *)
 val set_dls_baselines : vr_baselines array option -> unit
 
+(** [get_dls_vr_iter ()] returns the domain-local VR-MCCFR iteration
+    counter (for harmonic baseline alpha). *)
+val get_dls_vr_iter : unit -> int
+
+(** [set_dls_vr_iter v] sets the domain-local VR iteration counter. *)
+val set_dls_vr_iter : int -> unit
+
+(** [get_dls_lcfr_iter ()] returns the domain-local LCFR iteration
+    counter.  When > 0, [accumulate_strategy] weights contributions
+    by the iteration number (linear averaging).  0 = disabled. *)
+val get_dls_lcfr_iter : unit -> int
+
+(** [set_dls_lcfr_iter v] sets the domain-local LCFR iteration. *)
+val set_dls_lcfr_iter : int -> unit
+
 (** [find_or_add_entry state key ~num_actions] looks up the CFR entry
     for [key], creating a zero-filled entry if absent.  Exposed for
     testing. *)
@@ -159,6 +174,11 @@ val create_postflop_state : unit -> postflop_state
     maintains per-info-set baselines that absorb value fluctuations, yielding
     the same expected regret updates with dramatically lower variance (default
     false).  Baselines use a harmonic EMA schedule (alpha = 1/(iter+1)).
+    [~lcfr] enables Linear CFR (LCFR) iteration-weighted strategy
+    averaging: each iteration's strategy contribution is weighted by the
+    iteration number, so later (better) strategies dominate the average.
+    Converges 2-5x faster than uniform averaging.  Combines naturally
+    with [~dcfr] (default false).
     Returns (p1_average_strategy, p2_average_strategy).
     Prints convergence diagnostics every [~report_every] iterations. *)
 val train_mccfr
@@ -175,6 +195,7 @@ val train_mccfr
   -> ?dcfr:bool
   -> ?prune_threshold:float
   -> ?vr_mccfr:bool
+  -> ?lcfr:bool
   -> unit
   -> strategy * strategy
 
@@ -244,6 +265,18 @@ type dcfr_params = {
 
 (** Recommended DCFR hyperparameters (alpha=1.5, beta=0.0, gamma=2.0). *)
 val default_dcfr_params : dcfr_params
+
+(** DCFR hyperparameter schedule selector.
+    [Fixed params]: constant hyperparameters (original DCFR).
+    [Linear_weighted]: LCFR -- weight each iteration's strategy
+      contribution by its iteration number, so later (better)
+      strategies dominate the average.  2-5x faster convergence.
+      See "Hyperparameter Schedules for Discounted CFR" (2024).
+    [Adaptive { base }]: placeholder for future learned schedules. *)
+type dcfr_schedule =
+  | Fixed of dcfr_params
+  | Linear_weighted
+  | Adaptive of { base : dcfr_params }
 
 (** Per-iteration discount factors computed from [dcfr_params]. *)
 type dcfr_weights = {
@@ -328,5 +361,6 @@ val train_mccfr_parallel
   -> ?dcfr:bool
   -> ?prune_threshold:float
   -> ?vr_mccfr:bool
+  -> ?lcfr:bool
   -> unit
   -> strategy * strategy

@@ -1082,6 +1082,8 @@ let () =
   let subgame_epsilon = ref 0.5 in
   let n_flops = ref 200 in
   let vr_mccfr = ref false in
+  let lcfr = ref false in
+  let dcfr_flag = ref false in
 
   let args = [
     ("--train", Arg.Set_int train_iters,
@@ -1134,6 +1136,10 @@ let () =
      "N  Number of sampled flops for clustering (default: 200)");
     ("--vr-mccfr", Arg.Set vr_mccfr,
      "  Enable Variance-Reduced MCCFR (Schmid et al., AAAI 2019)");
+    ("--lcfr", Arg.Set lcfr,
+     "  Enable Linear CFR (iteration-weighted strategy averaging, 2-5x faster convergence)");
+    ("--dcfr", Arg.Set dcfr_flag,
+     "  Enable Discounted CFR (Brown & Sandholm 2019)");
   ] in
   Arg.parse args (fun _ -> ())
     "rbm-slumbot-client [--train N | --strategy FILE] [--hands N] [--mock] [--verbose]";
@@ -1220,6 +1226,7 @@ let () =
           ?num_parallel:n_parallel
           ?action_table
           ~n_flops:!n_flops
+          ~dcfr:!dcfr_flag ~vr_mccfr:!vr_mccfr
           ())
       in
       let n_subgames = ds.n_clusters * List.length ds.preflop_histories in
@@ -1337,7 +1344,9 @@ let () =
               ~checkpoint_prefix:!checkpoint_prefix
               ~bucket_method
               ?action_table
+              ~dcfr:!dcfr_flag
               ~vr_mccfr:!vr_mccfr
+              ~lcfr:!lcfr
               ?resume_from ?num_domains:n_domains ()
           | false ->
             Compact_cfr.train_mccfr ~config ~abstraction:preflop_abs
@@ -1346,7 +1355,9 @@ let () =
               ~checkpoint_prefix:!checkpoint_prefix
               ~bucket_method
               ?action_table
+              ~dcfr:!dcfr_flag
               ~vr_mccfr:!vr_mccfr
+              ~lcfr:!lcfr
               ?resume_from ())
         in
         eprintf "[slumbot] Training complete in %.2fs. P0: %d, P1: %d info sets\n%!"

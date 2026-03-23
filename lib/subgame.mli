@@ -148,6 +148,8 @@ val train_subgame
   -> iterations:int
   -> bucket_method:Compact_cfr.bucket_method
   -> ?action_table:Action_abstraction.t
+  -> ?dcfr:bool
+  -> ?vr_mccfr:bool
   -> unit
   -> Compact_cfr.cfr_state array
 
@@ -181,5 +183,7 @@ val train_decomposed
   -> ?n_sample_hands:int
   -> ?distance_config:Distance.config
   -> ?subgame_dir:string
+  -> ?dcfr:bool
+  -> ?vr_mccfr:bool
   -> unit
   -> decomposed_strategy

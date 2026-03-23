@@ -620,6 +620,8 @@ let train_subgame ~(config : Nolimit_holdem.config)
     ~(iterations : int)
     ~(bucket_method : Compact_cfr.bucket_method)
     ?(action_table : Action_abstraction.t option)
+    ?(dcfr = false)
+    ?(vr_mccfr = false)
     ()
   : Compact_cfr.cfr_state array =
   ignore action_table;
@@ -628,6 +630,14 @@ let train_subgame ~(config : Nolimit_holdem.config)
     Compact_cfr.create ~size:initial_size ();
     Compact_cfr.create ~size:initial_size ();
   |] in
+  (* Set up VR-MCCFR baselines if enabled *)
+  (match vr_mccfr with
+   | true ->
+     Compact_cfr.set_dls_baselines (Some [|
+       Compact_cfr.create_baselines ~size:initial_size ();
+       Compact_cfr.create_baselines ~size:initial_size ()
+     |])
+   | false -> ());
   let postflop_states =
     match bucket_method with
     | Rbm_based _ ->
@@ -667,10 +677,25 @@ let train_subgame ~(config : Nolimit_holdem.config)
       round_start_invested = Array.copy entry_state.round_start_invested;
       actions_remaining = entry_state.actions_remaining;
     } in
+    (* Update VR iteration counter *)
+    (match vr_mccfr with
+     | true -> Compact_cfr.set_dls_lcfr_iter iter
+     | false -> ());
     let _value = Compact_cfr.mccfr_traverse ~config ~p1_cards ~p2_cards ~board
         ~p1_buckets ~p2_buckets ~history ~state ~traverser ~cfr_states in
-    ()
+    (* Apply DCFR discounting *)
+    (match dcfr with
+     | true ->
+       let weights = Compact_cfr.compute_dcfr_weights
+         Compact_cfr.default_dcfr_params ~iter in
+       Compact_cfr.apply_dcfr_discount cfr_states.(0) weights;
+       Compact_cfr.apply_dcfr_discount cfr_states.(1) weights
+     | false -> ())
   done;
+  (* Clean up VR baselines *)
+  (match vr_mccfr with
+   | true -> Compact_cfr.set_dls_baselines None
+   | false -> ());
   cfr_states
 
 (* ------------------------------------------------------------------ *)
@@ -689,6 +714,8 @@ let train_decomposed ~(config : Nolimit_holdem.config)
     ?(n_sample_hands = 5)
     ?(distance_config = Distance.default_config)
     ?(subgame_dir = "subgame_strategies")
+    ?(dcfr = false)
+    ?(vr_mccfr = false)
     ()
   : decomposed_strategy =
   (* ---- Create output directory ---- *)
@@ -701,7 +728,7 @@ let train_decomposed ~(config : Nolimit_holdem.config)
     blueprint_iterations;
   let (preflop_p0, preflop_p1) =
     Compact_cfr.train_mccfr ~config ~abstraction ~iterations:blueprint_iterations
-      ?action_table ~bucket_method ()
+      ?action_table ~bucket_method ~dcfr ~vr_mccfr ()
   in
   printf "[subgame] Phase 1 complete. P0=%d P1=%d info sets in blueprint.\n%!"
     (Hashtbl.length preflop_p0) (Hashtbl.length preflop_p1);
@@ -757,7 +784,7 @@ let train_decomposed ~(config : Nolimit_holdem.config)
         let (sg_key, entry_state, flop_boards) = specs.(i) in
         let cfr_pair = train_subgame ~config ~abstraction ~key:sg_key
             ~entry_state ~flop_boards ~iterations:subgame_iterations
-            ~bucket_method ?action_table () in
+            ~bucket_method ?action_table ~dcfr ~vr_mccfr () in
         (* Save averaged strategy to disk — each worker writes a unique file *)
         save_subgame_strategy ~dir:subgame_dir ~key:sg_key ~cfr_states:cfr_pair;
         (* cfr_pair goes out of scope here — GC can reclaim it *)
