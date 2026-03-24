@@ -8,7 +8,7 @@
 /// Ported from OCaml's compact_cfr.ml `hand_score` / `compute_bucket_equity`.
 
 use crate::card::{self, Card};
-use crate::hand_eval;
+use crate::hand_eval_fast;
 
 /// Canonical hand ID for a pair of hole cards. There are 169 canonical hands:
 ///   - 13 pocket pairs (AA, KK, ..., 22)
@@ -77,7 +77,7 @@ pub fn hand_score(hole_cards: &[Card; 2], board_visible: &[Card]) -> f64 {
             cards[0] = hole_cards[0];
             cards[1] = hole_cards[1];
             cards[2..7].copy_from_slice(&board_visible[..5]);
-            hand_eval::evaluate7(&cards)
+            hand_eval_fast::evaluate7_fast(&cards)
         }
         6 => {
             // Best of 6 choose 5 = 6 five-card subsets
@@ -179,7 +179,8 @@ fn evaluate5_inline(cards: &[Card; 5]) -> u32 {
     let is_straight = (ranks[0] - ranks[4] == 4
         && ranks[0] != ranks[1]
         && ranks[1] != ranks[2]
-        && ranks[2] != ranks[3])
+        && ranks[2] != ranks[3]
+        && ranks[3] != ranks[4])
         || (ranks[0] == 12 && ranks[1] == 3 && ranks[2] == 2 && ranks[3] == 1 && ranks[4] == 0);
 
     let straight_high = if ranks[0] == 12 && ranks[1] == 3 {

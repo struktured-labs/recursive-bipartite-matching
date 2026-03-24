@@ -49,7 +49,21 @@ fn bench_evaluate7(c: &mut Criterion) {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
     let deals: Vec<_> = (0..100).map(|_| card::sample_deal(&mut rng)).collect();
 
-    c.bench_function("evaluate7_100", |b| {
+    c.bench_function("evaluate7_fast_100", |b| {
+        b.iter(|| {
+            let mut sum = 0u32;
+            for (p1, _p2, board) in &deals {
+                let mut h = [0u8; 7];
+                h[0] = p1[0];
+                h[1] = p1[1];
+                h[2..7].copy_from_slice(board);
+                sum = sum.wrapping_add(rbm_mccfr::hand_eval_fast::evaluate7_fast(&h));
+            }
+            sum
+        })
+    });
+
+    c.bench_function("evaluate7_old_100", |b| {
         b.iter(|| {
             let mut sum = 0u32;
             for (p1, _p2, board) in &deals {
@@ -114,6 +128,8 @@ fn bench_1000_iters(c: &mut Criterion) {
                     &mut rng,
                     0,
                     f32::INFINITY,
+                    0,
+                    None,
                 );
             }
             cfr_states[0].len() + cfr_states[1].len()

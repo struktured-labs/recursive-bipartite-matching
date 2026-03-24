@@ -3,12 +3,11 @@
 /// External-sampling MCCFR: for the traverser, explore all actions.
 /// For the opponent, sample one action from the current strategy.
 
-use rand::Rng;
-use crate::actions::{self, Action, HistoryBuf, NlState};
+use crate::actions::{self, HistoryBuf, NlState};
 use crate::card::Card;
-use crate::cfr_state::{self, CfrState};
+use crate::cfr_state::{self, CfrState, DcfrTable};
 use crate::config::GameConfig;
-use crate::hand_eval;
+use crate::hand_eval_fast;
 use crate::info_key;
 
 /// Showdown: evaluate both hands, return payoff from P0's perspective.
@@ -29,7 +28,7 @@ fn showdown_payoff(
     h2[1] = p2_cards[1];
     h2[2..7].copy_from_slice(board);
 
-    let cmp = hand_eval::compare_hands7(&h1, &h2);
+    let cmp = hand_eval_fast::compare_hands7_fast(&h1, &h2);
     let pot = p_invested[0] + p_invested[1];
 
     let p0_value = if cmp > 0 {
@@ -62,6 +61,8 @@ fn advance_to_next_round(
     rng: &mut impl rand::Rng,
     lcfr_iter: u32,
     prune_threshold: f32,
+    dcfr_epoch: u32,
+    dcfr_table: Option<&DcfrTable>,
 ) -> f64 {
     let next_round = state.round_idx + 1;
 
@@ -122,12 +123,17 @@ fn advance_to_next_round(
         rng,
         lcfr_iter,
         prune_threshold,
+        dcfr_epoch,
+        dcfr_table,
     );
     history.pop(); // remove slash
     result
 }
 
 /// Core MCCFR traversal. Returns counterfactual value for the traverser.
+///
+/// When `dcfr_table` is Some, lazy DCFR discounting is applied on access.
+/// `dcfr_epoch` is `iteration / 1000` (only used when dcfr_table is Some).
 pub fn mccfr_traverse(
     config: &GameConfig,
     p1_cards: &[Card; 2],
@@ -142,6 +148,8 @@ pub fn mccfr_traverse(
     rng: &mut impl rand::Rng,
     lcfr_iter: u32,
     prune_threshold: f32,
+    dcfr_epoch: u32,
+    dcfr_table: Option<&DcfrTable>,
 ) -> f64 {
     let player = state.to_act;
     let buckets = if player == 0 { p1_buckets } else { p2_buckets };
@@ -165,6 +173,8 @@ pub fn mccfr_traverse(
             rng,
             lcfr_iter,
             prune_threshold,
+            dcfr_epoch,
+            dcfr_table,
         );
     }
 
@@ -175,7 +185,10 @@ pub fn mccfr_traverse(
 
     {
         let cfr_st = &mut cfr_states[player as usize];
-        let entry = cfr_st.find_or_add(key, na);
+        let entry = match dcfr_table {
+            Some(dt) => cfr_st.find_or_add_lazy_dcfr(key, na, dcfr_epoch, dt),
+            None => cfr_st.find_or_add(key, na),
+        };
 
         if player == traverser && prune_threshold.is_finite() {
             cfr_state::regret_matching_pruned(entry, prune_threshold as f32, &mut strat[..num_actions], &mut pruned[..num_actions]);
@@ -212,11 +225,13 @@ pub fn mccfr_traverse(
                 action_values[i] = advance_to_next_round(
                     config, p1_cards, p2_cards, board, p1_buckets, p2_buckets,
                     history, new_state, traverser, cfr_states, rng, lcfr_iter, prune_threshold,
+                    dcfr_epoch, dcfr_table,
                 );
             } else {
                 action_values[i] = mccfr_traverse(
                     config, p1_cards, p2_cards, board, p1_buckets, p2_buckets,
                     history, new_state, traverser, cfr_states, rng, lcfr_iter, prune_threshold,
+                    dcfr_epoch, dcfr_table,
                 );
             }
 
@@ -232,6 +247,7 @@ pub fn mccfr_traverse(
         // Update regrets and strategy
         {
             let cfr_st = &mut cfr_states[player as usize];
+            // Entry was already lazily discounted above; no need to discount again
             let entry = cfr_st.find_or_add(key, na);
 
             // Accumulate strategy (with LCFR weighting)
@@ -285,11 +301,13 @@ pub fn mccfr_traverse(
             advance_to_next_round(
                 config, p1_cards, p2_cards, board, p1_buckets, p2_buckets,
                 history, new_state, traverser, cfr_states, rng, lcfr_iter, prune_threshold,
+                dcfr_epoch, dcfr_table,
             )
         } else {
             mccfr_traverse(
                 config, p1_cards, p2_cards, board, p1_buckets, p2_buckets,
                 history, new_state, traverser, cfr_states, rng, lcfr_iter, prune_threshold,
+                dcfr_epoch, dcfr_table,
             )
         };
 
@@ -302,6 +320,7 @@ pub fn mccfr_traverse(
 mod tests {
     use super::*;
     use crate::card;
+    use rand::Rng;
     use rand::SeedableRng;
     use rand_xoshiro::Xoshiro256PlusPlus;
 
@@ -333,6 +352,7 @@ mod tests {
             let _value = mccfr_traverse(
                 &config, &p1, &p2, &board, &p1_buckets, &p2_buckets,
                 &mut history, state, traverser, &mut cfr_states, &mut rng, 0, f32::INFINITY,
+                0, None,
             );
         }
         // Should have created some info sets
@@ -369,6 +389,7 @@ mod tests {
             let value = mccfr_traverse(
                 &config, &p1, &p2, &board, &p1_buckets, &p2_buckets,
                 &mut history, state, traverser, &mut cfr_states, &mut rng, 0, f32::INFINITY,
+                0, None,
             );
             util_sum += value;
         }

@@ -31,10 +31,12 @@ fn evaluate5(cards: &[Card; 5]) -> u32 {
         && suits[3] == suits[4];
 
     // Check for straight (including A-2-3-4-5 wheel)
+    // All 5 ranks must be distinct and span exactly 4
     let is_straight = (ranks[0] - ranks[4] == 4
         && ranks[0] != ranks[1]
         && ranks[1] != ranks[2]
-        && ranks[2] != ranks[3])
+        && ranks[2] != ranks[3]
+        && ranks[3] != ranks[4])
         || (ranks[0] == 12 && ranks[1] == 3 && ranks[2] == 2 && ranks[3] == 1 && ranks[4] == 0);
 
     // Wheel adjustment: A-2-3-4-5 → high card is 3 (the 5)

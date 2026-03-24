@@ -2,7 +2,7 @@
 ///
 /// Runs N iterations of external-sampling MCCFR, alternating the traverser
 /// between P0 and P1 each iteration. Supports:
-///   - DCFR discounting (every 1000 iterations)
+///   - DCFR discounting (lazy per-entry, applied on access)
 ///   - LCFR linear weighting
 ///   - Periodic progress reporting
 ///   - Periodic checkpointing
@@ -15,7 +15,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use crate::actions::{HistoryBuf, NlState};
 use crate::buckets;
 use crate::card;
-use crate::cfr_state::{self, CfrState, CfrEntry};
+use crate::cfr_state::{CfrState, CfrEntry, DcfrTable};
 use crate::checkpoint;
 use crate::config::{GameConfig, TrainConfig};
 use crate::traversal;
@@ -41,6 +41,7 @@ fn run_one_iteration(
     cfr_states: &mut [CfrState; 2],
     rng: &mut Xoshiro256PlusPlus,
     iteration: u64,
+    dcfr_table: Option<&DcfrTable>,
 ) -> f64 {
     let (p1, p2, board) = card::sample_deal(rng);
 
@@ -65,6 +66,7 @@ fn run_one_iteration(
     let traverser = (iteration % 2) as u8;
     let lcfr_iter = if train_config.lcfr { iteration as u32 } else { 0 };
     let prune_threshold = train_config.prune_threshold as f32;
+    let dcfr_epoch = (iteration / 1000) as u32;
 
     traversal::mccfr_traverse(
         config,
@@ -80,6 +82,8 @@ fn run_one_iteration(
         rng,
         lcfr_iter,
         prune_threshold,
+        dcfr_epoch,
+        dcfr_table,
     )
 }
 
@@ -113,7 +117,20 @@ pub fn train_mccfr(
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(start_iter ^ 0xDEAD_BEEF);
     let mut util_sum = 0.0f64;
 
+    // Lazy DCFR: create table if DCFR is enabled
+    let mut dcfr_table = if train_config.dcfr {
+        Some(DcfrTable::new())
+    } else {
+        None
+    };
+
     for iter in start_iter..train_config.iterations {
+        // Ensure DCFR table covers current epoch
+        let current_epoch = (iter / 1000) as u32;
+        if let Some(ref mut dt) = dcfr_table {
+            dt.ensure_epoch(current_epoch);
+        }
+
         let value = run_one_iteration(
             config,
             train_config,
@@ -121,19 +138,9 @@ pub fn train_mccfr(
             &mut cfr_states,
             &mut rng,
             iter,
+            dcfr_table.as_ref(),
         );
         util_sum += value;
-
-        // DCFR discount every 1000 iterations
-        if train_config.dcfr && iter > 0 && iter % 1000 == 0 {
-            let t = iter as f32;
-            let pos_weight = t / (t + 1.0);
-            let neg_weight = 0.5f32;
-            let strat_weight = (t / (t + 1.0)).powf(2.0);
-            for s in cfr_states.iter_mut() {
-                cfr_state::apply_dcfr_discount(s, pos_weight, neg_weight, strat_weight);
-            }
-        }
 
         // Progress report
         if train_config.report_every > 0 && (iter + 1) % train_config.report_every == 0 {
@@ -216,7 +223,19 @@ pub fn train_mccfr_parallel(
 
                 let mut util_sum = 0.0f64;
 
+                // Lazy DCFR table per thread
+                let mut dcfr_table = if thread_train_config.dcfr {
+                    Some(DcfrTable::new())
+                } else {
+                    None
+                };
+
                 for iter in 0..my_iters {
+                    let current_epoch = (iter / 1000) as u32;
+                    if let Some(ref mut dt) = dcfr_table {
+                        dt.ensure_epoch(current_epoch);
+                    }
+
                     let value = run_one_iteration(
                         &config,
                         &thread_train_config,
@@ -224,19 +243,9 @@ pub fn train_mccfr_parallel(
                         &mut cfr_states,
                         &mut rng,
                         iter,
+                        dcfr_table.as_ref(),
                     );
                     util_sum += value;
-
-                    // DCFR discount
-                    if thread_train_config.dcfr && iter > 0 && iter % 1000 == 0 {
-                        let t = iter as f32;
-                        let pos_weight = t / (t + 1.0);
-                        let neg_weight = 0.5f32;
-                        let strat_weight = (t / (t + 1.0)).powf(2.0);
-                        for s in cfr_states.iter_mut() {
-                            cfr_state::apply_dcfr_discount(s, pos_weight, neg_weight, strat_weight);
-                        }
-                    }
 
                     // Per-thread progress (only thread 0 reports)
                     if tid == 0 && original_report > 0 && (iter + 1) % original_report == 0 {
@@ -464,5 +473,26 @@ mod tests {
         assert!(resumed[1].len() >= p1_len);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_train_dcfr_lcfr_combined() {
+        // Test DCFR + LCFR combined to verify they work together
+        let config = GameConfig::slumbot();
+        let train_config = TrainConfig {
+            iterations: 2000,
+            report_every: 0,
+            initial_size: 10_000,
+            checkpoint_every: 0,
+            prune_threshold: -300_000_000.0,
+            dcfr: true,
+            lcfr: true,
+            n_buckets: 50,
+        };
+        let assignments = default_assignments();
+
+        let states = train_mccfr(&config, &train_config, &assignments, None);
+        assert!(states[0].len() > 0);
+        assert!(states[1].len() > 0);
     }
 }

@@ -12,6 +12,7 @@ pub mod cfr_state;
 pub mod actions;
 
 pub mod hand_eval;
+pub mod hand_eval_fast;
 pub mod traversal;
 
 pub mod buckets;
