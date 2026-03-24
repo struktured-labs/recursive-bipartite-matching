@@ -6,7 +6,11 @@ description = "High-performance MCCFR training engine for No-Limit Hold'em"
 
 [lib]
 name = "rbm_mccfr"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[[bin]]
+name = "rbm-mccfr"
+path = "src/main.rs"
 
 [dependencies]
 rustc-hash = "2.1"
