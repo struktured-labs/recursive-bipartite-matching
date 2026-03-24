@@ -18,6 +18,7 @@ pub mod traversal;
 pub mod buckets;
 pub mod checkpoint;
 pub mod train;
+pub mod slumbot;
 
 // -----------------------------------------------------------------------
 // C FFI entry points
