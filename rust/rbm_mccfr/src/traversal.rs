@@ -2,10 +2,13 @@
 ///
 /// External-sampling MCCFR: for the traverser, explore all actions.
 /// For the opponent, sample one action from the current strategy.
+///
+/// Uses CompactCfrState (arena-backed i16 storage) for ~3x memory savings.
 
 use crate::actions::{self, HistoryBuf, NlState};
 use crate::card::Card;
-use crate::cfr_state::{self, CfrState, DcfrTable};
+use crate::cfr_state::DcfrTable;
+use crate::compact_state::{self, CompactCfrState};
 use crate::config::GameConfig;
 use crate::hand_eval_fast;
 use crate::info_key;
@@ -57,11 +60,11 @@ fn advance_to_next_round(
     history: &mut HistoryBuf,
     state: NlState,
     traverser: u8,
-    cfr_states: &mut [CfrState; 2],
+    cfr_states: &mut [CompactCfrState; 2],
     rng: &mut impl rand::Rng,
     lcfr_iter: u32,
     prune_threshold: f32,
-    dcfr_epoch: u32,
+    dcfr_epoch: u16,
     dcfr_table: Option<&DcfrTable>,
 ) -> f64 {
     let next_round = state.round_idx + 1;
@@ -144,11 +147,11 @@ pub fn mccfr_traverse(
     history: &mut HistoryBuf,
     state: NlState,
     traverser: u8,
-    cfr_states: &mut [CfrState; 2],
+    cfr_states: &mut [CompactCfrState; 2],
     rng: &mut impl rand::Rng,
     lcfr_iter: u32,
     prune_threshold: f32,
-    dcfr_epoch: u32,
+    dcfr_epoch: u16,
     dcfr_table: Option<&DcfrTable>,
 ) -> f64 {
     let player = state.to_act;
@@ -191,9 +194,9 @@ pub fn mccfr_traverse(
         };
 
         if player == traverser && prune_threshold.is_finite() {
-            cfr_state::regret_matching_pruned(entry, prune_threshold as f32, &mut strat[..num_actions], &mut pruned[..num_actions]);
+            compact_state::regret_matching_pruned(cfr_st, &entry, prune_threshold, &mut strat[..num_actions], &mut pruned[..num_actions]);
         } else {
-            cfr_state::regret_matching(entry, &mut strat[..num_actions]);
+            compact_state::regret_matching(cfr_st, &entry, &mut strat[..num_actions]);
         }
     }
 
@@ -247,24 +250,25 @@ pub fn mccfr_traverse(
         // Update regrets and strategy
         {
             let cfr_st = &mut cfr_states[player as usize];
-            // Entry was already lazily discounted above; no need to discount again
+            // Entry was already lazily discounted above; no need to discount again.
+            // find_or_add returns a Copy handle (CompactEntry).
             let entry = cfr_st.find_or_add(key, na);
 
             // Accumulate strategy (with LCFR weighting)
-            cfr_state::accumulate_strategy(entry, &strat[..num_actions], 1.0, lcfr_iter);
+            compact_state::accumulate_strategy(cfr_st, &entry, &strat[..num_actions], 1.0, lcfr_iter);
 
             // Update regrets
             for i in 0..num_actions {
                 if !pruned[i] {
                     let regret_delta = (action_values[i] - node_value) as f32;
-                    entry.add_regret(i, regret_delta);
+                    cfr_st.add_regret(&entry, i, regret_delta);
                 }
             }
 
             // CFR+: floor negative regrets to zero
             for i in 0..num_actions {
-                if entry.regret(i) < 0.0 {
-                    entry.set_regret(i, 0.0);
+                if cfr_st.regret(&entry, i) < 0.0 {
+                    cfr_st.set_regret(&entry, i, 0.0);
                 }
             }
         }
@@ -328,7 +332,7 @@ mod tests {
     fn test_traverse_doesnt_panic() {
         let config = GameConfig::slumbot();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
-        let mut cfr_states = [CfrState::new(1000), CfrState::new(1000)];
+        let mut cfr_states = [CompactCfrState::new(1000), CompactCfrState::new(1000)];
 
         for _ in 0..100 {
             let (p1, p2, board) = card::sample_deal(&mut rng);
@@ -364,7 +368,7 @@ mod tests {
     fn test_traverse_1000_iters() {
         let config = GameConfig::slumbot();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(123);
-        let mut cfr_states = [CfrState::new(10000), CfrState::new(10000)];
+        let mut cfr_states = [CompactCfrState::new(10000), CompactCfrState::new(10000)];
 
         let mut util_sum = 0.0;
         for iter in 0..1000 {

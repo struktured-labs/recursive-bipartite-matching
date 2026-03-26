@@ -1,5 +1,7 @@
 //! Standalone MCCFR training binary with optional Slumbot play.
 //!
+//! Uses CompactCfrState (arena-backed i16 storage) for ~3x memory savings.
+//!
 //! Usage:
 //!   rbm-mccfr [options]
 //!
@@ -162,6 +164,7 @@ fn parse_args() -> CliArgs {
 
 fn print_help() {
     eprintln!("rbm-mccfr: High-performance MCCFR training for No-Limit Hold'em");
+    eprintln!("           (compact i16 arena storage — ~3x less memory)");
     eprintln!();
     eprintln!("Training options:");
     eprintln!("  --iterations N       Number of MCCFR iterations (default: 1000000)");
@@ -172,7 +175,7 @@ fn print_help() {
     eprintln!("  --output PATH        Output strategy file (default: strategy_rust.bin)");
     eprintln!("  --report-every N     Report every N iters (default: 10000)");
     eprintln!("  --checkpoint-every N Checkpoint every N iters (default: 0 = off)");
-    eprintln!("  --resume PATH        Resume from raw checkpoint");
+    eprintln!("  --resume PATH        Resume from raw checkpoint (supports legacy + compact)");
     eprintln!("  --small-blind N      Small blind size (default: 50)");
     eprintln!("  --big-blind N        Big blind size (default: 100)");
     eprintln!("  --starting-stack N   Starting stack (default: 20000)");
@@ -230,6 +233,34 @@ fn play_against_slumbot(
     }
 }
 
+/// Try loading a checkpoint, auto-detecting format (compact RBMCMP01 or legacy RBMRAW01).
+fn load_checkpoint(path: &Path) -> (rbm_mccfr::compact_state::CompactCfrState, rbm_mccfr::compact_state::CompactCfrState, u64) {
+    // Try compact first
+    match checkpoint::load_compact_raw_states(path) {
+        Ok((states, iter)) => {
+            eprintln!("Loaded compact checkpoint: {} P0 + {} P1 info sets at iteration {}",
+                states[0].len(), states[1].len(), iter);
+            let [s0, s1] = states;
+            return (s0, s1, iter);
+        }
+        Err(_) => {}
+    }
+
+    // Fall back to legacy format
+    match checkpoint::load_legacy_as_compact(path) {
+        Ok((states, iter)) => {
+            eprintln!("Loaded legacy checkpoint (converted to compact): {} P0 + {} P1 info sets at iteration {}",
+                states[0].len(), states[1].len(), iter);
+            let [s0, s1] = states;
+            return (s0, s1, iter);
+        }
+        Err(e) => {
+            eprintln!("Failed to load checkpoint: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let cli = parse_args();
 
@@ -248,7 +279,7 @@ fn main() {
         return;
     }
 
-    eprintln!("=== RBM-MCCFR Training ===");
+    eprintln!("=== RBM-MCCFR Training (compact i16 storage) ===");
     eprintln!("Game:       {}/{} blinds, {} stack, {} bet fracs, max {} raises",
         cli.game_config.small_blind, cli.game_config.big_blind,
         cli.game_config.starting_stack,
@@ -268,14 +299,10 @@ fn main() {
 
     let states = if let Some(ref ckpt_path) = cli.resume_path {
         eprintln!("Resuming from checkpoint: {}", ckpt_path);
-        let (loaded, iter) = checkpoint::load_raw_states(Path::new(ckpt_path))
-            .expect("failed to load checkpoint");
-        eprintln!("Loaded {} P0 + {} P1 info sets at iteration {}",
-            loaded[0].len(), loaded[1].len(), iter);
+        let (s0, s1, iter) = load_checkpoint(Path::new(ckpt_path));
+        let loaded = [s0, s1];
 
         if cli.num_threads > 1 {
-            // For resumed parallel training, we'd need to split the loaded
-            // state. For simplicity, continue single-threaded from checkpoint.
             eprintln!("Note: parallel resume not yet supported, using single-threaded");
             train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, Some((&loaded, iter)))
         } else {
@@ -291,19 +318,28 @@ fn main() {
 
     eprintln!();
     eprintln!("Training complete in {:.1}s", elapsed.as_secs_f64());
-    eprintln!("P0: {} info sets", states[0].len());
-    eprintln!("P1: {} info sets", states[1].len());
+    eprintln!("P0: {} info sets ({} i16 arena values)", states[0].len(), states[0].arena.len());
+    eprintln!("P1: {} info sets ({} i16 arena values)", states[1].len(), states[1].arena.len());
 
-    // Save averaged strategy
-    checkpoint::save_averaged_strategy(Path::new(&cli.output), &states)
+    // Memory estimate
+    let arena_bytes = (states[0].arena.len() + states[1].arena.len()) * 2;
+    let index_bytes = (states[0].len() + states[1].len()) * 24; // ~24 bytes per hashmap entry
+    let total_mb = (arena_bytes + index_bytes) as f64 / 1024.0 / 1024.0;
+    eprintln!("Memory: {:.1} MB (arena={:.1} MB, index={:.1} MB)",
+        total_mb,
+        arena_bytes as f64 / 1024.0 / 1024.0,
+        index_bytes as f64 / 1024.0 / 1024.0);
+
+    // Save averaged strategy (same format as before, compatible with Slumbot play)
+    checkpoint::save_compact_averaged_strategy(Path::new(&cli.output), &states)
         .expect("failed to save strategy");
     eprintln!("Averaged strategy saved to: {}", cli.output);
 
-    // Also save raw checkpoint for potential resume
+    // Also save compact raw checkpoint for potential resume
     let raw_path = cli.output.replace(".bin", "_raw.bin");
-    checkpoint::save_raw_states(Path::new(&raw_path), &states, cli.train_config.iterations)
+    checkpoint::save_compact_raw_states(Path::new(&raw_path), &states, cli.train_config.iterations)
         .expect("failed to save raw checkpoint");
-    eprintln!("Raw checkpoint saved to: {}", raw_path);
+    eprintln!("Compact raw checkpoint saved to: {}", raw_path);
 
     let iters_per_sec = cli.train_config.iterations as f64 / elapsed.as_secs_f64();
     eprintln!("Speed: {:.0} iterations/sec", iters_per_sec);

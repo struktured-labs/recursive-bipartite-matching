@@ -4,11 +4,15 @@
 //! Counterfactual Regret Minimization. It's designed to be called from OCaml
 //! via C FFI, with OCaml handling the high-level orchestration (RBM distance,
 //! clustering, Slumbot API) and Rust handling the tight inner loop.
+//!
+//! Uses CompactCfrState (arena-backed i16 storage) for ~3x memory savings
+//! compared to the original Vec<f32> representation.
 
 pub mod card;
 pub mod config;
 pub mod info_key;
 pub mod cfr_state;
+pub mod compact_state;
 pub mod actions;
 
 pub mod hand_eval;
@@ -93,7 +97,7 @@ pub unsafe extern "C" fn rbm_train(
         Err(_) => return -1,
     };
 
-    // Train
+    // Train (now returns CompactCfrState)
     let states = if num_threads > 1 {
         train::train_mccfr_parallel(
             &game_config,
@@ -110,8 +114,8 @@ pub unsafe extern "C" fn rbm_train(
         )
     };
 
-    // Save averaged strategy
-    match checkpoint::save_averaged_strategy(Path::new(output_path), &states) {
+    // Save averaged strategy (compact version)
+    match checkpoint::save_compact_averaged_strategy(Path::new(output_path), &states) {
         Ok(()) => {
             let total = states[0].len() + states[1].len();
             total as i64
@@ -137,7 +141,28 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_cfr_roundtrip() {
+    fn test_cfr_roundtrip_compact() {
+        let mut state = compact_state::CompactCfrState::new(100);
+        let key = 42u64;
+        let entry = state.find_or_add(key, 3);
+        state.add_regret(&entry, 0, 10.0);
+        state.add_regret(&entry, 1, -5.0);
+        state.add_regret(&entry, 2, 3.0);
+
+        let mut strat = [0.0f32; 3];
+        let entry = *state.index.get(&key).unwrap();
+        compact_state::regret_matching(&state, &entry, &mut strat);
+
+        // Only positive regrets contribute
+        assert!(strat[0] > 0.0);
+        assert_eq!(strat[1], 0.0); // negative regret -> 0
+        assert!(strat[2] > 0.0);
+        assert!((strat.iter().sum::<f32>() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cfr_roundtrip_legacy() {
+        // Keep testing legacy CfrState to ensure backward compat
         let mut state = cfr_state::CfrState::new(100);
         let key = 42u64;
         let entry = state.find_or_add(key, 3);
@@ -148,9 +173,8 @@ mod integration_tests {
         let mut strat = [0.0f32; 3];
         cfr_state::regret_matching(state.entries.get(&key).unwrap(), &mut strat);
 
-        // Only positive regrets contribute
         assert!(strat[0] > 0.0);
-        assert_eq!(strat[1], 0.0); // negative regret -> 0
+        assert_eq!(strat[1], 0.0);
         assert!(strat[2] > 0.0);
         assert!((strat.iter().sum::<f32>() - 1.0).abs() < 0.001);
     }
@@ -182,8 +206,8 @@ mod integration_tests {
 
         let states = train::train_mccfr(&config, &train_config, &assignments, None);
 
-        // Verify averaged strategy sums to 1 for each info set
-        let avg = cfr_state::average_strategy(&states[0]);
+        // Verify averaged strategy sums to 1 for each info set (using compact_state)
+        let avg = compact_state::average_strategy(&states[0]);
         for (_key, probs) in &avg {
             let sum: f32 = probs.iter().sum();
             assert!(

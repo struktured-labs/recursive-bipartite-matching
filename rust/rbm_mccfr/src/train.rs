@@ -7,6 +7,8 @@
 ///   - Periodic progress reporting
 ///   - Periodic checkpointing
 ///   - Parallel training via rayon (independent thread-local states, merged)
+///
+/// Uses CompactCfrState (arena-backed i16 storage) for ~3x memory savings.
 
 use std::path::Path;
 use rand::SeedableRng;
@@ -15,21 +17,15 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use crate::actions::{HistoryBuf, NlState};
 use crate::buckets;
 use crate::card;
-use crate::cfr_state::{CfrState, CfrEntry, DcfrTable};
+use crate::cfr_state::DcfrTable;
+use crate::compact_state::{self, CompactCfrState};
 use crate::checkpoint;
 use crate::config::{GameConfig, TrainConfig};
 use crate::traversal;
 
-/// Merge src CfrState into dst by summing all regret and strategy entries.
-pub fn merge_cfr_state(dst: &mut CfrState, src: &CfrState) {
-    for (&key, src_entry) in &src.entries {
-        let dst_entry = dst.entries
-            .entry(key)
-            .or_insert_with(|| CfrEntry::new(src_entry.n_actions));
-        for i in 0..src_entry.data.len() {
-            dst_entry.data[i] += src_entry.data[i];
-        }
-    }
+/// Merge src CompactCfrState into dst by summing all regret and strategy entries.
+pub fn merge_cfr_state(dst: &mut CompactCfrState, src: &CompactCfrState) {
+    compact_state::merge_compact_state(dst, src);
 }
 
 /// Run a single MCCFR iteration: sample a deal, compute buckets, traverse.
@@ -38,7 +34,7 @@ fn run_one_iteration(
     config: &GameConfig,
     train_config: &TrainConfig,
     preflop_assignments: &[i32; 169],
-    cfr_states: &mut [CfrState; 2],
+    cfr_states: &mut [CompactCfrState; 2],
     rng: &mut Xoshiro256PlusPlus,
     iteration: u64,
     dcfr_table: Option<&DcfrTable>,
@@ -66,7 +62,9 @@ fn run_one_iteration(
     let traverser = (iteration % 2) as u8;
     let lcfr_iter = if train_config.lcfr { iteration as u32 } else { 0 };
     let prune_threshold = train_config.prune_threshold as f32;
-    let dcfr_epoch = (iteration / 1000) as u32;
+    // u16 epoch covers up to 65.5M iterations; beyond that DCFR discounting
+    // effectively stops (discount factors are ~1.0 at that scale anyway).
+    let dcfr_epoch = (iteration / 1000).min(65535) as u16;
 
     traversal::mccfr_traverse(
         config,
@@ -89,27 +87,29 @@ fn run_one_iteration(
 
 /// Train MCCFR for the given number of iterations (single-threaded).
 ///
-/// Returns the final CfrState pair for both players.
+/// Returns the final CompactCfrState pair for both players.
 pub fn train_mccfr(
     config: &GameConfig,
     train_config: &TrainConfig,
     preflop_assignments: &[i32; 169],
-    resume_from: Option<(&[CfrState; 2], u64)>,
-) -> [CfrState; 2] {
+    resume_from: Option<(&[CompactCfrState; 2], u64)>,
+) -> [CompactCfrState; 2] {
     let (mut cfr_states, start_iter) = match resume_from {
         Some((states, iter)) => {
             // Clone the states for resumed training
-            let s0 = CfrState {
-                entries: states[0].entries.clone(),
+            let s0 = CompactCfrState {
+                index: states[0].index.clone(),
+                arena: states[0].arena.clone(),
             };
-            let s1 = CfrState {
-                entries: states[1].entries.clone(),
+            let s1 = CompactCfrState {
+                index: states[1].index.clone(),
+                arena: states[1].arena.clone(),
             };
             ([s0, s1], iter)
         }
         None => {
-            let s0 = CfrState::new(train_config.initial_size);
-            let s1 = CfrState::new(train_config.initial_size);
+            let s0 = CompactCfrState::new(train_config.initial_size);
+            let s1 = CompactCfrState::new(train_config.initial_size);
             ([s0, s1], 0)
         }
     };
@@ -146,18 +146,20 @@ pub fn train_mccfr(
         if train_config.report_every > 0 && (iter + 1) % train_config.report_every == 0 {
             let avg_util = util_sum / (iter + 1 - start_iter) as f64;
             eprintln!(
-                "[iter {}] avg_util={:.2} P0={} P1={} info sets",
+                "[iter {}] avg_util={:.2} P0={} P1={} info sets  arena={}+{} i16",
                 iter + 1,
                 avg_util,
                 cfr_states[0].len(),
                 cfr_states[1].len(),
+                cfr_states[0].arena.len(),
+                cfr_states[1].arena.len(),
             );
         }
 
         // Checkpoint
         if train_config.checkpoint_every > 0 && (iter + 1) % train_config.checkpoint_every == 0 {
             let ckpt_path = format!("checkpoint_{}.bin", iter + 1);
-            if let Err(e) = checkpoint::save_raw_states(
+            if let Err(e) = checkpoint::save_compact_raw_states(
                 Path::new(&ckpt_path),
                 &cfr_states,
                 iter + 1,
@@ -174,14 +176,14 @@ pub fn train_mccfr(
 
 /// Train MCCFR in parallel using rayon.
 ///
-/// Each thread gets its own CfrState pair and RNG. After training, all thread
-/// states are merged by summing regrets and strategy sums.
+/// Each thread gets its own CompactCfrState pair and RNG. After training, all
+/// thread states are merged by summing regrets and strategy sums.
 pub fn train_mccfr_parallel(
     config: &GameConfig,
     train_config: &TrainConfig,
     preflop_assignments: &[i32; 169],
     num_threads: usize,
-) -> [CfrState; 2] {
+) -> [CompactCfrState; 2] {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build()
@@ -191,7 +193,7 @@ pub fn train_mccfr_parallel(
     let remainder = train_config.iterations % num_threads as u64;
 
     // Collect results from all threads
-    let thread_results: Vec<[CfrState; 2]> = pool.scope(|s| {
+    let thread_results: Vec<[CompactCfrState; 2]> = pool.scope(|s| {
         let mut handles = Vec::with_capacity(num_threads);
 
         for thread_id in 0..num_threads {
@@ -217,8 +219,8 @@ pub fn train_mccfr_parallel(
                 );
 
                 let mut cfr_states = [
-                    CfrState::new(thread_train_config.initial_size / num_threads.max(1)),
-                    CfrState::new(thread_train_config.initial_size / num_threads.max(1)),
+                    CompactCfrState::new(thread_train_config.initial_size / num_threads.max(1)),
+                    CompactCfrState::new(thread_train_config.initial_size / num_threads.max(1)),
                 ];
 
                 let mut util_sum = 0.0f64;
@@ -271,8 +273,8 @@ pub fn train_mccfr_parallel(
 
     // Merge all thread results
     let mut merged = [
-        CfrState::new(train_config.initial_size),
-        CfrState::new(train_config.initial_size),
+        CompactCfrState::new(train_config.initial_size),
+        CompactCfrState::new(train_config.initial_size),
     ];
 
     for thread_states in thread_results {
@@ -305,42 +307,42 @@ mod tests {
 
     #[test]
     fn test_merge_cfr_state() {
-        let mut dst = CfrState::new(100);
-        let mut src = CfrState::new(100);
+        let mut dst = CompactCfrState::new(100);
+        let mut src = CompactCfrState::new(100);
 
         // Add entries to src
         {
             let e = src.find_or_add(42, 3);
-            e.add_regret(0, 10.0);
-            e.add_regret(1, 5.0);
-            e.add_strategy(0, 100.0);
+            src.add_regret(&e, 0, 10.0);
+            src.add_regret(&e, 1, 5.0);
+            src.add_strategy(&e, 0, 100.0);
         }
 
         // Add overlapping entry to dst
         {
             let e = dst.find_or_add(42, 3);
-            e.add_regret(0, 20.0);
-            e.add_regret(1, -3.0);
-            e.add_strategy(0, 50.0);
+            dst.add_regret(&e, 0, 20.0);
+            dst.add_regret(&e, 1, -3.0);
+            dst.add_strategy(&e, 0, 50.0);
         }
 
         // Add non-overlapping entry to src
         {
             let e = src.find_or_add(99, 2);
-            e.add_regret(0, 7.0);
+            src.add_regret(&e, 0, 7.0);
         }
 
         merge_cfr_state(&mut dst, &src);
 
         // Key 42 should be summed
-        let e42 = dst.entries.get(&42).unwrap();
-        assert!((e42.regret(0) - 30.0).abs() < 0.01);
-        assert!((e42.regret(1) - 2.0).abs() < 0.01);
-        assert!((e42.strategy(0) - 150.0).abs() < 0.01);
+        let e42 = *dst.index.get(&42).unwrap();
+        assert!((dst.regret(&e42, 0) - 30.0).abs() < 1.0);
+        assert!((dst.regret(&e42, 1) - 2.0).abs() < 1.0);
+        assert!((dst.strategy(&e42, 0) - 150.0).abs() < 1.0);
 
         // Key 99 should be copied
-        let e99 = dst.entries.get(&99).unwrap();
-        assert!((e99.regret(0) - 7.0).abs() < 0.01);
+        let e99 = *dst.index.get(&99).unwrap();
+        assert!((dst.regret(&e99, 0) - 7.0).abs() < 1.0);
     }
 
     #[test]
@@ -452,10 +454,10 @@ mod tests {
         // Save and reload
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp");
         std::fs::create_dir_all(&dir).ok();
-        let path = dir.join("test_train_ckpt.bin");
+        let path = dir.join("test_train_ckpt_compact.bin");
 
-        checkpoint::save_raw_states(&path, &states, 200).unwrap();
-        let (loaded, iter) = checkpoint::load_raw_states(&path).unwrap();
+        checkpoint::save_compact_raw_states(&path, &states, 200).unwrap();
+        let (loaded, iter) = checkpoint::load_compact_raw_states(&path).unwrap();
 
         assert_eq!(iter, 200);
         assert_eq!(loaded[0].len(), p0_len);

@@ -5,7 +5,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rbm_mccfr::actions::{HistoryBuf, NlState};
 use rbm_mccfr::buckets;
 use rbm_mccfr::card;
-use rbm_mccfr::cfr_state::CfrState;
+use rbm_mccfr::compact_state::CompactCfrState;
 use rbm_mccfr::config::GameConfig;
 use rbm_mccfr::traversal;
 
@@ -89,7 +89,7 @@ fn bench_1000_iters(c: &mut Criterion) {
     c.bench_function("mccfr_1000_iters", |b| {
         b.iter(|| {
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xDEAD);
-            let mut cfr_states = [CfrState::new(10_000), CfrState::new(10_000)];
+            let mut cfr_states = [CompactCfrState::new(10_000), CompactCfrState::new(10_000)];
 
             for iter in 0..1000u64 {
                 let (p1, p2, board) = card::sample_deal(&mut rng);
