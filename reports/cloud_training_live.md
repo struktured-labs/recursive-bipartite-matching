@@ -56,3 +56,8 @@ Weighted average: ~-1.37 bb/hand. True performance is solidly in [-1.6, -1.0] ra
 Rust RBM creates 2.4x more info sets than OCaml RBM (585M vs 247M) at same iterations.
 More clusters (1,187 vs ~400) = finer abstraction but less training per info set.
 Need 25M+ iterations, or higher epsilon to reduce cluster count.
+| **Rust RBM 25M** | **RBM ε=0.5** | **25M** | **-2.71** | **[-3.22, -2.21]** | **2.49B** | **1,198** | **Better than 5M but 10x more info sets than OCaml** |
+
+Key finding: Rust RBM creates 10x more info sets than OCaml RBM at same epsilon.
+585M vs 247M at 5M, 2.49B vs ~500M est at 25M. The Rust showdown_distribution_tree
+or cluster assignment differs from OCaml. Must investigate and fix.
