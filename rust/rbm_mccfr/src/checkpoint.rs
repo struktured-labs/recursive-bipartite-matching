@@ -38,7 +38,7 @@ use std::io::{self, Read, Write, BufWriter, BufReader};
 use std::fs::File;
 use std::path::Path;
 use crate::cfr_state::{self, CfrState};
-use crate::compact_state::{self, CompactCfrState, CompactEntry};
+use crate::compact_state::{CompactCfrState, CompactEntry};
 
 const MAGIC: &[u8; 8] = b"RBMRUST1";
 const MAGIC_COMPACT_RAW: &[u8; 8] = b"RBMCMP01";
@@ -78,6 +78,8 @@ pub fn save_averaged_strategy(
 }
 
 /// Save the averaged strategy from CompactCfrState.
+/// Save averaged strategy by streaming entry-by-entry from compact state.
+/// Zero additional memory — computes average inline and writes directly.
 pub fn save_compact_averaged_strategy(
     path: &Path,
     states: &[CompactCfrState; 2],
@@ -88,21 +90,48 @@ pub fn save_compact_averaged_strategy(
     w.write_all(MAGIC)?;
 
     for player in 0..2 {
-        let avg = compact_state::average_strategy(&states[player]);
-        let n_entries = avg.len() as u64;
+        let state = &states[player];
+        let n_entries = state.len() as u64;
         w.write_all(&n_entries.to_le_bytes())?;
 
-        for (&key, probs) in &avg {
+        // Stream directly from arena — no intermediate HashMap
+        for (&key, entry) in &state.index {
+            let n = entry.n_actions as usize;
+            let base = entry.arena_offset as usize;
+
+            // Compute strategy sum total from i16 arena
+            let mut total: f64 = 0.0;
+            for i in 0..n {
+                total += state.arena[base + n + i] as f64;
+            }
+
             w.write_all(&key.to_le_bytes())?;
-            let n_actions = probs.len() as u32;
-            w.write_all(&n_actions.to_le_bytes())?;
-            for &p in probs {
-                w.write_all(&(p as f64).to_le_bytes())?;
+            w.write_all(&(n as u32).to_le_bytes())?;
+
+            if total > 0.0 {
+                for i in 0..n {
+                    let p = state.arena[base + n + i] as f64 / total;
+                    w.write_all(&p.to_le_bytes())?;
+                }
+            } else {
+                let uniform = 1.0 / n as f64;
+                for _ in 0..n {
+                    w.write_all(&uniform.to_le_bytes())?;
+                }
             }
         }
     }
 
     w.flush()?;
+
+    // Drop page cache for the written file — prevents OOM from cache pressure
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = w.get_ref().as_raw_fd();
+        unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED); }
+    }
+
     Ok(())
 }
 

@@ -30,6 +30,7 @@ use serde_json::Value;
 
 use crate::buckets;
 use crate::card::{self, Card};
+use crate::compact_state::CompactCfrState;
 use crate::config::GameConfig;
 use crate::info_key;
 
@@ -49,6 +50,60 @@ const SLUMBOT_BASE_URL: &str = "https://slumbot.com/slumbot/api";
 /// Averaged strategy: info_key -> probability distribution over actions.
 pub type Strategy = FxHashMap<u64, Vec<f32>>;
 
+/// Strategy source for play: either a full averaged strategy in memory
+/// (small games) or a compact checkpoint that computes averaged strategy
+/// on-the-fly (large games, avoids 119GB HashMap).
+pub enum PlayStrategy {
+    /// Full averaged strategy in memory (small games).
+    Full([Strategy; 2]),
+    /// Compact checkpoint -- normalize strategy_sums on demand (large games).
+    Compact([CompactCfrState; 2]),
+}
+
+impl PlayStrategy {
+    /// Look up the averaged strategy probabilities for a given player and key.
+    /// For Full, this is a direct HashMap lookup.
+    /// For Compact, this normalizes strategy_sums inline (zero extra memory).
+    fn get_probs(&self, player: usize, key: u64, n_actions: usize) -> Option<Vec<f32>> {
+        match self {
+            PlayStrategy::Full(strats) => {
+                strats[player].get(&key).cloned()
+            }
+            PlayStrategy::Compact(states) => {
+                let entry = states[player].index.get(&key)?;
+                let n = entry.n_actions as usize;
+                if n != n_actions {
+                    return None;
+                }
+                let base = entry.arena_offset as usize;
+                let mut total: f32 = 0.0;
+                for i in 0..n {
+                    let v = states[player].arena[base + n + i] as f32;
+                    if v > 0.0 {
+                        total += v;
+                    }
+                }
+                if total > 0.0 {
+                    Some((0..n).map(|i| {
+                        let v = states[player].arena[base + n + i] as f32;
+                        if v > 0.0 { v / total } else { 0.0 }
+                    }).collect())
+                } else {
+                    Some(vec![1.0 / n as f32; n])
+                }
+            }
+        }
+    }
+
+    /// Number of info sets for a player (for display).
+    pub fn len(&self, player: usize) -> usize {
+        match self {
+            PlayStrategy::Full(strats) => strats[player].len(),
+            PlayStrategy::Compact(states) => states[player].len(),
+        }
+    }
+}
+
 /// Load averaged strategy from the binary checkpoint format.
 /// Returns [p0_strategy, p1_strategy].
 pub fn load_strategy(path: &Path) -> std::io::Result<[Strategy; 2]> {
@@ -63,6 +118,43 @@ pub fn load_strategy(path: &Path) -> std::io::Result<[Strategy; 2]> {
         }
     }
     Ok(result)
+}
+
+/// Load a compact checkpoint (RBMCMP01) for play. Returns the raw compact
+/// states -- averaged strategy is computed on-the-fly during play via
+/// strategy_sum normalization.
+///
+/// This uses ~32GB for 978M info sets instead of 119GB for the full HashMap.
+pub fn load_compact_for_play(path: &Path) -> std::io::Result<[CompactCfrState; 2]> {
+    let (states, iteration) = crate::checkpoint::load_compact_raw_states(path)?;
+    eprintln!("Loaded compact checkpoint for play: {} P0 + {} P1 info sets, iteration {}",
+        states[0].len(), states[1].len(), iteration);
+    Ok(states)
+}
+
+/// Auto-detect checkpoint format and load as PlayStrategy.
+/// RBMCMP01 -> Compact (memory-efficient), RBMRUST1 -> Full (averaged strategy).
+pub fn load_play_strategy(path: &Path) -> std::io::Result<PlayStrategy> {
+    // Read magic header to detect format
+    let mut file = std::fs::File::open(path)?;
+    let mut magic = [0u8; 8];
+    std::io::Read::read_exact(&mut file, &mut magic)?;
+    drop(file);
+
+    if &magic == b"RBMCMP01" {
+        eprintln!("Detected compact checkpoint (RBMCMP01) -- playing directly from compact state");
+        let states = load_compact_for_play(path)?;
+        Ok(PlayStrategy::Compact(states))
+    } else if &magic == b"RBMRUST1" {
+        eprintln!("Detected averaged strategy (RBMRUST1) -- loading full strategy into memory");
+        let strats = load_strategy(path)?;
+        Ok(PlayStrategy::Full(strats))
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Unknown checkpoint format: {:?}", std::str::from_utf8(&magic)),
+        ))
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -369,10 +461,11 @@ fn slumbot_action_to_internal_history(action: &str) -> Vec<u8> {
 /// Maps the Slumbot state to an internal info-set key, looks up the
 /// strategy, samples an action, then converts back to Slumbot format.
 ///
-/// Returns: (slumbot_action_string, internal_history_char, strategy_probs)
+/// Works with both Full (HashMap) and Compact (arena i16) strategies.
+///
+/// Returns: (slumbot_action_string, info_key, strategy_probs)
 fn select_slumbot_action(
-    p0_strat: &Strategy,
-    p1_strat: &Strategy,
+    play_strategy: &PlayStrategy,
     hole_cards: &[Card; 2],
     board: &[Card],
     client_pos: i32,
@@ -391,10 +484,10 @@ fn select_slumbot_action(
     let internal_history = slumbot_action_to_internal_history(action);
     let key = info_key::make_info_key(&buckets_arr, round_idx, &internal_history);
 
-    // client_pos 0 (BB) -> use p1_strat, client_pos 1 (SB) -> use p0_strat
-    let strategy = match client_pos {
-        1 => p0_strat, // SB = position 0
-        _ => p1_strat, // BB = position 1
+    // client_pos 0 (BB) -> player 1, client_pos 1 (SB) -> player 0
+    let player = match client_pos {
+        1 => 0usize, // SB = position 0
+        _ => 1usize, // BB = position 1
     };
 
     // Available actions: fold (if facing bet), check/call, bet fractions, all-in
@@ -439,9 +532,9 @@ fn select_slumbot_action(
 
     let num_actions = actions.len();
 
-    // Look up strategy
-    let probs = match strategy.get(&key) {
-        Some(p) if p.len() == num_actions => p.clone(),
+    // Look up strategy (works for both Full and Compact)
+    let probs = match play_strategy.get_probs(player, key, num_actions) {
+        Some(p) if p.len() == num_actions => p,
         _ => vec![1.0 / num_actions as f32; num_actions],
     };
 
@@ -593,8 +686,7 @@ impl Default for PlayConfig {
 ///
 /// Returns (new_token, HandResult).
 pub fn play_hand(
-    p0_strat: &Strategy,
-    p1_strat: &Strategy,
+    play_strategy: &PlayStrategy,
     play_config: &PlayConfig,
     token: Option<&str>,
     hand_num: u32,
@@ -667,8 +759,7 @@ pub fn play_hand(
 
         // Select and send action
         let (incr, key, probs) = select_slumbot_action(
-            p0_strat,
-            p1_strat,
+            play_strategy,
             &hole_cards,
             &board,
             client_pos,
@@ -696,8 +787,7 @@ pub fn play_hand(
 
 /// Play N hands against Slumbot and print statistics.
 pub fn run_session(
-    p0_strat: &Strategy,
-    p1_strat: &Strategy,
+    play_strategy: &PlayStrategy,
     play_config: &PlayConfig,
     num_hands: u32,
 ) -> Result<SessionResult, String> {
@@ -705,7 +795,7 @@ pub fn run_session(
 
     eprintln!("[slumbot] Starting session: LIVE (slumbot.com), {} hands", num_hands);
     eprintln!("[slumbot] Strategy: P0={} P1={} info sets",
-        p0_strat.len(), p1_strat.len());
+        play_strategy.len(0), play_strategy.len(1));
 
     let mut rng = rand::thread_rng();
     let mut token: Option<String> = None;
@@ -715,8 +805,7 @@ pub fn run_session(
 
     for hand in 1..=num_hands {
         match play_hand(
-            p0_strat,
-            p1_strat,
+            play_strategy,
             play_config,
             token.as_deref(),
             hand,
@@ -801,7 +890,7 @@ pub fn run_session(
     println!("  Time:            {:.1} seconds ({:.2} hands/sec)", elapsed, n as f64 / elapsed);
     println!("  Game: HUNL 50/100 blinds, 20000 stack (200bb)");
     println!("  Strategy: NL MCCFR, P0={} P1={} info sets",
-        p0_strat.len(), p1_strat.len());
+        play_strategy.len(0), play_strategy.len(1));
     println!("================================================================");
 
     Ok(SessionResult {

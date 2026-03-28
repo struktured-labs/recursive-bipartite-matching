@@ -195,7 +195,8 @@ fn num_cpus() -> usize {
         .unwrap_or(1)
 }
 
-/// Play against Slumbot using a loaded strategy.
+/// Play against Slumbot using a loaded strategy file.
+/// Auto-detects format: RBMCMP01 (compact, ~32GB) or RBMRUST1 (full, ~119GB).
 fn play_against_slumbot(
     strategy_path: &str,
     num_hands: u32,
@@ -208,10 +209,10 @@ fn play_against_slumbot(
     eprintln!("=== Slumbot Play ===");
     eprintln!("Loading strategy from: {}", strategy_path);
 
-    let [p0_strat, p1_strat] = slumbot::load_strategy(Path::new(strategy_path))
+    let play_strategy = slumbot::load_play_strategy(Path::new(strategy_path))
         .expect("failed to load strategy");
 
-    eprintln!("Loaded P0={} P1={} info sets", p0_strat.len(), p1_strat.len());
+    eprintln!("Loaded P0={} P1={} info sets", play_strategy.len(0), play_strategy.len(1));
     eprintln!("Playing {} hands against Slumbot...", num_hands);
 
     let mut play_config = slumbot::PlayConfig::default();
@@ -220,7 +221,43 @@ fn play_against_slumbot(
     play_config.game_config = game_config.clone();
     play_config.verbose = verbose;
 
-    match slumbot::run_session(&p0_strat, &p1_strat, &play_config, num_hands) {
+    match slumbot::run_session(&play_strategy, &play_config, num_hands) {
+        Ok(result) => {
+            eprintln!();
+            eprintln!("Session complete: {:.2} mbb/hand over {} hands",
+                result.mean_bb * 1000.0, result.hands_played);
+        }
+        Err(e) => {
+            eprintln!("Session error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Play against Slumbot directly from in-memory compact training state.
+/// Avoids the save+reload cycle for train+play mode.
+fn play_from_compact_state(
+    states: [rbm_mccfr::compact_state::CompactCfrState; 2],
+    num_hands: u32,
+    n_buckets: u32,
+    assignments: &[i32; 169],
+    game_config: &GameConfig,
+    verbose: bool,
+) {
+    eprintln!();
+    eprintln!("=== Slumbot Play (from training state) ===");
+    eprintln!("Playing {} hands against Slumbot directly from compact state...", num_hands);
+    eprintln!("P0={} P1={} info sets", states[0].len(), states[1].len());
+
+    let play_strategy = slumbot::PlayStrategy::Compact(states);
+
+    let mut play_config = slumbot::PlayConfig::default();
+    play_config.n_buckets = n_buckets;
+    play_config.preflop_assignments = *assignments;
+    play_config.game_config = game_config.clone();
+    play_config.verbose = verbose;
+
+    match slumbot::run_session(&play_strategy, &play_config, num_hands) {
         Ok(result) => {
             eprintln!();
             eprintln!("Session complete: {:.2} mbb/hand over {} hands",
@@ -330,24 +367,36 @@ fn main() {
         arena_bytes as f64 / 1024.0 / 1024.0,
         index_bytes as f64 / 1024.0 / 1024.0);
 
-    // Save averaged strategy (same format as before, compatible with Slumbot play)
+    // Save averaged strategy (streaming — zero extra memory)
     checkpoint::save_compact_averaged_strategy(Path::new(&cli.output), &states)
         .expect("failed to save strategy");
     eprintln!("Averaged strategy saved to: {}", cli.output);
 
-    // Also save compact raw checkpoint for potential resume
-    let raw_path = cli.output.replace(".bin", "_raw.bin");
-    checkpoint::save_compact_raw_states(Path::new(&raw_path), &states, cli.train_config.iterations)
-        .expect("failed to save raw checkpoint");
-    eprintln!("Compact raw checkpoint saved to: {}", raw_path);
+    // Only save raw checkpoint if we actually trained (not just resuming to export)
+    let did_train = cli.resume_path.is_none() || {
+        let resumed_iter = cli.resume_path.as_ref().and_then(|p| {
+            // Extract iteration from checkpoint filename like checkpoint_25000000.bin
+            let stem = Path::new(p).file_stem()?.to_str()?;
+            stem.strip_prefix("checkpoint_")?.parse::<u64>().ok()
+        }).unwrap_or(0);
+        resumed_iter < cli.train_config.iterations as u64
+    };
+
+    if did_train {
+        let raw_path = cli.output.replace(".bin", "_raw.bin");
+        checkpoint::save_compact_raw_states(Path::new(&raw_path), &states, cli.train_config.iterations)
+            .expect("failed to save raw checkpoint");
+        eprintln!("Compact raw checkpoint saved to: {}", raw_path);
+    }
 
     let iters_per_sec = cli.train_config.iterations as f64 / elapsed.as_secs_f64();
     eprintln!("Speed: {:.0} iterations/sec", iters_per_sec);
 
-    // Play against Slumbot if requested
+    // Play against Slumbot if requested — play directly from training state,
+    // no need to reload from disk (saves time and avoids OOM on large games).
     if cli.play_hands > 0 {
-        play_against_slumbot(
-            &cli.output,
+        play_from_compact_state(
+            states,
             cli.play_hands,
             cli.train_config.n_buckets,
             &cli.assignments,

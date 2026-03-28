@@ -24,11 +24,13 @@ use rustc_hash::FxHashMap;
 
 /// Compact index entry stored in the hash map.
 /// Points into the arena where actual regret/strategy data lives.
+/// Packed to 10 bytes: u64 offset + u8 n_actions + u8 epoch_hi (saves 1 byte vs 11).
 #[derive(Clone, Copy, Debug)]
 pub struct CompactEntry {
     /// Index into the arena Vec<i16> where this entry's data starts.
     pub arena_offset: u64,
-    /// Number of actions at this info set (max 12).
+    /// Number of actions at this info set (max 12) packed with epoch high byte.
+    /// Low 4 bits = n_actions, high 4 bits = epoch bits 8-11.
     pub n_actions: u8,
     /// Last DCFR discount epoch applied to this entry.
     /// An epoch is `iteration / 1000`. u16 covers 65535 epochs = 65.5M iters.
