@@ -35,3 +35,12 @@ Weighted average: ~-1.37 bb/hand. True performance is solidly in [-1.6, -1.0] ra
 | **i-021a1243d26d4aff0** | **4** | **384GB** | **OOM at 81.5%** | **114M/140M (174M total)** |
 
 ## Budget: $500 (spent ~$350, remaining ~$150)
+
+## Rust MCCFR Local Results
+
+| Run | Storage | Iters | bb/hand | 95% CI | Notes |
+|---|---|---|---|---|---|
+| Rust 5M DCFR+LCFR | f32 Vec | 5M | **-1.16** | [-1.47, -0.85] | Best result |
+| **Rust 25M DCFR+LCFR** | **i16 arena** | **25M** | **-2.43** | **[-2.94, -1.91]** | **WORSE — investigate i16 saturation** |
+
+25M i16 is 2x worse than 5M f32. Likely i16 strategy sum saturation at ±32767.
