@@ -355,16 +355,18 @@ fn main() {
 
     eprintln!();
     eprintln!("Training complete in {:.1}s", elapsed.as_secs_f64());
-    eprintln!("P0: {} info sets ({} i16 arena values)", states[0].len(), states[0].arena.len());
-    eprintln!("P1: {} info sets ({} i16 arena values)", states[1].len(), states[1].arena.len());
+    eprintln!("P0: {} info sets ({} i16 regrets, {} f32 strats)", states[0].len(), states[0].regret_arena.len(), states[0].strategy_arena.len());
+    eprintln!("P1: {} info sets ({} i16 regrets, {} f32 strats)", states[1].len(), states[1].regret_arena.len(), states[1].strategy_arena.len());
 
     // Memory estimate
-    let arena_bytes = (states[0].arena.len() + states[1].arena.len()) * 2;
+    let regret_bytes = (states[0].regret_arena.len() + states[1].regret_arena.len()) * 2; // i16 = 2 bytes
+    let strategy_bytes = (states[0].strategy_arena.len() + states[1].strategy_arena.len()) * 4; // f32 = 4 bytes
     let index_bytes = (states[0].len() + states[1].len()) * 24; // ~24 bytes per hashmap entry
-    let total_mb = (arena_bytes + index_bytes) as f64 / 1024.0 / 1024.0;
-    eprintln!("Memory: {:.1} MB (arena={:.1} MB, index={:.1} MB)",
+    let total_mb = (regret_bytes + strategy_bytes + index_bytes) as f64 / 1024.0 / 1024.0;
+    eprintln!("Memory: {:.1} MB (regret={:.1} MB, strat={:.1} MB, index={:.1} MB)",
         total_mb,
-        arena_bytes as f64 / 1024.0 / 1024.0,
+        regret_bytes as f64 / 1024.0 / 1024.0,
+        strategy_bytes as f64 / 1024.0 / 1024.0,
         index_bytes as f64 / 1024.0 / 1024.0);
 
     // Save averaged strategy (streaming — zero extra memory)

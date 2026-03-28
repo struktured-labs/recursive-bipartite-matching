@@ -75,17 +75,17 @@ impl PlayStrategy {
                 if n != n_actions {
                     return None;
                 }
-                let base = entry.arena_offset as usize;
+                let base = entry.strategy_offset as usize;
                 let mut total: f32 = 0.0;
                 for i in 0..n {
-                    let v = states[player].arena[base + n + i] as f32;
+                    let v = states[player].strategy_arena[base + i];
                     if v > 0.0 {
                         total += v;
                     }
                 }
                 if total > 0.0 {
                     Some((0..n).map(|i| {
-                        let v = states[player].arena[base + n + i] as f32;
+                        let v = states[player].strategy_arena[base + i];
                         if v > 0.0 { v / total } else { 0.0 }
                     }).collect())
                 } else {
@@ -120,7 +120,7 @@ pub fn load_strategy(path: &Path) -> std::io::Result<[Strategy; 2]> {
     Ok(result)
 }
 
-/// Load a compact checkpoint (RBMCMP01) for play. Returns the raw compact
+/// Load a compact checkpoint (RBMCMP01 or RBMCMP02) for play. Returns the raw compact
 /// states -- averaged strategy is computed on-the-fly during play via
 /// strategy_sum normalization.
 ///
@@ -133,7 +133,7 @@ pub fn load_compact_for_play(path: &Path) -> std::io::Result<[CompactCfrState; 2
 }
 
 /// Auto-detect checkpoint format and load as PlayStrategy.
-/// RBMCMP01 -> Compact (memory-efficient), RBMRUST1 -> Full (averaged strategy).
+/// RBMCMP02/RBMCMP01 -> Compact (memory-efficient), RBMRUST1 -> Full (averaged strategy).
 pub fn load_play_strategy(path: &Path) -> std::io::Result<PlayStrategy> {
     // Read magic header to detect format
     let mut file = std::fs::File::open(path)?;
@@ -141,8 +141,9 @@ pub fn load_play_strategy(path: &Path) -> std::io::Result<PlayStrategy> {
     std::io::Read::read_exact(&mut file, &mut magic)?;
     drop(file);
 
-    if &magic == b"RBMCMP01" {
-        eprintln!("Detected compact checkpoint (RBMCMP01) -- playing directly from compact state");
+    if &magic == b"RBMCMP02" || &magic == b"RBMCMP01" {
+        eprintln!("Detected compact checkpoint ({}) -- playing directly from compact state",
+            std::str::from_utf8(&magic).unwrap_or("???"));
         let states = load_compact_for_play(path)?;
         Ok(PlayStrategy::Compact(states))
     } else if &magic == b"RBMRUST1" {

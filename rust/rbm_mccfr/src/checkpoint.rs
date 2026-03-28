@@ -1,6 +1,6 @@
 /// Checkpoint save/load for MCCFR strategy data.
 ///
-/// Supports two formats:
+/// Supports three formats:
 ///
 /// 1. Averaged strategy ("RBMRUST1") — used for Slumbot play / OCaml compat:
 ///   Magic:       "RBMRUST1" (8 bytes)
@@ -11,12 +11,28 @@
 ///     probs:     [f64; n_actions] (LE) — averaged strategy probabilities
 ///   N_p1:        u64 (LE) ... (same format)
 ///
-/// 2. Compact raw checkpoint ("RBMCMP01") — arena-backed i16 storage:
-///   Magic:       "RBMCMP01" (8 bytes)
+/// 2. Compact raw checkpoint ("RBMCMP02") — split arena: i16 regrets + f32 strategy:
+///   Magic:       "RBMCMP02" (8 bytes)
 ///   Iteration:   u64 (LE)
 ///   For each player (0, 1):
+///     N_entries:         u64 (LE)
+///     Regret_arena_len:  u64 (LE) — number of i16 values in regret_arena
+///     Regret arena data: [i16; regret_arena_len] (LE)
+///     Strategy_arena_len: u64 (LE) — number of f32 values in strategy_arena
+///     Strategy arena data: [f32; strategy_arena_len] (LE)
+///     For each entry:
+///       key:       u64 (LE)
+///       regret_offset:   u32 (LE)
+///       strategy_offset: u32 (LE)
+///       n_actions: u8
+///       epoch:     u16 (LE)
+///
+/// 3. Legacy compact raw checkpoint ("RBMCMP01") — old single i16 arena (read-only):
+///   Magic:       "RBMCMP01" (8 bytes)
+///   Iteration:   u64 (LE)
+///   For each player:
 ///     N_entries:   u64 (LE)
-///     Arena_len:   u64 (LE) — number of i16 values in arena
+///     Arena_len:   u64 (LE)
 ///     Arena data:  [i16; arena_len] (LE)
 ///     For each entry:
 ///       key:       u64 (LE)
@@ -24,7 +40,7 @@
 ///       n_actions: u8
 ///       epoch:     u16 (LE)
 ///
-/// 3. Legacy raw checkpoint ("RBMRAW01") — old f32-based format (read-only):
+/// 4. Legacy raw checkpoint ("RBMRAW01") — old f32-based format (read-only):
 ///   Magic:       "RBMRAW01" (8 bytes)
 ///   Iteration:   u64 (LE)
 ///   For each player:
@@ -41,7 +57,8 @@ use crate::cfr_state::{self, CfrState};
 use crate::compact_state::{CompactCfrState, CompactEntry};
 
 const MAGIC: &[u8; 8] = b"RBMRUST1";
-const MAGIC_COMPACT_RAW: &[u8; 8] = b"RBMCMP01";
+const MAGIC_COMPACT_RAW: &[u8; 8] = b"RBMCMP02";
+const MAGIC_COMPACT_RAW_V1: &[u8; 8] = b"RBMCMP01";
 
 // -----------------------------------------------------------------------
 // Averaged strategy (unchanged — works with both old and new state)
@@ -94,15 +111,15 @@ pub fn save_compact_averaged_strategy(
         let n_entries = state.len() as u64;
         w.write_all(&n_entries.to_le_bytes())?;
 
-        // Stream directly from arena — no intermediate HashMap
+        // Stream directly from strategy_arena — no intermediate HashMap
         for (&key, entry) in &state.index {
             let n = entry.n_actions as usize;
-            let base = entry.arena_offset as usize;
+            let s_base = entry.strategy_offset as usize;
 
-            // Compute strategy sum total from i16 arena
+            // Compute strategy sum total from f32 strategy_arena
             let mut total: f64 = 0.0;
             for i in 0..n {
-                total += state.arena[base + n + i] as f64;
+                total += state.strategy_arena[s_base + i] as f64;
             }
 
             w.write_all(&key.to_le_bytes())?;
@@ -110,7 +127,7 @@ pub fn save_compact_averaged_strategy(
 
             if total > 0.0 {
                 for i in 0..n {
-                    let p = state.arena[base + n + i] as f64 / total;
+                    let p = state.strategy_arena[s_base + i] as f64 / total;
                     w.write_all(&p.to_le_bytes())?;
                 }
             } else {
@@ -255,12 +272,12 @@ pub fn load_raw_states(path: &Path) -> io::Result<([CfrState; 2], u64)> {
 }
 
 // -----------------------------------------------------------------------
-// Compact raw checkpoint (CompactCfrState, i16-based)
+// Compact raw checkpoint (CompactCfrState, split arenas)
 // -----------------------------------------------------------------------
 
-/// Save compact CFR states (i16 arena-backed) for resume capability.
+/// Save compact CFR states (split arenas: i16 regrets + f32 strategy) for resume.
 ///
-/// Format: RBMCMP01 + iteration + per-player { n_entries, arena_len, arena[], entries[] }
+/// Format: RBMCMP02 + iteration + per-player { n_entries, regret_arena, strategy_arena, entries[] }
 pub fn save_compact_raw_states(
     path: &Path,
     states: &[CompactCfrState; 2],
@@ -275,20 +292,28 @@ pub fn save_compact_raw_states(
     for player in 0..2 {
         let state = &states[player];
         let n_entries = state.index.len() as u64;
-        let arena_len = state.arena.len() as u64;
+        let regret_arena_len = state.regret_arena.len() as u64;
+        let strategy_arena_len = state.strategy_arena.len() as u64;
 
         w.write_all(&n_entries.to_le_bytes())?;
-        w.write_all(&arena_len.to_le_bytes())?;
 
-        // Write arena as raw i16 bytes (LE)
-        for &val in &state.arena {
+        // Write regret arena
+        w.write_all(&regret_arena_len.to_le_bytes())?;
+        for &val in &state.regret_arena {
+            w.write_all(&val.to_le_bytes())?;
+        }
+
+        // Write strategy arena
+        w.write_all(&strategy_arena_len.to_le_bytes())?;
+        for &val in &state.strategy_arena {
             w.write_all(&val.to_le_bytes())?;
         }
 
         // Write index entries
         for (&key, entry) in &state.index {
             w.write_all(&key.to_le_bytes())?;
-            w.write_all(&entry.arena_offset.to_le_bytes())?;
+            w.write_all(&entry.regret_offset.to_le_bytes())?;
+            w.write_all(&entry.strategy_offset.to_le_bytes())?;
             w.write_all(&[entry.n_actions])?;
             w.write_all(&entry.last_discount_epoch.to_le_bytes())?;
         }
@@ -298,7 +323,7 @@ pub fn save_compact_raw_states(
     Ok(())
 }
 
-/// Load compact CFR states from a checkpoint file.
+/// Load compact CFR states from a checkpoint file (RBMCMP02 format).
 /// Returns (states, iteration) on success.
 pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2], u64)> {
     let file = File::open(path)?;
@@ -306,7 +331,91 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
 
     let mut magic = [0u8; 8];
     r.read_exact(&mut magic)?;
+
+    // Support both v2 (split arenas) and v1 (single arena, auto-convert)
+    if &magic == MAGIC_COMPACT_RAW_V1 {
+        // Re-open and load via the v1 loader
+        drop(r);
+        return load_compact_raw_states_v1(path);
+    }
+
     if &magic != MAGIC_COMPACT_RAW {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+            format!("bad magic: expected RBMCMP02, got {:?}", std::str::from_utf8(&magic))));
+    }
+
+    let mut buf8 = [0u8; 8];
+    r.read_exact(&mut buf8)?;
+    let iteration = u64::from_le_bytes(buf8);
+
+    let mut states = [CompactCfrState::new(100_000), CompactCfrState::new(100_000)];
+
+    for player in 0..2 {
+        r.read_exact(&mut buf8)?;
+        let n_entries = u64::from_le_bytes(buf8) as usize;
+
+        // Read regret arena
+        r.read_exact(&mut buf8)?;
+        let regret_arena_len = u64::from_le_bytes(buf8) as usize;
+        states[player].regret_arena = Vec::with_capacity(regret_arena_len);
+        let mut buf2 = [0u8; 2];
+        for _ in 0..regret_arena_len {
+            r.read_exact(&mut buf2)?;
+            states[player].regret_arena.push(i16::from_le_bytes(buf2));
+        }
+
+        // Read strategy arena
+        r.read_exact(&mut buf8)?;
+        let strategy_arena_len = u64::from_le_bytes(buf8) as usize;
+        states[player].strategy_arena = Vec::with_capacity(strategy_arena_len);
+        let mut buf4 = [0u8; 4];
+        for _ in 0..strategy_arena_len {
+            r.read_exact(&mut buf4)?;
+            states[player].strategy_arena.push(f32::from_le_bytes(buf4));
+        }
+
+        // Read index entries
+        states[player].index.reserve(n_entries);
+        for _ in 0..n_entries {
+            r.read_exact(&mut buf8)?;
+            let key = u64::from_le_bytes(buf8);
+
+            let mut buf4r = [0u8; 4];
+            r.read_exact(&mut buf4r)?;
+            let regret_offset = u32::from_le_bytes(buf4r);
+
+            let mut buf4s = [0u8; 4];
+            r.read_exact(&mut buf4s)?;
+            let strategy_offset = u32::from_le_bytes(buf4s);
+
+            let mut buf1 = [0u8; 1];
+            r.read_exact(&mut buf1)?;
+            let n_actions = buf1[0];
+
+            let mut buf2_epoch = [0u8; 2];
+            r.read_exact(&mut buf2_epoch)?;
+            let last_discount_epoch = u16::from_le_bytes(buf2_epoch);
+
+            states[player].index.insert(key, CompactEntry {
+                regret_offset,
+                strategy_offset,
+                n_actions,
+                last_discount_epoch,
+            });
+        }
+    }
+
+    Ok((states, iteration))
+}
+
+/// Load a legacy RBMCMP01 checkpoint (single i16 arena) and convert to split arenas.
+fn load_compact_raw_states_v1(path: &Path) -> io::Result<([CompactCfrState; 2], u64)> {
+    let file = File::open(path)?;
+    let mut r = BufReader::new(file);
+
+    let mut magic = [0u8; 8];
+    r.read_exact(&mut magic)?;
+    if &magic != MAGIC_COMPACT_RAW_V1 {
         return Err(io::Error::new(io::ErrorKind::InvalidData,
             format!("bad magic: expected RBMCMP01, got {:?}", std::str::from_utf8(&magic))));
     }
@@ -324,16 +433,22 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
         r.read_exact(&mut buf8)?;
         let arena_len = u64::from_le_bytes(buf8) as usize;
 
-        // Read arena
-        states[player].arena = Vec::with_capacity(arena_len);
+        // Read the old single arena
+        let mut old_arena: Vec<i16> = Vec::with_capacity(arena_len);
         let mut buf2 = [0u8; 2];
         for _ in 0..arena_len {
             r.read_exact(&mut buf2)?;
-            states[player].arena.push(i16::from_le_bytes(buf2));
+            old_arena.push(i16::from_le_bytes(buf2));
         }
 
-        // Read index entries
-        states[player].index.reserve(n_entries);
+        // Read old index entries (with u64 arena_offset)
+        struct OldEntry {
+            key: u64,
+            arena_offset: u64,
+            n_actions: u8,
+            last_discount_epoch: u16,
+        }
+        let mut old_entries = Vec::with_capacity(n_entries);
         for _ in 0..n_entries {
             r.read_exact(&mut buf8)?;
             let key = u64::from_le_bytes(buf8);
@@ -349,10 +464,31 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
             r.read_exact(&mut buf2_epoch)?;
             let last_discount_epoch = u16::from_le_bytes(buf2_epoch);
 
-            states[player].index.insert(key, CompactEntry {
-                arena_offset,
-                n_actions,
-                last_discount_epoch,
+            old_entries.push(OldEntry { key, arena_offset, n_actions, last_discount_epoch });
+        }
+
+        // Convert: old layout was [regret_0..regret_{n-1}, strat_0..strat_{n-1}] in single arena
+        // Split into separate regret_arena (i16) and strategy_arena (f32)
+        for oe in &old_entries {
+            let n = oe.n_actions as usize;
+            let old_base = oe.arena_offset as usize;
+            let regret_offset = states[player].regret_arena.len() as u32;
+            let strategy_offset = states[player].strategy_arena.len() as u32;
+
+            // Copy regrets
+            for i in 0..n {
+                states[player].regret_arena.push(old_arena[old_base + i]);
+            }
+            // Convert strategy sums from i16 to f32
+            for i in 0..n {
+                states[player].strategy_arena.push(old_arena[old_base + n + i] as f32);
+            }
+
+            states[player].index.insert(oe.key, CompactEntry {
+                regret_offset,
+                strategy_offset,
+                n_actions: oe.n_actions,
+                last_discount_epoch: oe.last_discount_epoch,
             });
         }
     }
@@ -477,7 +613,7 @@ mod tests {
 
     #[test]
     fn test_compact_raw_roundtrip() {
-        let path = test_dir().join("test_compact_raw_roundtrip.bin");
+        let path = test_dir().join("test_compact_raw_roundtrip_v2.bin");
 
         let mut states = [CompactCfrState::new(100), CompactCfrState::new(100)];
         {
@@ -509,17 +645,20 @@ mod tests {
         assert_eq!(loaded[0].regret(&e0, 0), 10.0);
         assert_eq!(loaded[0].regret(&e0, 1), -5.0);
         assert_eq!(loaded[0].strategy(&e0, 0), 100.0);
+        assert_eq!(loaded[0].strategy(&e0, 1), 50.0);
 
         let e1 = *loaded[1].index.get(&99).unwrap();
         assert_eq!(e1.n_actions, 2);
         assert_eq!(loaded[1].regret(&e1, 0), 7.0);
+        assert_eq!(loaded[1].strategy(&e1, 0), 200.0);
+        assert_eq!(loaded[1].strategy(&e1, 1), 300.0);
 
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_compact_averaged_roundtrip() {
-        let path = test_dir().join("test_compact_avg_roundtrip.bin");
+        let path = test_dir().join("test_compact_avg_roundtrip_v2.bin");
 
         let mut states = [CompactCfrState::new(100), CompactCfrState::new(100)];
         {
@@ -570,6 +709,31 @@ mod tests {
         assert_eq!(compact[0].regret(&e, 0), 10.0);
         assert_eq!(compact[0].regret(&e, 1), -5.0);
         assert_eq!(compact[0].strategy(&e, 0), 100.0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_compact_large_strategy_sums_roundtrip() {
+        // Verify that large f32 strategy sums survive save/load
+        let path = test_dir().join("test_compact_large_strat_v2.bin");
+
+        let mut states = [CompactCfrState::new(100), CompactCfrState::new(100)];
+        {
+            let e = states[0].find_or_add(42, 2);
+            states[0].add_regret(&e, 0, 100.0);
+            states[0].add_strategy(&e, 0, 15_000_000.0);
+            states[0].add_strategy(&e, 1, 10_000_000.0);
+        }
+
+        save_compact_raw_states(&path, &states, 25_000_000).unwrap();
+        let (loaded, iter) = load_compact_raw_states(&path).unwrap();
+
+        assert_eq!(iter, 25_000_000);
+        let e = *loaded[0].index.get(&42).unwrap();
+        assert_eq!(loaded[0].regret(&e, 0), 100.0);
+        assert!((loaded[0].strategy(&e, 0) - 15_000_000.0).abs() < 1.0);
+        assert!((loaded[0].strategy(&e, 1) - 10_000_000.0).abs() < 1.0);
 
         std::fs::remove_file(&path).ok();
     }

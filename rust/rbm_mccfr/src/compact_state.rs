@@ -1,58 +1,68 @@
-/// Ultra-compact CFR state: arena-backed i16 storage for regrets + strategy sums.
+/// Ultra-compact CFR state: split arena storage for regrets (i16) + strategy sums (f32).
 ///
 /// Memory layout:
-///   - FxHashMap<u64, CompactEntry> — 16 bytes per entry (offset + metadata)
-///   - Vec<i16> arena — contiguous storage for all regret/strategy data
+///   - FxHashMap<u64, CompactEntry> — metadata per info set
+///   - Vec<i16> regret_arena  — contiguous storage for cumulative regrets
+///   - Vec<f32> strategy_arena — contiguous storage for strategy sums
 ///
 /// Each info set's data is laid out as:
-///   [regret_0, ..., regret_{n-1}, strategy_0, ..., strategy_{n-1}]
+///   regret_arena:   [regret_0, ..., regret_{n-1}]
+///   strategy_arena: [strat_0, ..., strat_{n-1}]
 ///
-/// i16 range is ±32767. For CFR+ (regrets floored to 0), regrets stay in
-/// [0, ~10000] which fits easily. Strategy sums grow with iterations but
-/// are periodically discounted by DCFR/LCFR, keeping them bounded.
+/// i16 for regrets: CFR+ floors regrets to 0, and DCFR discounts keep them
+/// bounded. ±32767 is more than enough.
 ///
-/// When values would overflow i16, they are clamped (saturating arithmetic).
-/// This is theoretically sound — bounded regret matching still converges.
+/// f32 for strategy sums: with LCFR (iteration-weighted accumulation), strategy
+/// sums reach millions at 25M iterations. i16 saturates at 32767, destroying the
+/// averaged strategy. f32 handles values up to ~3.4e38 — no saturation.
 ///
 /// Memory savings vs Vec<f32>:
 ///   - No per-entry heap allocation (24 bytes Vec overhead eliminated)
-///   - i16 = 2 bytes vs f32 = 4 bytes (2x compression on data)
-///   - Compact index entry: 8 bytes vs ~90 bytes current
-///   - Total: ~3x less memory for same number of info sets
+///   - Regrets: i16 = 2 bytes vs f32 = 4 bytes (2x compression)
+///   - Strategy sums: f32 = 4 bytes (same as old)
+///   - Compact index entry: ~12 bytes per entry
+///   - Total: ~2x less memory for same number of info sets
 
 use rustc_hash::FxHashMap;
 
 /// Compact index entry stored in the hash map.
-/// Points into the arena where actual regret/strategy data lives.
-/// Packed to 10 bytes: u64 offset + u8 n_actions + u8 epoch_hi (saves 1 byte vs 11).
+/// Points into the split arenas where actual regret/strategy data lives.
 #[derive(Clone, Copy, Debug)]
 pub struct CompactEntry {
-    /// Index into the arena Vec<i16> where this entry's data starts.
-    pub arena_offset: u64,
-    /// Number of actions at this info set (max 12) packed with epoch high byte.
-    /// Low 4 bits = n_actions, high 4 bits = epoch bits 8-11.
+    /// Index into the regret_arena Vec<i16> where this entry's regrets start.
+    pub regret_offset: u32,
+    /// Index into the strategy_arena Vec<f32> where this entry's strategy sums start.
+    pub strategy_offset: u32,
+    /// Number of actions at this info set (max 12).
     pub n_actions: u8,
     /// Last DCFR discount epoch applied to this entry.
     /// An epoch is `iteration / 1000`. u16 covers 65535 epochs = 65.5M iters.
     pub last_discount_epoch: u16,
 }
 
-/// Per-player compact CFR state with arena-backed i16 storage.
+/// Per-player compact CFR state with split storage:
+/// - i16 arena for regrets (bounded by CFR+ flooring + DCFR discount)
+/// - f32 arena for strategy sums (grow unboundedly with LCFR weighting)
 pub struct CompactCfrState {
     /// Index: info key -> compact entry metadata
     pub index: FxHashMap<u64, CompactEntry>,
-    /// Arena: contiguous i16 storage for all regret + strategy data.
-    /// Layout per entry: [regret_0..regret_{n-1}, strat_0..strat_{n-1}]
-    pub arena: Vec<i16>,
+    /// Regret arena: contiguous i16 storage.
+    /// Layout per entry: [regret_0..regret_{n-1}]
+    pub regret_arena: Vec<i16>,
+    /// Strategy arena: contiguous f32 storage.
+    /// Layout per entry: [strat_0..strat_{n-1}]
+    pub strategy_arena: Vec<f32>,
 }
 
 impl CompactCfrState {
     pub fn new(capacity: usize) -> Self {
-        // Pre-allocate arena assuming avg ~6 actions per info set, 12 i16 values each
-        let arena_capacity = capacity * 12;
+        // Pre-allocate arenas assuming avg ~6 actions per info set
+        let regret_capacity = capacity * 6;
+        let strategy_capacity = capacity * 6;
         Self {
             index: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
-            arena: Vec::with_capacity(arena_capacity),
+            regret_arena: Vec::with_capacity(regret_capacity),
+            strategy_arena: Vec::with_capacity(strategy_capacity),
         }
     }
 
@@ -63,57 +73,59 @@ impl CompactCfrState {
     /// Get the regret value for action `i` at the given entry.
     #[inline(always)]
     pub fn regret(&self, entry: &CompactEntry, i: usize) -> f32 {
-        self.arena[entry.arena_offset as usize + i] as f32
+        self.regret_arena[entry.regret_offset as usize + i] as f32
     }
 
     /// Get the strategy sum for action `i` at the given entry.
     #[inline(always)]
     pub fn strategy(&self, entry: &CompactEntry, i: usize) -> f32 {
-        self.arena[entry.arena_offset as usize + entry.n_actions as usize + i] as f32
+        self.strategy_arena[entry.strategy_offset as usize + i]
     }
 
     /// Add a delta to regret for action `i`. Clamps to i16 range.
     #[inline(always)]
     pub fn add_regret(&mut self, entry: &CompactEntry, i: usize, delta: f32) {
-        let idx = entry.arena_offset as usize + i;
-        let new = (self.arena[idx] as f32 + delta) as i32;
-        self.arena[idx] = new.clamp(-32767, 32767) as i16;
+        let idx = entry.regret_offset as usize + i;
+        let new = (self.regret_arena[idx] as f32 + delta) as i32;
+        self.regret_arena[idx] = new.clamp(-32767, 32767) as i16;
     }
 
     /// Set regret for action `i`. Clamps to i16 range.
     #[inline(always)]
     pub fn set_regret(&mut self, entry: &CompactEntry, i: usize, v: f32) {
-        let idx = entry.arena_offset as usize + i;
-        self.arena[idx] = (v as i32).clamp(-32767, 32767) as i16;
+        let idx = entry.regret_offset as usize + i;
+        self.regret_arena[idx] = (v as i32).clamp(-32767, 32767) as i16;
     }
 
-    /// Add a delta to strategy sum for action `i`. Clamps to i16 range.
+    /// Add a delta to strategy sum for action `i`. Direct f32 add — no clamping.
     #[inline(always)]
     pub fn add_strategy(&mut self, entry: &CompactEntry, i: usize, delta: f32) {
-        let idx = entry.arena_offset as usize + entry.n_actions as usize + i;
-        let new = (self.arena[idx] as f32 + delta) as i32;
-        self.arena[idx] = new.clamp(-32767, 32767) as i16;
+        let idx = entry.strategy_offset as usize + i;
+        self.strategy_arena[idx] += delta;
     }
 
-    /// Set strategy sum for action `i`. Clamps to i16 range.
+    /// Set strategy sum for action `i`. Direct f32 — no clamping.
     #[inline(always)]
     pub fn set_strategy(&mut self, entry: &CompactEntry, i: usize, v: f32) {
-        let idx = entry.arena_offset as usize + entry.n_actions as usize + i;
-        self.arena[idx] = (v as i32).clamp(-32767, 32767) as i16;
+        let idx = entry.strategy_offset as usize + i;
+        self.strategy_arena[idx] = v;
     }
 
     /// Get or create an entry for the given key. Returns a copy of the entry
-    /// (it's Copy, only 11 bytes).
+    /// (it's Copy, only 12 bytes).
     #[inline]
     pub fn find_or_add(&mut self, key: u64, n_actions: u8) -> CompactEntry {
         if let Some(&entry) = self.index.get(&key) {
             return entry;
         }
-        let offset = self.arena.len() as u64;
-        let n = n_actions as usize * 2;
-        self.arena.resize(self.arena.len() + n, 0i16);
+        let regret_offset = self.regret_arena.len() as u32;
+        let strategy_offset = self.strategy_arena.len() as u32;
+        let n = n_actions as usize;
+        self.regret_arena.resize(self.regret_arena.len() + n, 0i16);
+        self.strategy_arena.resize(self.strategy_arena.len() + n, 0.0f32);
         let entry = CompactEntry {
-            arena_offset: offset,
+            regret_offset,
+            strategy_offset,
             n_actions,
             last_discount_epoch: 0,
         };
@@ -137,20 +149,19 @@ impl CompactCfrState {
                 let (pos_factor, neg_factor, strat_factor) =
                     dcfr_table.discount_factors(entry.last_discount_epoch as u32, current_epoch as u32);
                 let n = entry.n_actions as usize;
-                let base = entry.arena_offset as usize;
+                let r_base = entry.regret_offset as usize;
+                let s_base = entry.strategy_offset as usize;
 
-                // Discount regrets
+                // Discount regrets (i16 arena)
                 for i in 0..n {
-                    let r = self.arena[base + i] as f32;
+                    let r = self.regret_arena[r_base + i] as f32;
                     let w = if r >= 0.0 { pos_factor } else { neg_factor };
                     let new = (r * w as f32) as i32;
-                    self.arena[base + i] = new.clamp(-32767, 32767) as i16;
+                    self.regret_arena[r_base + i] = new.clamp(-32767, 32767) as i16;
                 }
-                // Discount strategy sums
+                // Discount strategy sums (f32 arena)
                 for i in 0..n {
-                    let s = self.arena[base + n + i] as f32;
-                    let new = (s * strat_factor as f32) as i32;
-                    self.arena[base + n + i] = new.clamp(-32767, 32767) as i16;
+                    self.strategy_arena[s_base + i] *= strat_factor as f32;
                 }
                 entry.last_discount_epoch = current_epoch;
             }
@@ -158,11 +169,14 @@ impl CompactCfrState {
         }
 
         // New entry
-        let offset = self.arena.len() as u64;
-        let n = n_actions as usize * 2;
-        self.arena.resize(self.arena.len() + n, 0i16);
+        let regret_offset = self.regret_arena.len() as u32;
+        let strategy_offset = self.strategy_arena.len() as u32;
+        let n = n_actions as usize;
+        self.regret_arena.resize(self.regret_arena.len() + n, 0i16);
+        self.strategy_arena.resize(self.strategy_arena.len() + n, 0.0f32);
         let entry = CompactEntry {
-            arena_offset: offset,
+            regret_offset,
+            strategy_offset,
             n_actions,
             last_discount_epoch: current_epoch,
         };
@@ -188,10 +202,10 @@ impl CompactCfrState {
 #[inline]
 pub fn regret_matching(state: &CompactCfrState, entry: &CompactEntry, out: &mut [f32]) {
     let n = entry.n_actions as usize;
-    let base = entry.arena_offset as usize;
+    let base = entry.regret_offset as usize;
     let mut pos_sum: f32 = 0.0;
     for i in 0..n {
-        let r = (state.arena[base + i] as f32).max(0.0);
+        let r = (state.regret_arena[base + i] as f32).max(0.0);
         out[i] = r;
         pos_sum += r;
     }
@@ -218,10 +232,10 @@ pub fn regret_matching_pruned(
     pruned_out: &mut [bool],
 ) {
     let n = entry.n_actions as usize;
-    let base = entry.arena_offset as usize;
+    let base = entry.regret_offset as usize;
     let mut pos_sum: f32 = 0.0;
     for i in 0..n {
-        let r = state.arena[base + i] as f32;
+        let r = state.regret_arena[base + i] as f32;
         if r < threshold {
             strat_out[i] = 0.0;
             pruned_out[i] = true;
@@ -271,16 +285,14 @@ pub fn accumulate_strategy(
     lcfr_iter: u32,
 ) {
     let n = entry.n_actions as usize;
-    let base = entry.arena_offset as usize;
+    let base = entry.strategy_offset as usize;
     let iter_weight = if lcfr_iter > 0 {
         weight * lcfr_iter as f32
     } else {
         weight
     };
     for i in 0..n {
-        let idx = base + n + i;
-        let new = (state.arena[idx] as f32 + iter_weight * strat[i]) as i32;
-        state.arena[idx] = new.clamp(-32767, 32767) as i16;
+        state.strategy_arena[base + i] += iter_weight * strat[i];
     }
 }
 
@@ -293,17 +305,18 @@ pub fn apply_dcfr_discount(
 ) {
     for entry in state.index.values() {
         let n = entry.n_actions as usize;
-        let base = entry.arena_offset as usize;
+        let r_base = entry.regret_offset as usize;
+        let s_base = entry.strategy_offset as usize;
+        // Discount regrets (i16)
         for i in 0..n {
-            let r = state.arena[base + i] as f32;
+            let r = state.regret_arena[r_base + i] as f32;
             let w = if r >= 0.0 { pos_weight } else { neg_weight };
             let new = (r * w) as i32;
-            state.arena[base + i] = new.clamp(-32767, 32767) as i16;
+            state.regret_arena[r_base + i] = new.clamp(-32767, 32767) as i16;
         }
+        // Discount strategy sums (f32)
         for i in 0..n {
-            let idx = base + n + i;
-            let new = (state.arena[idx] as f32 * strat_weight) as i32;
-            state.arena[idx] = new.clamp(-32767, 32767) as i16;
+            state.strategy_arena[s_base + i] *= strat_weight;
         }
     }
 }
@@ -313,13 +326,13 @@ pub fn average_strategy(state: &CompactCfrState) -> FxHashMap<u64, Vec<f32>> {
     let mut result = FxHashMap::with_capacity_and_hasher(state.len(), Default::default());
     for (&key, entry) in &state.index {
         let n = entry.n_actions as usize;
-        let base = entry.arena_offset as usize;
+        let base = entry.strategy_offset as usize;
         let mut total: f32 = 0.0;
         for i in 0..n {
-            total += state.arena[base + n + i] as f32;
+            total += state.strategy_arena[base + i];
         }
         let avg = if total > 0.0 {
-            (0..n).map(|i| state.arena[base + n + i] as f32 / total).collect()
+            (0..n).map(|i| state.strategy_arena[base + i] / total).collect()
         } else {
             vec![1.0 / n as f32; n]
         };
@@ -332,15 +345,21 @@ pub fn average_strategy(state: &CompactCfrState) -> FxHashMap<u64, Vec<f32>> {
 pub fn merge_compact_state(dst: &mut CompactCfrState, src: &CompactCfrState) {
     for (&key, src_entry) in &src.index {
         let n = src_entry.n_actions as usize;
-        let src_base = src_entry.arena_offset as usize;
+        let src_r_base = src_entry.regret_offset as usize;
+        let src_s_base = src_entry.strategy_offset as usize;
 
         let dst_entry = dst.find_or_add(key, src_entry.n_actions);
-        let dst_base = dst_entry.arena_offset as usize;
+        let dst_r_base = dst_entry.regret_offset as usize;
+        let dst_s_base = dst_entry.strategy_offset as usize;
 
-        // Sum regrets and strategy sums
-        for i in 0..(n * 2) {
-            let new = dst.arena[dst_base + i] as i32 + src.arena[src_base + i] as i32;
-            dst.arena[dst_base + i] = new.clamp(-32767, 32767) as i16;
+        // Sum regrets (i16, clamped)
+        for i in 0..n {
+            let new = dst.regret_arena[dst_r_base + i] as i32 + src.regret_arena[src_r_base + i] as i32;
+            dst.regret_arena[dst_r_base + i] = new.clamp(-32767, 32767) as i16;
+        }
+        // Sum strategy sums (f32, no clamping)
+        for i in 0..n {
+            dst.strategy_arena[dst_s_base + i] += src.strategy_arena[src_s_base + i];
         }
     }
 }
@@ -445,12 +464,26 @@ mod tests {
         let mut state = CompactCfrState::new(100);
         let entry = state.find_or_add(42, 2);
 
-        // Try to set a value exceeding i16 range
+        // Try to set a regret value exceeding i16 range
         state.set_regret(&entry, 0, 50000.0);
         assert_eq!(state.regret(&entry, 0), 32767.0);
 
         state.set_regret(&entry, 0, -50000.0);
         assert_eq!(state.regret(&entry, 0), -32767.0);
+    }
+
+    #[test]
+    fn test_compact_strategy_no_clamp() {
+        // Strategy sums are f32 — they should NOT clamp at i16 limits
+        let mut state = CompactCfrState::new(100);
+        let entry = state.find_or_add(42, 2);
+
+        // Set strategy beyond i16 range
+        state.add_strategy(&entry, 0, 50000.0);
+        assert_eq!(state.strategy(&entry, 0), 50000.0);
+
+        state.add_strategy(&entry, 0, 1_000_000.0);
+        assert_eq!(state.strategy(&entry, 0), 1_050_000.0);
     }
 
     #[test]
@@ -460,7 +493,8 @@ mod tests {
         state.add_regret(&entry1, 0, 10.0);
 
         let entry2 = state.find_or_add(42, 3);
-        assert_eq!(entry1.arena_offset, entry2.arena_offset);
+        assert_eq!(entry1.regret_offset, entry2.regret_offset);
+        assert_eq!(entry1.strategy_offset, entry2.strategy_offset);
         assert_eq!(state.regret(&entry2, 0), 10.0);
     }
 
@@ -568,5 +602,30 @@ mod tests {
         assert!(std::mem::size_of::<CompactEntry>() <= 16,
             "CompactEntry should be <= 16 bytes, got {}",
             std::mem::size_of::<CompactEntry>());
+    }
+
+    #[test]
+    fn test_compact_lcfr_large_strategy_sums() {
+        // This is the core regression test for the i16 saturation bug.
+        // With LCFR, strategy sums grow as ~iter * probability. At 25M iterations,
+        // strategy sums can reach millions. f32 handles this; i16 would saturate.
+        let mut state = CompactCfrState::new(100);
+        let entry = state.find_or_add(42, 2);
+
+        // Simulate 25M iterations of LCFR accumulation
+        // At iter 25_000_000, weight = 25_000_000 * strat[0] = 25_000_000 * 0.6 = 15_000_000
+        let strat = [0.6f32, 0.4];
+        accumulate_strategy(&mut state, &entry, &strat, 1.0, 25_000_000);
+
+        // With f32: strat[0] ~ 15_000_000, strat[1] ~ 10_000_000
+        // f32 has ~7 digits of precision, so tolerance = 2.0 at 15M scale
+        assert!((state.strategy(&entry, 0) - 15_000_000.0).abs() < 2.0);
+        assert!((state.strategy(&entry, 1) - 10_000_000.0).abs() < 2.0);
+
+        // Average strategy should be 60/40
+        let avg = average_strategy(&state);
+        let probs = avg.get(&42).unwrap();
+        assert!((probs[0] - 0.6).abs() < 0.001);
+        assert!((probs[1] - 0.4).abs() < 0.001);
     }
 }

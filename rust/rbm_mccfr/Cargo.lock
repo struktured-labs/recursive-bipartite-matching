@@ -710,6 +710,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "criterion",
+ "libc",
  "rand",
  "rand_xoshiro",
  "rayon",

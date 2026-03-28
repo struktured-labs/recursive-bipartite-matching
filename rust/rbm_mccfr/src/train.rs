@@ -99,11 +99,13 @@ pub fn train_mccfr(
             // Clone the states for resumed training
             let s0 = CompactCfrState {
                 index: states[0].index.clone(),
-                arena: states[0].arena.clone(),
+                regret_arena: states[0].regret_arena.clone(),
+                strategy_arena: states[0].strategy_arena.clone(),
             };
             let s1 = CompactCfrState {
                 index: states[1].index.clone(),
-                arena: states[1].arena.clone(),
+                regret_arena: states[1].regret_arena.clone(),
+                strategy_arena: states[1].strategy_arena.clone(),
             };
             ([s0, s1], iter)
         }
@@ -146,13 +148,15 @@ pub fn train_mccfr(
         if train_config.report_every > 0 && (iter + 1) % train_config.report_every == 0 {
             let avg_util = util_sum / (iter + 1 - start_iter) as f64;
             eprintln!(
-                "[iter {}] avg_util={:.2} P0={} P1={} info sets  arena={}+{} i16",
+                "[iter {}] avg_util={:.2} P0={} P1={} info sets  regret={}+{} i16  strat={}+{} f32",
                 iter + 1,
                 avg_util,
                 cfr_states[0].len(),
                 cfr_states[1].len(),
-                cfr_states[0].arena.len(),
-                cfr_states[1].arena.len(),
+                cfr_states[0].regret_arena.len(),
+                cfr_states[1].regret_arena.len(),
+                cfr_states[0].strategy_arena.len(),
+                cfr_states[1].strategy_arena.len(),
             );
         }
 
