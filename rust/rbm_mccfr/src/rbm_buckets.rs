@@ -43,6 +43,10 @@ pub struct PostflopState {
     /// clusters[street_idx] is the list of clusters for that street.
     /// street_idx 0 = flop (round_idx=1), 1 = turn (round_idx=2), 2 = river (round_idx=3).
     pub clusters: [Vec<PostflopCluster>; 3],
+    /// Cache: (hole_card_key, board_visible_key, round_idx) -> cluster_id.
+    /// Prevents the same (hand, board) from getting different cluster IDs
+    /// due to MC noise in showdown_distribution_tree.
+    pub cache: rustc_hash::FxHashMap<u64, u32>,
 }
 
 impl PostflopState {
@@ -50,12 +54,26 @@ impl PostflopState {
     pub fn new() -> Self {
         PostflopState {
             clusters: [Vec::new(), Vec::new(), Vec::new()],
+            cache: rustc_hash::FxHashMap::default(),
         }
     }
 
     /// Get total cluster count across all streets.
     pub fn total_clusters(&self) -> usize {
         self.clusters.iter().map(|c| c.len()).sum()
+    }
+
+    /// Compute a cache key from hole cards + visible board + round.
+    fn cache_key(hole_cards: &[Card; 2], board_visible: &[Card], round_idx: u8) -> u64 {
+        // Pack cards into a u64: each card is 6 bits (0-51), round is 2 bits
+        let mut key: u64 = 0;
+        key = key.wrapping_mul(53).wrapping_add(hole_cards[0] as u64);
+        key = key.wrapping_mul(53).wrapping_add(hole_cards[1] as u64);
+        for &c in board_visible {
+            key = key.wrapping_mul(53).wrapping_add(c as u64);
+        }
+        key = key.wrapping_mul(4).wrapping_add(round_idx as u64);
+        key
     }
 }
 
@@ -243,13 +261,20 @@ pub fn compute_bucket_rbm_postflop(
         _ => &board[..5], // river
     };
 
+    // Cache lookup: same (hand, board_visible, round) always returns same cluster.
+    // This prevents MC noise from creating different cluster IDs for the same situation.
+    let cache_key = PostflopState::cache_key(hole_cards, board_visible, round_idx);
+    if let Some(&cached_bucket) = postflop.cache.get(&cache_key) {
+        return cached_bucket;
+    }
+
     // Build showdown distribution tree for this hand+board
     let tree = showdown_distribution_tree(
         hole_cards,
         board_visible,
         player,
-        5,  // max_opponents (matches OCaml's ~max_opponents:5)
-        2,  // max_board_samples (matches OCaml's ~max_board_samples:2)
+        5,  // max_opponents
+        2,  // max_board_samples
         rng,
     );
 
@@ -260,7 +285,7 @@ pub fn compute_bucket_rbm_postflop(
     let clusters = &postflop.clusters[street_idx];
     let nearest = find_nearest_postflop_cluster(clusters, &tree, epsilon, rbm_config);
 
-    match nearest {
+    let bucket = match nearest {
         Some((idx, d)) => {
             if d < epsilon {
                 // Assign to existing cluster
@@ -288,7 +313,11 @@ pub fn compute_bucket_rbm_postflop(
             postflop.clusters[street_idx].push(new_cluster);
             0
         }
-    }
+    };
+
+    // Cache the assignment for deterministic future lookups
+    postflop.cache.insert(cache_key, bucket);
+    bucket
 }
 
 /// Precompute all 4 street buckets for a deal using RBM.
