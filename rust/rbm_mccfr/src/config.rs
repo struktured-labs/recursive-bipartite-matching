@@ -22,6 +22,22 @@ impl GameConfig {
     }
 }
 
+/// Bucketing method for MCCFR training.
+#[derive(Clone, Debug)]
+pub enum BucketMethod {
+    /// Equity-based bucketing: quantize hand score to a fixed number of buckets.
+    Equity,
+    /// RBM-based bucketing: online clustering via showdown distribution trees.
+    /// Epsilon controls cluster granularity (smaller = more clusters).
+    Rbm { epsilon: f64 },
+}
+
+impl Default for BucketMethod {
+    fn default() -> Self {
+        BucketMethod::Rbm { epsilon: 0.5 }
+    }
+}
+
 /// Training configuration.
 #[derive(Clone, Debug)]
 pub struct TrainConfig {
@@ -33,6 +49,7 @@ pub struct TrainConfig {
     pub dcfr: bool,
     pub lcfr: bool,
     pub n_buckets: u32,
+    pub bucket_method: BucketMethod,
 }
 
 impl Default for TrainConfig {
@@ -46,6 +63,7 @@ impl Default for TrainConfig {
             dcfr: false,
             lcfr: false,
             n_buckets: 169,
+            bucket_method: BucketMethod::default(),
         }
     }
 }

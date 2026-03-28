@@ -20,7 +20,9 @@ use crate::card;
 use crate::cfr_state::DcfrTable;
 use crate::compact_state::{self, CompactCfrState};
 use crate::checkpoint;
-use crate::config::{GameConfig, TrainConfig};
+use crate::config::{BucketMethod, GameConfig, TrainConfig};
+use crate::rbm_buckets::{self, PostflopState};
+use crate::rbm_distance::Config as RbmConfig;
 use crate::traversal;
 
 /// Merge src CompactCfrState into dst by summing all regret and strategy entries.
@@ -29,6 +31,9 @@ pub fn merge_cfr_state(dst: &mut CompactCfrState, src: &CompactCfrState) {
 }
 
 /// Run a single MCCFR iteration: sample a deal, compute buckets, traverse.
+///
+/// When `rbm_state` is provided, uses RBM-based post-flop bucketing.
+/// Otherwise falls back to equity-based bucketing.
 #[inline]
 fn run_one_iteration(
     config: &GameConfig,
@@ -38,11 +43,28 @@ fn run_one_iteration(
     rng: &mut Xoshiro256PlusPlus,
     iteration: u64,
     dcfr_table: Option<&DcfrTable>,
+    rbm_state: Option<(&RbmConfig, f64, &mut [PostflopState; 2])>,
 ) -> f64 {
     let (p1, p2, board) = card::sample_deal(rng);
 
-    let p1_buckets = buckets::precompute_buckets(&p1, &board, train_config.n_buckets, preflop_assignments);
-    let p2_buckets = buckets::precompute_buckets(&p2, &board, train_config.n_buckets, preflop_assignments);
+    let (p1_buckets, p2_buckets) = match rbm_state {
+        Some((rbm_config, epsilon, postflop_states)) => {
+            let p1_b = rbm_buckets::precompute_buckets_rbm(
+                &p1, &board, preflop_assignments, epsilon, rbm_config,
+                &mut postflop_states[0], rng,
+            );
+            let p2_b = rbm_buckets::precompute_buckets_rbm(
+                &p2, &board, preflop_assignments, epsilon, rbm_config,
+                &mut postflop_states[1], rng,
+            );
+            (p1_b, p2_b)
+        }
+        None => {
+            let p1_b = buckets::precompute_buckets(&p1, &board, train_config.n_buckets, preflop_assignments);
+            let p2_b = buckets::precompute_buckets(&p2, &board, train_config.n_buckets, preflop_assignments);
+            (p1_b, p2_b)
+        }
+    };
 
     let mut history = HistoryBuf::new();
     let state = NlState {
@@ -126,12 +148,23 @@ pub fn train_mccfr(
         None
     };
 
+    // RBM bucketing state: per-player PostflopState
+    let (rbm_config, rbm_epsilon) = match &train_config.bucket_method {
+        BucketMethod::Rbm { epsilon } => (Some(RbmConfig::default()), *epsilon),
+        BucketMethod::Equity => (None, 0.0),
+    };
+    let mut postflop_states = [PostflopState::new(), PostflopState::new()];
+
     for iter in start_iter..train_config.iterations {
         // Ensure DCFR table covers current epoch
         let current_epoch = (iter / 1000) as u32;
         if let Some(ref mut dt) = dcfr_table {
             dt.ensure_epoch(current_epoch);
         }
+
+        let rbm_arg = rbm_config.as_ref().map(|cfg| {
+            (cfg, rbm_epsilon, &mut postflop_states)
+        });
 
         let value = run_one_iteration(
             config,
@@ -141,14 +174,24 @@ pub fn train_mccfr(
             &mut rng,
             iter,
             dcfr_table.as_ref(),
+            rbm_arg,
         );
         util_sum += value;
 
         // Progress report
         if train_config.report_every > 0 && (iter + 1) % train_config.report_every == 0 {
             let avg_util = util_sum / (iter + 1 - start_iter) as f64;
+            let rbm_clusters = if rbm_config.is_some() {
+                format!(
+                    "  rbm_clusters={}+{}",
+                    postflop_states[0].total_clusters(),
+                    postflop_states[1].total_clusters(),
+                )
+            } else {
+                String::new()
+            };
             eprintln!(
-                "[iter {}] avg_util={:.2} P0={} P1={} info sets  regret={}+{} i16  strat={}+{} f32",
+                "[iter {}] avg_util={:.2} P0={} P1={} info sets  regret={}+{} i16  strat={}+{} f32{}",
                 iter + 1,
                 avg_util,
                 cfr_states[0].len(),
@@ -157,6 +200,7 @@ pub fn train_mccfr(
                 cfr_states[1].regret_arena.len(),
                 cfr_states[0].strategy_arena.len(),
                 cfr_states[1].strategy_arena.len(),
+                rbm_clusters,
             );
         }
 
@@ -236,11 +280,22 @@ pub fn train_mccfr_parallel(
                     None
                 };
 
+                // Per-thread RBM state (clusters don't merge across threads)
+                let (rbm_config_t, rbm_epsilon_t) = match &thread_train_config.bucket_method {
+                    BucketMethod::Rbm { epsilon } => (Some(RbmConfig::default()), *epsilon),
+                    BucketMethod::Equity => (None, 0.0),
+                };
+                let mut postflop_states_t = [PostflopState::new(), PostflopState::new()];
+
                 for iter in 0..my_iters {
                     let current_epoch = (iter / 1000) as u32;
                     if let Some(ref mut dt) = dcfr_table {
                         dt.ensure_epoch(current_epoch);
                     }
+
+                    let rbm_arg = rbm_config_t.as_ref().map(|cfg| {
+                        (cfg, rbm_epsilon_t, &mut postflop_states_t)
+                    });
 
                     let value = run_one_iteration(
                         &config,
@@ -250,6 +305,7 @@ pub fn train_mccfr_parallel(
                         &mut rng,
                         iter,
                         dcfr_table.as_ref(),
+                        rbm_arg,
                     );
                     util_sum += value;
 
@@ -361,6 +417,7 @@ mod tests {
             dcfr: false,
             lcfr: false,
             n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
         };
         let assignments = default_assignments();
 
@@ -383,6 +440,7 @@ mod tests {
             dcfr: true,
             lcfr: false,
             n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
         };
         let assignments = default_assignments();
 
@@ -402,6 +460,7 @@ mod tests {
             dcfr: false,
             lcfr: true,
             n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
         };
         let assignments = default_assignments();
 
@@ -421,6 +480,7 @@ mod tests {
             dcfr: false,
             lcfr: false,
             n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
         };
         let assignments = default_assignments();
 
@@ -447,6 +507,7 @@ mod tests {
             dcfr: false,
             lcfr: false,
             n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
         };
         let assignments = default_assignments();
 
@@ -494,6 +555,7 @@ mod tests {
             dcfr: true,
             lcfr: true,
             n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
         };
         let assignments = default_assignments();
 

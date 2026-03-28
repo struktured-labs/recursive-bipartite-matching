@@ -24,6 +24,11 @@ pub mod checkpoint;
 pub mod train;
 pub mod slumbot;
 
+pub mod tree;
+pub mod hungarian;
+pub mod rbm_distance;
+pub mod rbm_buckets;
+
 // -----------------------------------------------------------------------
 // C FFI entry points
 // -----------------------------------------------------------------------
@@ -83,6 +88,7 @@ pub unsafe extern "C" fn rbm_train(
         dcfr,
         lcfr,
         n_buckets,
+        bucket_method: config::BucketMethod::default(),
     };
 
     // Preflop assignments

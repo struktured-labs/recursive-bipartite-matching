@@ -19,12 +19,14 @@
 //!   --play-only N        Play N hands against Slumbot (no training, requires --strategy)
 //!   --strategy PATH      Load strategy from file (for --play-only)
 //!   --verbose            Verbose output during play
+//!   --bucket-method M    Bucketing method: "rbm" (default) or "equity"
+//!   --rbm-epsilon F      RBM cluster epsilon (default: 0.5)
 
 use std::path::Path;
 use std::time::Instant;
 
 use rbm_mccfr::checkpoint;
-use rbm_mccfr::config::{GameConfig, TrainConfig};
+use rbm_mccfr::config::{BucketMethod, GameConfig, TrainConfig};
 use rbm_mccfr::slumbot;
 use rbm_mccfr::train;
 
@@ -128,6 +130,31 @@ fn parse_args() -> CliArgs {
             "--verbose" => {
                 verbose = true;
             }
+            "--bucket-method" => {
+                i += 1;
+                match args[i].as_str() {
+                    "rbm" => {
+                        // Keep existing epsilon or set default
+                        if let BucketMethod::Rbm { .. } = train_config.bucket_method {
+                            // already RBM, keep epsilon
+                        } else {
+                            train_config.bucket_method = BucketMethod::Rbm { epsilon: 0.5 };
+                        }
+                    }
+                    "equity" => {
+                        train_config.bucket_method = BucketMethod::Equity;
+                    }
+                    other => {
+                        eprintln!("Unknown bucket method '{}'. Use 'rbm' or 'equity'.", other);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "--rbm-epsilon" => {
+                i += 1;
+                let eps: f64 = args[i].parse().expect("bad --rbm-epsilon");
+                train_config.bucket_method = BucketMethod::Rbm { epsilon: eps };
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -181,6 +208,8 @@ fn print_help() {
     eprintln!("  --starting-stack N   Starting stack (default: 20000)");
     eprintln!("  --max-raises N       Max raises per round (default: 4)");
     eprintln!("  --prune-threshold F  Prune threshold (default: -3e8)");
+    eprintln!("  --bucket-method M    Bucketing method: 'rbm' (default) or 'equity'");
+    eprintln!("  --rbm-epsilon F      RBM cluster epsilon (default: 0.5)");
     eprintln!();
     eprintln!("Slumbot play options:");
     eprintln!("  --play N             Play N hands against Slumbot after training");
@@ -316,14 +345,20 @@ fn main() {
         return;
     }
 
+    let bucket_desc = match &cli.train_config.bucket_method {
+        BucketMethod::Rbm { epsilon } => format!("rbm (epsilon={})", epsilon),
+        BucketMethod::Equity => format!("equity ({} buckets)", cli.train_config.n_buckets),
+    };
+
     eprintln!("=== RBM-MCCFR Training (compact i16 storage) ===");
     eprintln!("Game:       {}/{} blinds, {} stack, {} bet fracs, max {} raises",
         cli.game_config.small_blind, cli.game_config.big_blind,
         cli.game_config.starting_stack,
         cli.game_config.bet_fractions.len(),
         cli.game_config.max_raises_per_round);
-    eprintln!("Training:   {} iterations, {} buckets, {} thread(s)",
-        cli.train_config.iterations, cli.train_config.n_buckets, cli.num_threads);
+    eprintln!("Training:   {} iterations, {} thread(s)",
+        cli.train_config.iterations, cli.num_threads);
+    eprintln!("Buckets:    {}", bucket_desc);
     eprintln!("Variants:   dcfr={} lcfr={} prune={:.0}",
         cli.train_config.dcfr, cli.train_config.lcfr, cli.train_config.prune_threshold);
     eprintln!("Output:     {}", cli.output);
