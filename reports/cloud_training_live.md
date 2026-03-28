@@ -44,3 +44,15 @@ Weighted average: ~-1.37 bb/hand. True performance is solidly in [-1.6, -1.0] ra
 | **Rust 25M DCFR+LCFR** | **i16 arena** | **25M** | **-2.43** | **[-2.94, -1.91]** | **WORSE — investigate i16 saturation** |
 
 25M i16 is 2x worse than 5M f32. Likely i16 strategy sum saturation at ±32767.
+
+## Rust RBM Results (LOCAL)
+
+| Run | Bucketing | Iters | bb/hand | 95% CI | Info Sets | Clusters | Notes |
+|---|---|---|---|---|---|---|---|
+| OCaml RBM 5M | RBM ε=0.5 | 5M | **-1.11** | [-1.43, -0.79] | 247M | ~400 | Baseline |
+| Rust equity 5M | Equity | 5M | -1.16 | [-1.47, -0.85] | 148M | — | Wrong abstraction |
+| **Rust RBM 5M** | **RBM ε=0.5** | **5M** | **-2.97** | **[-3.49, -2.45]** | **585M** | **1,187** | **Undertrained: 8.5 visits/infoset** |
+
+Rust RBM creates 2.4x more info sets than OCaml RBM (585M vs 247M) at same iterations.
+More clusters (1,187 vs ~400) = finer abstraction but less training per info set.
+Need 25M+ iterations, or higher epsilon to reduce cluster count.
