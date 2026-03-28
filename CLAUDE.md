@@ -12,6 +12,11 @@ leaf payoff differences, with structural mismatches penalized. Trees with small
 distance can be merged into a compressed "EV graph" — a DAG that preserves
 strategic structure. The distance itself bounds the EV error of the compression.
 
+**CRITICAL RULE**: ALL training and evaluation MUST use RBM bucketing for
+post-flop abstraction. Equity bucketing is NEVER acceptable for experiments —
+it defeats the entire thesis. If RBM is too slow, optimize RBM, don't fall
+back to equity. The Rust trainer needs RBM bucketing ported from OCaml.
+
 **Key results**:
 - RBM beats EMD 5-0 on full Limit Hold'em preflop abstraction (up to 42% less error)
 - RBM beats EMD 7-0 on Rhode Island Hold'em across all compression levels
