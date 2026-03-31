@@ -28,6 +28,7 @@ pub mod tree;
 pub mod hungarian;
 pub mod rbm_distance;
 pub mod rbm_buckets;
+pub mod frozen_state;
 
 // -----------------------------------------------------------------------
 // C FFI entry points
@@ -89,6 +90,8 @@ pub unsafe extern "C" fn rbm_train(
         lcfr,
         n_buckets,
         bucket_method: config::BucketMethod::default(),
+        regret_scale_every: 1_000_000,
+        freeze_after: 5_000_000,
     };
 
     // Preflop assignments
@@ -103,8 +106,8 @@ pub unsafe extern "C" fn rbm_train(
         Err(_) => return -1,
     };
 
-    // Train (now returns CompactCfrState)
-    let states = if num_threads > 1 {
+    // Train (returns CompactCfrState + PostflopState)
+    let (states, _postflop) = if num_threads > 1 {
         train::train_mccfr_parallel(
             &game_config,
             &train_config,
@@ -116,6 +119,7 @@ pub unsafe extern "C" fn rbm_train(
             &game_config,
             &train_config,
             &assignments,
+            None,
             None,
         )
     };
@@ -210,7 +214,7 @@ mod integration_tests {
             *a = (i % 20) as i32;
         }
 
-        let states = train::train_mccfr(&config, &train_config, &assignments, None);
+        let (states, _postflop) = train::train_mccfr(&config, &train_config, &assignments, None, None);
 
         // Verify averaged strategy sums to 1 for each info set (using compact_state)
         let avg = compact_state::average_strategy(&states[0]);

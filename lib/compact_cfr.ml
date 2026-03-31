@@ -499,6 +499,10 @@ type postflop_state = {
 let create_postflop_state () =
   { clusters = Hashtbl.Poly.create ~size:4 () }
 
+let postflop_cluster_count ps =
+  Hashtbl.fold ps.clusters ~init:0
+    ~f:(fun ~key:_ ~data acc -> acc + List.length !data)
+
 let find_nearest_postflop_cluster ~epsilon ~distance_config clusters tree =
   match clusters with
   | [] -> None

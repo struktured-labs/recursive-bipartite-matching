@@ -50,6 +50,13 @@ pub struct TrainConfig {
     pub lcfr: bool,
     pub n_buckets: u32,
     pub bucket_method: BucketMethod,
+    /// Halve all regrets every N iterations to prevent i16 saturation.
+    /// Acts as implicit regret discounting (DCFR-like). 0 = disabled.
+    pub regret_scale_every: u64,
+    /// Freeze CompactCfrState → FrozenCfrState after this many iterations.
+    /// Replaces FxHashMap (~48B/key) with MPHF (~2.1 bits/key) + flat arrays.
+    /// 0 = disabled (never freeze). Default: 5000000 (5M).
+    pub freeze_after: u64,
 }
 
 impl Default for TrainConfig {
@@ -64,6 +71,8 @@ impl Default for TrainConfig {
             lcfr: false,
             n_buckets: 169,
             bucket_method: BucketMethod::default(),
+            regret_scale_every: 1_000_000,
+            freeze_after: 5_000_000,
         }
     }
 }

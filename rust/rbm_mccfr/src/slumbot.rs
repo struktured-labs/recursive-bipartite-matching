@@ -31,8 +31,10 @@ use serde_json::Value;
 use crate::buckets;
 use crate::card::{self, Card};
 use crate::compact_state::CompactCfrState;
-use crate::config::GameConfig;
+use crate::config::{BucketMethod, GameConfig};
 use crate::info_key;
+use crate::rbm_buckets::{self, PostflopState};
+use crate::rbm_distance::Config as RbmConfig;
 
 // --------------------------------------------------------------------------
 // Constants matching Slumbot's game
@@ -472,24 +474,43 @@ fn select_slumbot_action(
     client_pos: i32,
     action: &str,
     action_state: &ActionState,
-    n_buckets: u32,
-    preflop_assignments: &[i32; 169],
-    _config: &GameConfig,
+    play_config: &mut PlayConfig,
     rng: &mut impl rand::Rng,
 ) -> (String, u64, Vec<f32>) {
-    // Compute buckets for the current board state
+    // Compute buckets using the SAME method as training
     let board5 = board_to_array5(board);
-    let buckets_arr = buckets::precompute_buckets(hole_cards, &board5, n_buckets, preflop_assignments);
+    let player = match client_pos {
+        1 => 0usize,
+        _ => 1usize,
+    };
+    let buckets_arr = match &play_config.bucket_method {
+        BucketMethod::Rbm { epsilon } => {
+            let epsilon = *epsilon;
+            let rbm_config = RbmConfig::default();
+            rbm_buckets::precompute_buckets_rbm(
+                hole_cards,
+                &board5,
+                &play_config.preflop_assignments,
+                player as u8,
+                epsilon,
+                &rbm_config,
+                &mut play_config.postflop_states[player],
+                rng,
+            )
+        }
+        BucketMethod::Equity => {
+            buckets::precompute_buckets(
+                hole_cards,
+                &board5,
+                play_config.n_buckets,
+                &play_config.preflop_assignments,
+            )
+        }
+    };
 
     let round_idx = action_state.street as u8;
     let internal_history = slumbot_action_to_internal_history(action);
     let key = info_key::make_info_key(&buckets_arr, round_idx, &internal_history);
-
-    // client_pos 0 (BB) -> player 1, client_pos 1 (SB) -> player 0
-    let player = match client_pos {
-        1 => 0usize, // SB = position 0
-        _ => 1usize, // BB = position 1
-    };
 
     // Available actions: fold (if facing bet), check/call, bet fractions, all-in
     let facing_bet = action_state.last_bet_size > 0;
@@ -661,6 +682,10 @@ pub struct PlayConfig {
     pub preflop_assignments: [i32; 169],
     pub game_config: GameConfig,
     pub verbose: bool,
+    pub bucket_method: BucketMethod,
+    /// Per-player RBM postflop state, rebuilt during play.
+    /// Only used when bucket_method is Rbm.
+    pub postflop_states: [PostflopState; 2],
 }
 
 impl Default for PlayConfig {
@@ -675,6 +700,8 @@ impl Default for PlayConfig {
             preflop_assignments: assignments,
             game_config: GameConfig::slumbot(),
             verbose: false,
+            bucket_method: BucketMethod::default(),
+            postflop_states: [PostflopState::new(), PostflopState::new()],
         }
     }
 }
@@ -688,7 +715,7 @@ impl Default for PlayConfig {
 /// Returns (new_token, HandResult).
 pub fn play_hand(
     play_strategy: &PlayStrategy,
-    play_config: &PlayConfig,
+    play_config: &mut PlayConfig,
     token: Option<&str>,
     hand_num: u32,
     rng: &mut impl rand::Rng,
@@ -766,9 +793,7 @@ pub fn play_hand(
             client_pos,
             &action,
             &a_state,
-            play_config.n_buckets,
-            &play_config.preflop_assignments,
-            &play_config.game_config,
+            play_config,
             rng,
         );
 
@@ -789,7 +814,7 @@ pub fn play_hand(
 /// Play N hands against Slumbot and print statistics.
 pub fn run_session(
     play_strategy: &PlayStrategy,
-    play_config: &PlayConfig,
+    play_config: &mut PlayConfig,
     num_hands: u32,
 ) -> Result<SessionResult, String> {
     use std::time::Instant;

@@ -50,11 +50,11 @@ fn run_one_iteration(
     let (p1_buckets, p2_buckets) = match rbm_state {
         Some((rbm_config, epsilon, postflop_states)) => {
             let p1_b = rbm_buckets::precompute_buckets_rbm(
-                &p1, &board, preflop_assignments, epsilon, rbm_config,
+                &p1, &board, preflop_assignments, 0, epsilon, rbm_config,
                 &mut postflop_states[0], rng,
             );
             let p2_b = rbm_buckets::precompute_buckets_rbm(
-                &p2, &board, preflop_assignments, epsilon, rbm_config,
+                &p2, &board, preflop_assignments, 1, epsilon, rbm_config,
                 &mut postflop_states[1], rng,
             );
             (p1_b, p2_b)
@@ -109,13 +109,15 @@ fn run_one_iteration(
 
 /// Train MCCFR for the given number of iterations (single-threaded).
 ///
-/// Returns the final CompactCfrState pair for both players.
+/// Returns (cfr_states, postflop_states) — the CFR state pair and the RBM
+/// cluster state (needed for consistent bucketing during play).
 pub fn train_mccfr(
     config: &GameConfig,
     train_config: &TrainConfig,
     preflop_assignments: &[i32; 169],
     resume_from: Option<(&[CompactCfrState; 2], u64)>,
-) -> [CompactCfrState; 2] {
+    resume_postflop: Option<[PostflopState; 2]>,
+) -> ([CompactCfrState; 2], [PostflopState; 2]) {
     let (mut cfr_states, start_iter) = match resume_from {
         Some((states, iter)) => {
             // Clone the states for resumed training
@@ -123,11 +125,13 @@ pub fn train_mccfr(
                 index: states[0].index.clone(),
                 regret_arena: states[0].regret_arena.clone(),
                 strategy_arena: states[0].strategy_arena.clone(),
+                frozen: None, // Frozen state not cloneable; re-freeze after resume
             };
             let s1 = CompactCfrState {
                 index: states[1].index.clone(),
                 regret_arena: states[1].regret_arena.clone(),
                 strategy_arena: states[1].strategy_arena.clone(),
+                frozen: None,
             };
             ([s0, s1], iter)
         }
@@ -153,7 +157,7 @@ pub fn train_mccfr(
         BucketMethod::Rbm { epsilon } => (Some(RbmConfig::default()), *epsilon),
         BucketMethod::Equity => (None, 0.0),
     };
-    let mut postflop_states = [PostflopState::new(), PostflopState::new()];
+    let mut postflop_states = resume_postflop.unwrap_or([PostflopState::new(), PostflopState::new()]);
 
     for iter in start_iter..train_config.iterations {
         // Ensure DCFR table covers current epoch
@@ -204,6 +208,23 @@ pub fn train_mccfr(
             );
         }
 
+        // Freeze / re-freeze: replace FxHashMap with MPHF periodically.
+        // First freeze at freeze_after, then re-freeze every freeze_after
+        // iterations to absorb overflow entries back into the MPHF.
+        if train_config.freeze_after > 0
+            && (iter + 1) % train_config.freeze_after == 0
+        {
+            cfr_states[0].freeze();
+            cfr_states[1].freeze();
+        }
+
+        // Periodic regret scaling: halve all regrets to prevent i16 saturation
+        if train_config.regret_scale_every > 0 && (iter + 1) % train_config.regret_scale_every == 0 {
+            cfr_states[0].halve_regrets();
+            cfr_states[1].halve_regrets();
+            eprintln!("[iter {}] halved regrets (i16 saturation prevention)", iter + 1);
+        }
+
         // Checkpoint
         if train_config.checkpoint_every > 0 && (iter + 1) % train_config.checkpoint_every == 0 {
             let ckpt_path = format!("checkpoint_{}.bin", iter + 1);
@@ -216,10 +237,22 @@ pub fn train_mccfr(
             } else {
                 eprintln!("Checkpoint saved: {}", ckpt_path);
             }
+            // Save PostflopState alongside for RBM resume
+            if rbm_config.is_some() {
+                let cluster_path = format!("checkpoint_{}.clusters", iter + 1);
+                let f = std::fs::File::create(&cluster_path);
+                if let Ok(f) = f {
+                    let mut w = std::io::BufWriter::new(f);
+                    for ps in postflop_states.iter() {
+                        let _ = ps.save(&mut w);
+                    }
+                    eprintln!("Cluster state saved: {}", cluster_path);
+                }
+            }
         }
     }
 
-    cfr_states
+    (cfr_states, postflop_states)
 }
 
 /// Train MCCFR in parallel using rayon.
@@ -231,7 +264,7 @@ pub fn train_mccfr_parallel(
     train_config: &TrainConfig,
     preflop_assignments: &[i32; 169],
     num_threads: usize,
-) -> [CompactCfrState; 2] {
+) -> ([CompactCfrState; 2], [PostflopState; 2]) {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build()
@@ -309,6 +342,14 @@ pub fn train_mccfr_parallel(
                     );
                     util_sum += value;
 
+                    // Per-thread regret scaling
+                    if thread_train_config.regret_scale_every > 0
+                        && (iter + 1) % thread_train_config.regret_scale_every == 0
+                    {
+                        cfr_states[0].halve_regrets();
+                        cfr_states[1].halve_regrets();
+                    }
+
                     // Per-thread progress (only thread 0 reports)
                     if tid == 0 && original_report > 0 && (iter + 1) % original_report == 0 {
                         let avg_util = util_sum / (iter + 1) as f64;
@@ -350,7 +391,9 @@ pub fn train_mccfr_parallel(
         merged[1].len(),
     );
 
-    merged
+    // Note: parallel training creates per-thread PostflopState that can't easily
+    // be merged. Return empty states — caller should rebuild if needed.
+    (merged, [PostflopState::new(), PostflopState::new()])
 }
 
 #[cfg(test)]
@@ -418,10 +461,12 @@ mod tests {
             lcfr: false,
             n_buckets: 50,
             bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
         };
         let assignments = default_assignments();
 
-        let states = train_mccfr(&config, &train_config, &assignments, None);
+        let (states, _) = train_mccfr(&config, &train_config, &assignments, None, None);
 
         assert!(states[0].len() > 0, "P0 should have info sets");
         assert!(states[1].len() > 0, "P1 should have info sets");
@@ -441,10 +486,12 @@ mod tests {
             lcfr: false,
             n_buckets: 50,
             bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
         };
         let assignments = default_assignments();
 
-        let states = train_mccfr(&config, &train_config, &assignments, None);
+        let (states, _) = train_mccfr(&config, &train_config, &assignments, None, None);
         assert!(states[0].len() > 0);
     }
 
@@ -461,10 +508,12 @@ mod tests {
             lcfr: true,
             n_buckets: 50,
             bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
         };
         let assignments = default_assignments();
 
-        let states = train_mccfr(&config, &train_config, &assignments, None);
+        let (states, _) = train_mccfr(&config, &train_config, &assignments, None, None);
         assert!(states[0].len() > 0);
     }
 
@@ -481,10 +530,12 @@ mod tests {
             lcfr: false,
             n_buckets: 50,
             bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
         };
         let assignments = default_assignments();
 
-        let states = train_mccfr_parallel(&config, &train_config, &assignments, 2);
+        let (states, _) = train_mccfr_parallel(&config, &train_config, &assignments, 2);
 
         assert!(states[0].len() > 0, "P0 should have info sets after parallel training");
         assert!(states[1].len() > 0, "P1 should have info sets after parallel training");
@@ -508,11 +559,13 @@ mod tests {
             lcfr: false,
             n_buckets: 50,
             bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
         };
         let assignments = default_assignments();
 
         // Train phase 1
-        let states = train_mccfr(&config, &train_config, &assignments, None);
+        let (states, _) = train_mccfr(&config, &train_config, &assignments, None, None);
         let p0_len = states[0].len();
         let p1_len = states[1].len();
 
@@ -533,7 +586,7 @@ mod tests {
             iterations: 400,
             ..train_config
         };
-        let resumed = train_mccfr(&config, &train_config2, &assignments, Some((&loaded, 200)));
+        let (resumed, _) = train_mccfr(&config, &train_config2, &assignments, Some((&loaded, 200)), None);
 
         // Should have at least as many info sets as before
         assert!(resumed[0].len() >= p0_len);
@@ -556,10 +609,12 @@ mod tests {
             lcfr: true,
             n_buckets: 50,
             bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
         };
         let assignments = default_assignments();
 
-        let states = train_mccfr(&config, &train_config, &assignments, None);
+        let (states, _) = train_mccfr(&config, &train_config, &assignments, None, None);
         assert!(states[0].len() > 0);
         assert!(states[1].len() > 0);
     }

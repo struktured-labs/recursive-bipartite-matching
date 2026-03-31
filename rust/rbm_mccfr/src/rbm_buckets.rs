@@ -19,6 +19,14 @@ use crate::rbm_distance::{self, Config as RbmConfig};
 use crate::tree::Tree;
 use crate::buckets;
 
+/// Default MC sampling parameters for showdown distribution trees.
+/// Matches OCaml: 2 board completions × 5 opponent hands = 10 leaves.
+/// With deterministic seeds (0 intra-hand noise) and normalized distances,
+/// these small trees are sufficient for epsilon=0.5 clustering while keeping
+/// the hot loop fast (~16ns per showdown × 10 = 160ns per tree).
+const DEFAULT_MAX_BOARD_SAMPLES: usize = 2;
+const DEFAULT_MAX_OPPONENTS: usize = 5;
+
 /// A cluster of strategically similar hands.
 #[derive(Debug, Clone)]
 pub struct PostflopCluster {
@@ -43,10 +51,6 @@ pub struct PostflopState {
     /// clusters[street_idx] is the list of clusters for that street.
     /// street_idx 0 = flop (round_idx=1), 1 = turn (round_idx=2), 2 = river (round_idx=3).
     pub clusters: [Vec<PostflopCluster>; 3],
-    /// Cache: (hole_card_key, board_visible_key, round_idx) -> cluster_id.
-    /// Prevents the same (hand, board) from getting different cluster IDs
-    /// due to MC noise in showdown_distribution_tree.
-    pub cache: rustc_hash::FxHashMap<u64, u32>,
 }
 
 impl PostflopState {
@@ -54,7 +58,6 @@ impl PostflopState {
     pub fn new() -> Self {
         PostflopState {
             clusters: [Vec::new(), Vec::new(), Vec::new()],
-            cache: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -63,17 +66,83 @@ impl PostflopState {
         self.clusters.iter().map(|c| c.len()).sum()
     }
 
-    /// Compute a cache key from hole cards + visible board + round.
-    fn cache_key(hole_cards: &[Card; 2], board_visible: &[Card], round_idx: u8) -> u64 {
-        // Pack cards into a u64: each card is 6 bits (0-51), round is 2 bits
-        let mut key: u64 = 0;
-        key = key.wrapping_mul(53).wrapping_add(hole_cards[0] as u64);
-        key = key.wrapping_mul(53).wrapping_add(hole_cards[1] as u64);
-        for &c in board_visible {
-            key = key.wrapping_mul(53).wrapping_add(c as u64);
+    /// Serialize to a writer. Format:
+    ///   For each of 3 streets:
+    ///     n_clusters: u32
+    ///     For each cluster:
+    ///       rep_ev: f64, member_count: u32
+    ///       tree (recursive): tag u8 (0=leaf, 1=node) + data
+    pub fn save(&self, w: &mut impl std::io::Write) -> std::io::Result<()> {
+        for street in &self.clusters {
+            w.write_all(&(street.len() as u32).to_le_bytes())?;
+            for cluster in street {
+                w.write_all(&cluster.rep_ev.to_le_bytes())?;
+                w.write_all(&cluster.member_count.to_le_bytes())?;
+                Self::save_tree(w, &cluster.representative)?;
+            }
         }
-        key = key.wrapping_mul(4).wrapping_add(round_idx as u64);
-        key
+        Ok(())
+    }
+
+    /// Deserialize from a reader.
+    pub fn load(r: &mut impl std::io::Read) -> std::io::Result<Self> {
+        let mut clusters: [Vec<PostflopCluster>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for street in &mut clusters {
+            let mut buf4 = [0u8; 4];
+            r.read_exact(&mut buf4)?;
+            let n = u32::from_le_bytes(buf4) as usize;
+            *street = Vec::with_capacity(n);
+            for _ in 0..n {
+                let mut buf8 = [0u8; 8];
+                r.read_exact(&mut buf8)?;
+                let rep_ev = f64::from_le_bytes(buf8);
+                r.read_exact(&mut buf4)?;
+                let member_count = u32::from_le_bytes(buf4);
+                let representative = Self::load_tree(r)?;
+                street.push(PostflopCluster { representative, rep_ev, member_count });
+            }
+        }
+        Ok(PostflopState { clusters })
+    }
+
+    fn save_tree(w: &mut impl std::io::Write, tree: &Tree) -> std::io::Result<()> {
+        match tree {
+            Tree::Leaf { value } => {
+                w.write_all(&[0u8])?; // tag
+                w.write_all(&value.to_le_bytes())?;
+            }
+            Tree::Node { children } => {
+                w.write_all(&[1u8])?; // tag
+                w.write_all(&(children.len() as u32).to_le_bytes())?;
+                for child in children {
+                    Self::save_tree(w, child)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn load_tree(r: &mut impl std::io::Read) -> std::io::Result<Tree> {
+        let mut tag = [0u8; 1];
+        r.read_exact(&mut tag)?;
+        match tag[0] {
+            0 => {
+                let mut buf8 = [0u8; 8];
+                r.read_exact(&mut buf8)?;
+                Ok(Tree::Leaf { value: f64::from_le_bytes(buf8) })
+            }
+            1 => {
+                let mut buf4 = [0u8; 4];
+                r.read_exact(&mut buf4)?;
+                let n = u32::from_le_bytes(buf4) as usize;
+                let mut children = Vec::with_capacity(n);
+                for _ in 0..n {
+                    children.push(Self::load_tree(r)?);
+                }
+                Ok(Tree::Node { children })
+            }
+            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad tree tag")),
+        }
     }
 }
 
@@ -190,10 +259,12 @@ pub fn showdown_distribution_tree(
 /// Find the nearest existing cluster to a tree, with EV pre-filtering and
 /// progressive distance computation for early-out.
 ///
-/// Returns `Some((cluster_index, distance))` if a cluster within epsilon exists,
+/// Returns `Some((cluster_index, raw_distance))` if any clusters exist,
 /// or `None` if the cluster list is empty.
 ///
-/// Matches OCaml's `find_nearest_postflop_cluster`.
+/// Uses raw RBM distance (not normalized). For (2 boards × 5 opponents)
+/// trees with leaf values in {-1, 0, 1}, the distance range is [0, 20].
+/// An epsilon of 0.5 is tight — only strategically near-identical hands merge.
 fn find_nearest_postflop_cluster(
     clusters: &[PostflopCluster],
     tree: &Tree,
@@ -209,17 +280,17 @@ fn find_nearest_postflop_cluster(
     let mut best_dist = f64::INFINITY;
 
     for (i, cluster) in clusters.iter().enumerate() {
-        // EV pre-filter: skip clusters where EV difference alone exceeds epsilon
+        // EV pre-filter: |ev_diff| * num_leaves is a loose lower bound on
+        // the raw distance. Skip clusters where even this bound exceeds epsilon.
         let ev_diff = (tree_ev - cluster.rep_ev).abs();
         if ev_diff > epsilon {
             continue;
         }
-        // Also skip if EV diff already worse than our best so far
         if ev_diff >= best_dist {
             continue;
         }
 
-        // Progressive RBM distance with early-out at threshold=epsilon
+        // Progressive RBM distance with early-out at epsilon
         let (d, _depth) = rbm_distance::compute_progressive_with_config(
             rbm_config,
             tree,
@@ -238,12 +309,14 @@ fn find_nearest_postflop_cluster(
 
 /// Compute the RBM-based post-flop bucket for a hand.
 ///
-/// Builds a showdown distribution tree for the hand, then finds or creates
-/// a cluster for it.
+/// Builds a showdown distribution tree using the shared training RNG
+/// (matching OCaml's approach — no deterministic seeds, no cache).
+/// Each call produces a fresh random tree, which may classify differently
+/// than previous calls for the same hand. This is intentional: OCaml's
+/// random tree noise acts as implicit regularization, producing ~400
+/// clusters vs ~1200 with deterministic seeds at epsilon=0.5.
 ///
 /// Returns the bucket index (cluster index for this street).
-///
-/// Matches OCaml's `compute_bucket_rbm_postflop`.
 pub fn compute_bucket_rbm_postflop(
     hole_cards: &[Card; 2],
     board: &[Card; 5],
@@ -261,20 +334,14 @@ pub fn compute_bucket_rbm_postflop(
         _ => &board[..5], // river
     };
 
-    // Cache lookup: same (hand, board_visible, round) always returns same cluster.
-    // This prevents MC noise from creating different cluster IDs for the same situation.
-    let cache_key = PostflopState::cache_key(hole_cards, board_visible, round_idx);
-    if let Some(&cached_bucket) = postflop.cache.get(&cache_key) {
-        return cached_bucket;
-    }
-
-    // Build showdown distribution tree for this hand+board
+    // Build showdown distribution tree with shared RNG (like OCaml).
+    // No cache — each call gets a fresh random tree.
     let tree = showdown_distribution_tree(
         hole_cards,
         board_visible,
         player,
-        5,  // max_opponents
-        2,  // max_board_samples
+        DEFAULT_MAX_OPPONENTS,
+        DEFAULT_MAX_BOARD_SAMPLES,
         rng,
     );
 
@@ -285,14 +352,12 @@ pub fn compute_bucket_rbm_postflop(
     let clusters = &postflop.clusters[street_idx];
     let nearest = find_nearest_postflop_cluster(clusters, &tree, epsilon, rbm_config);
 
-    let bucket = match nearest {
+    match nearest {
         Some((idx, d)) => {
             if d < epsilon {
-                // Assign to existing cluster
                 postflop.clusters[street_idx][idx].member_count += 1;
                 idx as u32
             } else {
-                // Create new cluster
                 let new_cluster = PostflopCluster {
                     rep_ev: tree.ev(),
                     representative: tree,
@@ -304,7 +369,6 @@ pub fn compute_bucket_rbm_postflop(
             }
         }
         None => {
-            // First cluster for this street
             let new_cluster = PostflopCluster {
                 rep_ev: tree.ev(),
                 representative: tree,
@@ -313,24 +377,21 @@ pub fn compute_bucket_rbm_postflop(
             postflop.clusters[street_idx].push(new_cluster);
             0
         }
-    };
-
-    // Cache the assignment for deterministic future lookups
-    postflop.cache.insert(cache_key, bucket);
-    bucket
+    }
 }
 
 /// Precompute all 4 street buckets for a deal using RBM.
 ///
 /// - Round 0 (preflop): uses the canonical hand ID -> preflop_assignments lookup
 ///   (same as equity bucketing for preflop).
-/// - Rounds 1-3 (flop/turn/river): uses RBM-based clustering.
+/// - Rounds 1-3 (flop/turn/river): uses RBM-based clustering with shared RNG.
 ///
-/// Matches OCaml's `precompute_buckets_rbm`.
+/// `player` (0 or 1) determines the sign convention for showdown outcomes.
 pub fn precompute_buckets_rbm(
     hole_cards: &[Card; 2],
     board: &[Card; 5],
     preflop_assignments: &[i32; 169],
+    player: u8,
     epsilon: f64,
     rbm_config: &RbmConfig,
     postflop: &mut PostflopState,
@@ -347,13 +408,13 @@ pub fn precompute_buckets_rbm(
         0
     };
 
-    // Rounds 1-3: RBM-based post-flop bucketing
+    // Rounds 1-3: RBM-based post-flop bucketing (shared RNG, like OCaml)
     for round_idx in 1..=3u8 {
         result[round_idx as usize] = compute_bucket_rbm_postflop(
             hole_cards,
             board,
             round_idx,
-            0, // player — bucket computation is from player 0's perspective
+            player,
             epsilon,
             rbm_config,
             postflop,
@@ -448,21 +509,19 @@ mod tests {
     }
 
     #[test]
-    fn test_identical_hands_same_cluster() {
+    fn test_identical_hands_high_epsilon() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
         let (p1, _p2, board) = card::sample_deal(&mut rng);
         let rbm_config = RbmConfig::default();
         let mut postflop = PostflopState::new();
 
-        // Assign same hand twice -- with high epsilon, should get same cluster
+        // With high epsilon (10.0), even noisy trees should merge into 1 cluster
         let b1 = compute_bucket_rbm_postflop(
             &p1, &board, 1, 0, 10.0, &rbm_config, &mut postflop, &mut rng,
         );
         let b2 = compute_bucket_rbm_postflop(
             &p1, &board, 1, 0, 10.0, &rbm_config, &mut postflop, &mut rng,
         );
-        // Note: b1 and b2 may differ because the trees are MC sampled, but
-        // with high epsilon they should usually match
         assert_eq!(
             postflop.clusters[0].len(),
             1,
@@ -470,6 +529,24 @@ mod tests {
             postflop.clusters[0].len()
         );
         assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn test_same_seed_produces_identical_trees() {
+        // Same RNG seed → same tree
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
+        let (p1, _p2, board) = card::sample_deal(&mut rng);
+        let board_vis = &board[..3];
+
+        let mut rng1 = Xoshiro256PlusPlus::seed_from_u64(99);
+        let mut rng2 = Xoshiro256PlusPlus::seed_from_u64(99);
+
+        let tree1 = showdown_distribution_tree(&p1, board_vis, 0, 10, 5, &mut rng1);
+        let tree2 = showdown_distribution_tree(&p1, board_vis, 0, 10, 5, &mut rng2);
+
+        assert_eq!(tree1.ev(), tree2.ev());
+        let d = crate::rbm_distance::compute(&tree1, &tree2);
+        assert_eq!(d, 0.0, "Same seed must produce distance=0 trees");
     }
 
     #[test]
@@ -488,21 +565,19 @@ mod tests {
             &p1,
             &board,
             &assignments,
+            0, // player
             0.5,
             &rbm_config,
             &mut postflop,
             &mut rng,
         );
 
-        // Should return 4 bucket values
         assert!(
             buckets[0] < 50,
             "Preflop bucket should be < 50, got {}",
             buckets[0]
         );
-        // Post-flop buckets are cluster indices (0-based)
         for round in 1..4 {
-            // Just verify they don't panic and return some value
             let _ = buckets[round];
         }
     }
@@ -525,7 +600,8 @@ mod tests {
                 &p1,
                 &board,
                 &assignments,
-                0.05, // very tight epsilon -> many clusters
+                0,
+                0.05,
                 &rbm_config,
                 &mut postflop,
                 &mut rng,
@@ -562,6 +638,7 @@ mod tests {
                 &p1_t,
                 &board_t,
                 &assignments,
+                0,
                 0.05,
                 &rbm_config,
                 &mut postflop_tight,
@@ -571,6 +648,7 @@ mod tests {
                 &p1_l,
                 &board_l,
                 &assignments,
+                0,
                 2.0,
                 &rbm_config,
                 &mut postflop_loose,
@@ -586,6 +664,131 @@ mod tests {
             tight_total,
             loose_total
         );
+    }
+
+    #[test]
+    fn test_larger_trees_lower_normalized_noise() {
+        // Verify that larger MC samples (10 opp, 5 boards) have lower
+        // NORMALIZED same-hand distance than smaller trees (5 opp, 2 boards).
+        // Raw distances scale with tree size, but normalized (per-leaf-pair)
+        // distances decrease with more samples (law of large numbers).
+        use crate::rbm_distance;
+
+        let mut deal_rng = Xoshiro256PlusPlus::seed_from_u64(42);
+        let n_trials = 50;
+        let mut norm_small = Vec::new();
+        let mut norm_large = Vec::new();
+
+        for _ in 0..n_trials {
+            let (p1, _p2, board) = card::sample_deal(&mut deal_rng);
+
+            // Small trees: 5 opp, 2 boards → normalize by 10
+            let mut r1 = Xoshiro256PlusPlus::seed_from_u64(deal_rng.gen());
+            let mut r2 = Xoshiro256PlusPlus::seed_from_u64(deal_rng.gen());
+            let t1s = showdown_distribution_tree(&p1, &board[..3], 0, 5, 2, &mut r1);
+            let t2s = showdown_distribution_tree(&p1, &board[..3], 0, 5, 2, &mut r2);
+            norm_small.push(rbm_distance::compute(&t1s, &t2s) / 10.0);
+
+            // Large trees: 10 opp, 5 boards → normalize by 50
+            let mut r3 = Xoshiro256PlusPlus::seed_from_u64(deal_rng.gen());
+            let mut r4 = Xoshiro256PlusPlus::seed_from_u64(deal_rng.gen());
+            let t1l = showdown_distribution_tree(&p1, &board[..3], 0, 10, 5, &mut r3);
+            let t2l = showdown_distribution_tree(&p1, &board[..3], 0, 10, 5, &mut r4);
+            norm_large.push(rbm_distance::compute(&t1l, &t2l) / 50.0);
+        }
+
+        norm_small.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        norm_large.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let median_small = norm_small[n_trials / 2];
+        let median_large = norm_large[n_trials / 2];
+        let mean_small: f64 = norm_small.iter().sum::<f64>() / n_trials as f64;
+        let mean_large: f64 = norm_large.iter().sum::<f64>() / n_trials as f64;
+
+        eprintln!("Normalized same-hand noise comparison:");
+        eprintln!("  Small (5opp,2bd, /10): median={:.3} mean={:.3}", median_small, mean_small);
+        eprintln!("  Large (10opp,5bd, /50): median={:.3} mean={:.3}", median_large, mean_large);
+
+        // Larger trees should have lower normalized noise (better signal)
+        assert!(
+            mean_large <= mean_small,
+            "Larger trees should have lower normalized noise: large={:.3} vs small={:.3}",
+            mean_large, mean_small
+        );
+    }
+
+    #[test]
+    fn test_realistic_distance_distribution() {
+        // Generate showdown trees for different hands on the same board,
+        // measure distances, and verify clustering behavior at epsilon=0.5.
+        use crate::rbm_distance;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
+        let n_hands = 100;
+        let mut trees = Vec::new();
+
+        // Generate trees for many different hands
+        for _ in 0..n_hands {
+            let (p1, _p2, board) = card::sample_deal(&mut rng);
+            let tree = showdown_distribution_tree(
+                &p1, &board[..3], 0,
+                DEFAULT_MAX_OPPONENTS, DEFAULT_MAX_BOARD_SAMPLES,
+                &mut rng,
+            );
+            trees.push(tree);
+        }
+
+        // Compute pairwise distances
+        let mut below_0_5 = 0usize;
+        let mut below_1_0 = 0usize;
+        let mut below_2_0 = 0usize;
+        let mut distances = Vec::new();
+        let total_pairs = n_hands * (n_hands - 1) / 2;
+
+        for i in 0..n_hands {
+            for j in (i+1)..n_hands {
+                let d = rbm_distance::compute(&trees[i], &trees[j]);
+                distances.push(d);
+                if d < 0.5 { below_0_5 += 1; }
+                if d < 1.0 { below_1_0 += 1; }
+                if d < 2.0 { below_2_0 += 1; }
+            }
+        }
+
+        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median_d = distances[distances.len() / 2];
+        let mean_d: f64 = distances.iter().sum::<f64>() / distances.len() as f64;
+
+        eprintln!("Realistic distance distribution ({} hands, flop, 10opp/5bd):", n_hands);
+        eprintln!("  min={:.3} median={:.3} mean={:.3} max={:.3}",
+            distances[0], median_d, mean_d, distances[distances.len() - 1]);
+        eprintln!("  < 0.5: {}/{} ({:.1}%)", below_0_5, total_pairs,
+            100.0 * below_0_5 as f64 / total_pairs as f64);
+        eprintln!("  < 1.0: {}/{} ({:.1}%)", below_1_0, total_pairs,
+            100.0 * below_1_0 as f64 / total_pairs as f64);
+        eprintln!("  < 2.0: {}/{} ({:.1}%)", below_2_0, total_pairs,
+            100.0 * below_2_0 as f64 / total_pairs as f64);
+
+        // Simulate online clustering at epsilon=0.5
+        let mut cluster_reps: Vec<&Tree> = Vec::new();
+        let mut n_clusters = 0usize;
+        for tree in &trees {
+            let mut found = false;
+            for rep in &cluster_reps {
+                let d = rbm_distance::compute(tree, rep);
+                if d < 0.5 {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                cluster_reps.push(tree);
+                n_clusters += 1;
+            }
+        }
+        eprintln!("  Online clustering eps=0.5: {} clusters from {} hands", n_clusters, n_hands);
+
+        assert!(n_clusters > 0);
     }
 
     #[test]

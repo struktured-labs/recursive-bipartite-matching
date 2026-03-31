@@ -155,6 +155,17 @@ fn parse_args() -> CliArgs {
                 let eps: f64 = args[i].parse().expect("bad --rbm-epsilon");
                 train_config.bucket_method = BucketMethod::Rbm { epsilon: eps };
             }
+            "--regret-scale-every" => {
+                i += 1;
+                train_config.regret_scale_every = args[i].parse().expect("bad --regret-scale-every");
+            }
+            "--freeze-after" => {
+                i += 1;
+                train_config.freeze_after = args[i].parse().expect("bad --freeze-after");
+            }
+            "--no-freeze" => {
+                train_config.freeze_after = 0;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -210,6 +221,7 @@ fn print_help() {
     eprintln!("  --prune-threshold F  Prune threshold (default: -3e8)");
     eprintln!("  --bucket-method M    Bucketing method: 'rbm' (default) or 'equity'");
     eprintln!("  --rbm-epsilon F      RBM cluster epsilon (default: 0.5)");
+    eprintln!("  --regret-scale-every N  Halve regrets every N iters to prevent i16 saturation (default: 1000000, 0 = off)");
     eprintln!();
     eprintln!("Slumbot play options:");
     eprintln!("  --play N             Play N hands against Slumbot after training");
@@ -232,6 +244,7 @@ fn play_against_slumbot(
     n_buckets: u32,
     assignments: &[i32; 169],
     game_config: &GameConfig,
+    bucket_method: &BucketMethod,
     verbose: bool,
 ) {
     eprintln!();
@@ -248,9 +261,10 @@ fn play_against_slumbot(
     play_config.n_buckets = n_buckets;
     play_config.preflop_assignments = *assignments;
     play_config.game_config = game_config.clone();
+    play_config.bucket_method = bucket_method.clone();
     play_config.verbose = verbose;
 
-    match slumbot::run_session(&play_strategy, &play_config, num_hands) {
+    match slumbot::run_session(&play_strategy, &mut play_config, num_hands) {
         Ok(result) => {
             eprintln!();
             eprintln!("Session complete: {:.2} mbb/hand over {} hands",
@@ -267,10 +281,12 @@ fn play_against_slumbot(
 /// Avoids the save+reload cycle for train+play mode.
 fn play_from_compact_state(
     states: [rbm_mccfr::compact_state::CompactCfrState; 2],
+    postflop_states: [rbm_mccfr::rbm_buckets::PostflopState; 2],
     num_hands: u32,
     n_buckets: u32,
     assignments: &[i32; 169],
     game_config: &GameConfig,
+    bucket_method: &BucketMethod,
     verbose: bool,
 ) {
     eprintln!();
@@ -280,13 +296,16 @@ fn play_from_compact_state(
 
     let play_strategy = slumbot::PlayStrategy::Compact(states);
 
-    let mut play_config = slumbot::PlayConfig::default();
-    play_config.n_buckets = n_buckets;
-    play_config.preflop_assignments = *assignments;
-    play_config.game_config = game_config.clone();
-    play_config.verbose = verbose;
+    let mut play_config = slumbot::PlayConfig {
+        n_buckets,
+        preflop_assignments: *assignments,
+        game_config: game_config.clone(),
+        bucket_method: bucket_method.clone(),
+        postflop_states,
+        verbose,
+    };
 
-    match slumbot::run_session(&play_strategy, &play_config, num_hands) {
+    match slumbot::run_session(&play_strategy, &mut play_config, num_hands) {
         Ok(result) => {
             eprintln!();
             eprintln!("Session complete: {:.2} mbb/hand over {} hands",
@@ -340,6 +359,7 @@ fn main() {
             cli.train_config.n_buckets,
             &cli.assignments,
             &cli.game_config,
+            &cli.train_config.bucket_method,
             cli.verbose,
         );
         return;
@@ -359,8 +379,9 @@ fn main() {
     eprintln!("Training:   {} iterations, {} thread(s)",
         cli.train_config.iterations, cli.num_threads);
     eprintln!("Buckets:    {}", bucket_desc);
-    eprintln!("Variants:   dcfr={} lcfr={} prune={:.0}",
-        cli.train_config.dcfr, cli.train_config.lcfr, cli.train_config.prune_threshold);
+    eprintln!("Variants:   dcfr={} lcfr={} prune={:.0} regret_scale_every={}",
+        cli.train_config.dcfr, cli.train_config.lcfr, cli.train_config.prune_threshold,
+        cli.train_config.regret_scale_every);
     eprintln!("Output:     {}", cli.output);
     if cli.play_hands > 0 {
         eprintln!("Play:       {} hands against Slumbot after training", cli.play_hands);
@@ -369,21 +390,43 @@ fn main() {
 
     let start = Instant::now();
 
-    let states = if let Some(ref ckpt_path) = cli.resume_path {
+    let (states, postflop_states) = if let Some(ref ckpt_path) = cli.resume_path {
         eprintln!("Resuming from checkpoint: {}", ckpt_path);
         let (s0, s1, iter) = load_checkpoint(Path::new(ckpt_path));
         let loaded = [s0, s1];
 
+        // Try to load PostflopState from .clusters file alongside checkpoint
+        let cluster_path = ckpt_path.replace(".bin", ".clusters");
+        let resume_postflop = match std::fs::File::open(&cluster_path) {
+            Ok(f) => {
+                let mut r = std::io::BufReader::new(f);
+                let ps0 = rbm_mccfr::rbm_buckets::PostflopState::load(&mut r);
+                let ps1 = rbm_mccfr::rbm_buckets::PostflopState::load(&mut r);
+                match (ps0, ps1) {
+                    (Ok(p0), Ok(p1)) => {
+                        eprintln!("Loaded cluster state: {} + {} clusters",
+                            p0.total_clusters(), p1.total_clusters());
+                        Some([p0, p1])
+                    }
+                    _ => {
+                        eprintln!("Warning: failed to load cluster state from {}", cluster_path);
+                        None
+                    }
+                }
+            }
+            Err(_) => None,
+        };
+
         if cli.num_threads > 1 {
             eprintln!("Note: parallel resume not yet supported, using single-threaded");
-            train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, Some((&loaded, iter)))
+            train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, Some((&loaded, iter)), resume_postflop)
         } else {
-            train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, Some((&loaded, iter)))
+            train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, Some((&loaded, iter)), resume_postflop)
         }
     } else if cli.num_threads > 1 {
         train::train_mccfr_parallel(&cli.game_config, &cli.train_config, &cli.assignments, cli.num_threads)
     } else {
-        train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, None)
+        train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, None, None)
     };
 
     let elapsed = start.elapsed();
@@ -434,10 +477,12 @@ fn main() {
     if cli.play_hands > 0 {
         play_from_compact_state(
             states,
+            postflop_states,
             cli.play_hands,
             cli.train_config.n_buckets,
             &cli.assignments,
             &cli.game_config,
+            &cli.train_config.bucket_method,
             cli.verbose,
         );
     }

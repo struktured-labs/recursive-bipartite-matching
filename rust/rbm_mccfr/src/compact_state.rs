@@ -24,6 +24,7 @@
 ///   - Total: ~2x less memory for same number of info sets
 
 use rustc_hash::FxHashMap;
+use ph::fmph;
 
 /// Compact index entry stored in the hash map.
 /// Points into the split arenas where actual regret/strategy data lives.
@@ -40,6 +41,19 @@ pub struct CompactEntry {
     pub last_discount_epoch: u16,
 }
 
+/// Optional MPHF-based frozen index that replaces FxHashMap lookups.
+///
+/// When present, `find_or_add` checks the MPHF first (~2.1 bits/key, 8ns lookup)
+/// before falling back to the FxHashMap for overflow entries. The FxHashMap is
+/// cleared of frozen keys, freeing ~32GB at 1B entries.
+pub struct FrozenIndex {
+    mphf: fmph::GOFunction,
+    keys: Vec<u64>,
+    n_actions: Vec<u8>,
+    epochs: Vec<u16>,
+    offsets: Vec<u32>,
+}
+
 /// Per-player compact CFR state with split storage:
 /// - i16 arena for regrets (bounded by CFR+ flooring + DCFR discount)
 /// - f32 arena for strategy sums (grow unboundedly with LCFR weighting)
@@ -52,22 +66,129 @@ pub struct CompactCfrState {
     /// Strategy arena: contiguous f32 storage.
     /// Layout per entry: [strat_0..strat_{n-1}]
     pub strategy_arena: Vec<f32>,
+    /// Optional frozen MPHF index. When set, find_or_add checks MPHF first.
+    /// Not cloneable — freeze must be re-applied after checkpoint resume.
+    pub(crate) frozen: Option<FrozenIndex>,
 }
 
 impl CompactCfrState {
     pub fn new(capacity: usize) -> Self {
-        // Pre-allocate arenas assuming avg ~6 actions per info set
         let regret_capacity = capacity * 6;
         let strategy_capacity = capacity * 6;
         Self {
             index: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
             regret_arena: Vec::with_capacity(regret_capacity),
             strategy_arena: Vec::with_capacity(strategy_capacity),
+            frozen: None,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.index.len()
+        let frozen_len = self.frozen.as_ref().map_or(0, |f| f.keys.len());
+        self.index.len() + frozen_len
+    }
+
+    /// Is this state frozen (using MPHF index)?
+    pub fn is_frozen(&self) -> bool {
+        self.frozen.is_some()
+    }
+
+    /// Freeze or re-freeze: build MPHF from all known keys, move them
+    /// to flat arrays, then CLEAR the FxHashMap to free memory.
+    ///
+    /// On first call: freezes all HashMap entries into MPHF.
+    /// On subsequent calls: absorbs overflow HashMap into a new, larger MPHF.
+    /// Arenas are NOT moved — offsets remain valid.
+    ///
+    /// Memory-optimized: extracts old frozen data before allocating new arrays,
+    /// minimizing peak memory during the transition.
+    pub fn freeze(&mut self) {
+        let overflow_len = self.index.len();
+        let frozen_len = self.frozen.as_ref().map_or(0, |f| f.keys.len());
+        let total = frozen_len + overflow_len;
+
+        if overflow_len == 0 && self.frozen.is_some() {
+            return;
+        }
+
+        let is_refreeze = self.frozen.is_some();
+        eprintln!(
+            "[{}] Building MPHF for {} entries ({} frozen + {} overflow)...",
+            if is_refreeze { "re-freeze" } else { "freeze" },
+            total, frozen_len, overflow_len
+        );
+        let start = std::time::Instant::now();
+
+        // Extract old frozen data (take ownership to free memory after use).
+        // For re-freeze: reuse the old keys Vec, extend with overflow keys.
+        let old_frozen = self.frozen.take();
+
+        // Build key vector: reuse old frozen keys vec + append overflow keys.
+        // This avoids a full copy — we extend in-place.
+        let mut all_keys = match old_frozen {
+            Some(ref f) => {
+                let mut k = Vec::with_capacity(total);
+                k.extend_from_slice(&f.keys);
+                k
+            }
+            None => Vec::with_capacity(total),
+        };
+        all_keys.extend(self.index.keys());
+
+        // Build MPHF from combined keys
+        let mphf = fmph::GOFunction::from_slice(&all_keys);
+        drop(all_keys); // free the key collection vector
+
+        // Allocate new flat arrays
+        let mut keys = vec![0u64; total];
+        let mut n_actions_arr = vec![0u8; total];
+        let mut epochs_arr = vec![0u16; total];
+        let mut offsets_arr = vec![0u32; total];
+
+        // Populate from old frozen entries, then drop old frozen to free memory
+        if let Some(ref frozen) = old_frozen {
+            for (old_slot, &key) in frozen.keys.iter().enumerate() {
+                let new_slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
+                keys[new_slot] = key;
+                n_actions_arr[new_slot] = frozen.n_actions[old_slot];
+                epochs_arr[new_slot] = frozen.epochs[old_slot];
+                offsets_arr[new_slot] = frozen.offsets[old_slot];
+            }
+        }
+        let old_frozen_bytes = frozen_len * 15;
+        drop(old_frozen); // FREE old frozen metadata before populating from overflow
+
+        // Populate from overflow HashMap
+        let old_overflow_bytes = overflow_len * 48;
+        for (&key, &entry) in &self.index {
+            let new_slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
+            keys[new_slot] = key;
+            n_actions_arr[new_slot] = entry.n_actions;
+            epochs_arr[new_slot] = entry.last_discount_epoch;
+            offsets_arr[new_slot] = entry.regret_offset;
+        }
+
+        // Clear overflow HashMap
+        self.index.clear();
+        self.index.shrink_to(1024);
+
+        let new_total_bytes = total * 15;
+        self.frozen = Some(FrozenIndex {
+            mphf,
+            keys,
+            n_actions: n_actions_arr,
+            epochs: epochs_arr,
+            offsets: offsets_arr,
+        });
+
+        eprintln!(
+            "[{}] Complete in {:.1}s: {} total entries. Overflow {}MB freed, MPHF index = {}MB",
+            if is_refreeze { "re-freeze" } else { "freeze" },
+            start.elapsed().as_secs_f64(),
+            total,
+            old_overflow_bytes / 1024 / 1024,
+            new_total_bytes / 1024 / 1024,
+        );
     }
 
     /// Get the regret value for action `i` at the given entry.
@@ -111,10 +232,32 @@ impl CompactCfrState {
         self.strategy_arena[idx] = v;
     }
 
-    /// Get or create an entry for the given key. Returns a copy of the entry
-    /// (it's Copy, only 12 bytes).
+    /// Halve all regrets in the arena (arithmetic right-shift by 1).
+    /// Prevents i16 saturation during long training runs. Cache-friendly
+    /// single pass over contiguous memory.
+    pub fn halve_regrets(&mut self) {
+        for r in self.regret_arena.iter_mut() {
+            *r /= 2;
+        }
+    }
+
+    /// Get or create an entry for the given key. Returns a copy of the entry.
+    /// If frozen, checks MPHF first (fast path), then falls back to HashMap (overflow).
     #[inline]
     pub fn find_or_add(&mut self, key: u64, n_actions: u8) -> CompactEntry {
+        // Fast path: check MPHF if frozen
+        if let Some(ref frozen) = self.frozen {
+            let slot = frozen.mphf.get(&key).unwrap_or(u64::MAX) as usize;
+            if slot < frozen.keys.len() && frozen.keys[slot] == key {
+                return CompactEntry {
+                    regret_offset: frozen.offsets[slot],
+                    strategy_offset: frozen.offsets[slot],
+                    n_actions: frozen.n_actions[slot],
+                    last_discount_epoch: frozen.epochs[slot],
+                };
+            }
+        }
+        // HashMap path (normal or overflow)
         if let Some(&entry) = self.index.get(&key) {
             return entry;
         }
@@ -134,7 +277,7 @@ impl CompactCfrState {
     }
 
     /// Get or create an entry, applying lazy DCFR discount if the entry is stale.
-    /// Returns a copy of the (possibly updated) entry.
+    /// If frozen, checks MPHF first (fast path) with discount applied to flat arrays.
     #[inline]
     pub fn find_or_add_lazy_dcfr(
         &mut self,
@@ -143,7 +286,35 @@ impl CompactCfrState {
         current_epoch: u16,
         dcfr_table: &super::cfr_state::DcfrTable,
     ) -> CompactEntry {
-        // Check if entry exists
+        // Fast path: check MPHF if frozen
+        if let Some(ref mut frozen) = self.frozen {
+            let slot = frozen.mphf.get(&key).unwrap_or(u64::MAX) as usize;
+            if slot < frozen.keys.len() && frozen.keys[slot] == key {
+                if frozen.epochs[slot] < current_epoch {
+                    let (pos_factor, neg_factor, strat_factor) =
+                        dcfr_table.discount_factors(frozen.epochs[slot] as u32, current_epoch as u32);
+                    let n = frozen.n_actions[slot] as usize;
+                    let base = frozen.offsets[slot] as usize;
+                    for i in 0..n {
+                        let r = self.regret_arena[base + i] as f32;
+                        let w = if r >= 0.0 { pos_factor } else { neg_factor };
+                        self.regret_arena[base + i] = ((r * w as f32) as i32).clamp(-32767, 32767) as i16;
+                    }
+                    for i in 0..n {
+                        self.strategy_arena[base + i] *= strat_factor as f32;
+                    }
+                    frozen.epochs[slot] = current_epoch;
+                }
+                return CompactEntry {
+                    regret_offset: frozen.offsets[slot],
+                    strategy_offset: frozen.offsets[slot],
+                    n_actions: frozen.n_actions[slot],
+                    last_discount_epoch: frozen.epochs[slot],
+                };
+            }
+        }
+
+        // HashMap path (normal or overflow)
         if let Some(entry) = self.index.get_mut(&key) {
             if entry.last_discount_epoch < current_epoch {
                 let (pos_factor, neg_factor, strat_factor) =
@@ -151,15 +322,11 @@ impl CompactCfrState {
                 let n = entry.n_actions as usize;
                 let r_base = entry.regret_offset as usize;
                 let s_base = entry.strategy_offset as usize;
-
-                // Discount regrets (i16 arena)
                 for i in 0..n {
                     let r = self.regret_arena[r_base + i] as f32;
                     let w = if r >= 0.0 { pos_factor } else { neg_factor };
-                    let new = (r * w as f32) as i32;
-                    self.regret_arena[r_base + i] = new.clamp(-32767, 32767) as i16;
+                    self.regret_arena[r_base + i] = ((r * w as f32) as i32).clamp(-32767, 32767) as i16;
                 }
-                // Discount strategy sums (f32 arena)
                 for i in 0..n {
                     self.strategy_arena[s_base + i] *= strat_factor as f32;
                 }
@@ -168,7 +335,7 @@ impl CompactCfrState {
             return *entry;
         }
 
-        // New entry
+        // New entry (into HashMap)
         let regret_offset = self.regret_arena.len() as u32;
         let strategy_offset = self.strategy_arena.len() as u32;
         let n = n_actions as usize;
@@ -627,5 +794,31 @@ mod tests {
         let probs = avg.get(&42).unwrap();
         assert!((probs[0] - 0.6).abs() < 0.001);
         assert!((probs[1] - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_halve_regrets() {
+        let mut state = CompactCfrState::new(100);
+        let e1 = state.find_or_add(1, 3);
+        let e2 = state.find_or_add(2, 2);
+
+        state.set_regret(&e1, 0, 30000.0);
+        state.set_regret(&e1, 1, -20000.0);
+        state.set_regret(&e1, 2, 100.0);
+        state.set_regret(&e2, 0, 32767.0); // max i16
+        state.set_regret(&e2, 1, -32767.0); // min i16
+
+        state.halve_regrets();
+
+        assert_eq!(state.regret(&e1, 0), 15000.0);
+        assert_eq!(state.regret(&e1, 1), -10000.0);
+        assert_eq!(state.regret(&e1, 2), 50.0);
+        assert_eq!(state.regret(&e2, 0), 16383.0); // 32767 / 2 truncated
+        assert_eq!(state.regret(&e2, 1), -16383.0);
+
+        // Second halve
+        state.halve_regrets();
+        assert_eq!(state.regret(&e1, 0), 7500.0);
+        assert_eq!(state.regret(&e2, 0), 8191.0);
     }
 }

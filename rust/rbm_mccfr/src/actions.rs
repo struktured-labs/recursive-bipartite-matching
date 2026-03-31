@@ -170,7 +170,9 @@ pub fn apply_action(config: &GameConfig, state: NlState, action: Action) -> NlSt
             new_state.p_stack[seat] = 0;
             if all_in > to_call {
                 let in_round = new_state.p_invested[seat] - state.round_start_invested[seat];
-                new_state.current_bet = in_round;
+                // Use max to match OCaml: all-in for less than current bet
+                // doesn't reduce the bet level (prevents spurious game states)
+                new_state.current_bet = new_state.current_bet.max(in_round);
                 new_state.num_raises += 1;
                 new_state.actions_remaining = 1;
             } else {

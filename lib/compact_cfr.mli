@@ -159,6 +159,9 @@ type postflop_state
 (** [create_postflop_state ()] returns a fresh (empty) cluster state. *)
 val create_postflop_state : unit -> postflop_state
 
+(** Total number of clusters across all rounds in a postflop_state. *)
+val postflop_cluster_count : postflop_state -> int
+
 (** [train_mccfr ~config ~abstraction ~iterations] runs external-sampling
     MCCFR for [iterations] iterations, alternating traverser each iteration.
     [~initial_size] pre-sizes the hash tables (default 1_000_000).

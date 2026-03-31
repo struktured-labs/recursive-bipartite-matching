@@ -183,8 +183,16 @@ let () =
        let rate = Float.of_int iter /. elapsed in
        let n0 = Hashtbl.length cfr_states.(0).entries in
        let n1 = Hashtbl.length cfr_states.(1).entries in
-       printf "  [%d/%d] avg_util=%.4f infosets=(%d,%d) %.0f iter/s\n%!"
-         iter !iterations avg_util n0 n1 rate
+       let cluster_str =
+         match bucket_method with
+         | Compact_cfr.Rbm_based _ ->
+           sprintf " clusters=(%d,%d)"
+             (Compact_cfr.postflop_cluster_count postflop_states.(0))
+             (Compact_cfr.postflop_cluster_count postflop_states.(1))
+         | Compact_cfr.Equity_based -> ""
+       in
+       printf "  [%d/%d] avg_util=%.4f infosets=(%d,%d) %.0f iter/s%s\n%!"
+         iter !iterations avg_util n0 n1 rate cluster_str
      | false -> ());
     (match !checkpoint_every > 0 && iter % !checkpoint_every = 0 with
      | true ->
