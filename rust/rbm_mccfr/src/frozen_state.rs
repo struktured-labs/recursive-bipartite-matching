@@ -100,10 +100,10 @@ impl FrozenCfrState {
             let old_s_base = entry.strategy_offset as usize;
             let na = entry.n_actions as usize;
 
-            regrets[new_base..new_base + na]
-                .copy_from_slice(&old.regret_arena[old_r_base..old_r_base + na]);
-            strategies[new_base..new_base + na]
-                .copy_from_slice(&old.strategy_arena[old_s_base..old_s_base + na]);
+            for i in 0..na {
+                regrets[new_base + i] = old.regret_arena.get(old_r_base + i);
+                strategies[new_base + i] = old.strategy_arena.get(old_s_base + i);
+            }
         }
 
         let elapsed = start.elapsed();

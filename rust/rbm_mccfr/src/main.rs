@@ -166,6 +166,9 @@ fn parse_args() -> CliArgs {
             "--no-freeze" => {
                 train_config.freeze_after = 0;
             }
+            "--mmap-arenas" => {
+                train_config.mmap_arenas = true;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);

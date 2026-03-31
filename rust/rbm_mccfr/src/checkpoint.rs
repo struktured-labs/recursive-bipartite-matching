@@ -299,13 +299,13 @@ pub fn save_compact_raw_states(
 
         // Write regret arena
         w.write_all(&regret_arena_len.to_le_bytes())?;
-        for &val in &state.regret_arena {
+        for val in state.regret_arena.iter() {
             w.write_all(&val.to_le_bytes())?;
         }
 
         // Write strategy arena
         w.write_all(&strategy_arena_len.to_le_bytes())?;
-        for &val in &state.strategy_arena {
+        for val in state.strategy_arena.iter() {
             w.write_all(&val.to_le_bytes())?;
         }
 
@@ -357,22 +357,24 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
         // Read regret arena
         r.read_exact(&mut buf8)?;
         let regret_arena_len = u64::from_le_bytes(buf8) as usize;
-        states[player].regret_arena = Vec::with_capacity(regret_arena_len);
+        let mut regret_vec: Vec<i16> = Vec::with_capacity(regret_arena_len);
         let mut buf2 = [0u8; 2];
         for _ in 0..regret_arena_len {
             r.read_exact(&mut buf2)?;
-            states[player].regret_arena.push(i16::from_le_bytes(buf2));
+            regret_vec.push(i16::from_le_bytes(buf2));
         }
+        states[player].regret_arena = crate::compact_state::Arena::from_vec(regret_vec);
 
         // Read strategy arena
         r.read_exact(&mut buf8)?;
         let strategy_arena_len = u64::from_le_bytes(buf8) as usize;
-        states[player].strategy_arena = Vec::with_capacity(strategy_arena_len);
+        let mut strategy_vec: Vec<f32> = Vec::with_capacity(strategy_arena_len);
         let mut buf4 = [0u8; 4];
         for _ in 0..strategy_arena_len {
             r.read_exact(&mut buf4)?;
-            states[player].strategy_arena.push(f32::from_le_bytes(buf4));
+            strategy_vec.push(f32::from_le_bytes(buf4));
         }
+        states[player].strategy_arena = crate::compact_state::Arena::from_vec(strategy_vec);
 
         // Read index entries
         states[player].index.reserve(n_entries);

@@ -57,6 +57,10 @@ pub struct TrainConfig {
     /// Replaces FxHashMap (~48B/key) with MPHF (~2.1 bits/key) + flat arrays.
     /// 0 = disabled (never freeze). Default: 5000000 (5M).
     pub freeze_after: u64,
+    /// Use mmap-backed arenas instead of in-memory Vecs.
+    /// Allows training to exceed physical RAM by paging cold entries to disk.
+    /// Speed cost: ~2-3x for cold entries, negligible for hot entries.
+    pub mmap_arenas: bool,
 }
 
 impl Default for TrainConfig {
@@ -73,6 +77,7 @@ impl Default for TrainConfig {
             bucket_method: BucketMethod::default(),
             regret_scale_every: 1_000_000,
             freeze_after: 5_000_000,
+            mmap_arenas: false,
         }
     }
 }

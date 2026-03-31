@@ -29,6 +29,7 @@ pub mod hungarian;
 pub mod rbm_distance;
 pub mod rbm_buckets;
 pub mod frozen_state;
+pub mod mmap_arena;
 
 // -----------------------------------------------------------------------
 // C FFI entry points
@@ -92,6 +93,7 @@ pub unsafe extern "C" fn rbm_train(
         bucket_method: config::BucketMethod::default(),
         regret_scale_every: 1_000_000,
         freeze_after: 5_000_000,
+        mmap_arenas: false,
     };
 
     // Preflop assignments

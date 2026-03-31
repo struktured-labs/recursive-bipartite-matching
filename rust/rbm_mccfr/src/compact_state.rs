@@ -25,6 +25,7 @@
 
 use rustc_hash::FxHashMap;
 use ph::fmph;
+use crate::mmap_arena::MmapArena;
 
 /// Compact index entry stored in the hash map.
 /// Points into the split arenas where actual regret/strategy data lives.
@@ -54,6 +55,134 @@ pub struct FrozenIndex {
     offsets: Vec<u32>,
 }
 
+/// Arena backend: in-memory Vec or disk-backed mmap.
+pub enum Arena<T: Copy + Default + bytemuck::Pod> {
+    Mem(Vec<T>),
+    Mmap(MmapArena<T>),
+}
+
+impl<T: Copy + Default + bytemuck::Pod> Arena<T> {
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        match self { Arena::Mem(v) => v.len(), Arena::Mmap(m) => m.len() }
+    }
+
+    #[inline(always)]
+    pub fn get(&self, idx: usize) -> T {
+        match self {
+            Arena::Mem(v) => v[idx],
+            Arena::Mmap(m) => m.get(idx),
+        }
+    }
+
+    #[inline(always)]
+    pub fn set(&mut self, idx: usize, val: T) {
+        match self {
+            Arena::Mem(v) => v[idx] = val,
+            Arena::Mmap(m) => m.set(idx, val),
+        }
+    }
+
+    pub fn resize(&mut self, new_len: usize, fill: T) {
+        match self {
+            Arena::Mem(v) => v.resize(new_len, fill),
+            Arena::Mmap(m) => m.resize(new_len, fill).expect("mmap resize failed"),
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = &mut T> + '_> {
+        match self {
+            Arena::Mem(v) => Box::new(v.iter_mut()),
+            Arena::Mmap(m) => Box::new(m.iter_mut()),
+        }
+    }
+
+    /// Clone (only for Mem variant — mmap arenas can't be cloned).
+    pub fn clone_mem(&self) -> Self {
+        match self {
+            Arena::Mem(v) => Arena::Mem(v.clone()),
+            Arena::Mmap(_) => panic!("cannot clone mmap arena"),
+        }
+    }
+
+    /// Push an element (only for Mem variant).
+    pub fn push(&mut self, val: T) {
+        match self {
+            Arena::Mem(v) => v.push(val),
+            Arena::Mmap(_) => {
+                // For mmap: grow and set
+                let idx = self.len();
+                self.resize(idx + 1, val);
+                self.set(idx, val);
+            }
+        }
+    }
+
+    /// Iterate (read-only).
+    pub fn iter(&self) -> Box<dyn Iterator<Item = &T> + '_> {
+        match self {
+            Arena::Mem(v) => Box::new(v.iter()),
+            Arena::Mmap(m) => {
+                let slice = bytemuck::cast_slice::<u8, T>(m.as_ref());
+                Box::new(slice.iter())
+            }
+        }
+    }
+
+    /// Direct Vec access for checkpoint save/load (panics on mmap).
+    pub fn as_vec(&self) -> &Vec<T> {
+        match self {
+            Arena::Mem(v) => v,
+            Arena::Mmap(_) => panic!("as_vec on mmap arena — use checkpoint with in-memory state"),
+        }
+    }
+
+    pub fn as_vec_mut(&mut self) -> &mut Vec<T> {
+        match self {
+            Arena::Mem(v) => v,
+            Arena::Mmap(_) => panic!("as_vec_mut on mmap arena"),
+        }
+    }
+
+    /// Create from a Vec (wraps in Mem variant).
+    pub fn from_vec(v: Vec<T>) -> Self {
+        Arena::Mem(v)
+    }
+
+    /// Create empty with capacity.
+    pub fn with_capacity(cap: usize) -> Self {
+        Arena::Mem(Vec::with_capacity(cap))
+    }
+}
+
+impl<T: Copy + Default + bytemuck::Pod> std::ops::Index<usize> for Arena<T> {
+    type Output = T;
+    #[inline(always)]
+    fn index(&self, idx: usize) -> &T {
+        match self {
+            Arena::Mem(v) => &v[idx],
+            Arena::Mmap(m) => {
+                let bytes = &m.as_ref()[idx * std::mem::size_of::<T>()..(idx + 1) * std::mem::size_of::<T>()];
+                &bytemuck::cast_slice::<u8, T>(bytes)[0]
+            }
+        }
+    }
+}
+
+impl<T: Copy + Default + bytemuck::Pod> std::ops::IndexMut<usize> for Arena<T> {
+    #[inline(always)]
+    fn index_mut(&mut self, idx: usize) -> &mut T {
+        match self {
+            Arena::Mem(v) => &mut v[idx],
+            Arena::Mmap(m) => {
+                let sz = std::mem::size_of::<T>();
+                let bytes = &mut m.as_mut()[idx * sz..(idx + 1) * sz];
+                &mut bytemuck::cast_slice_mut::<u8, T>(bytes)[0]
+            }
+        }
+    }
+}
+
 /// Per-player compact CFR state with split storage:
 /// - i16 arena for regrets (bounded by CFR+ flooring + DCFR discount)
 /// - f32 arena for strategy sums (grow unboundedly with LCFR weighting)
@@ -61,13 +190,10 @@ pub struct CompactCfrState {
     /// Index: info key -> compact entry metadata
     pub index: FxHashMap<u64, CompactEntry>,
     /// Regret arena: contiguous i16 storage.
-    /// Layout per entry: [regret_0..regret_{n-1}]
-    pub regret_arena: Vec<i16>,
+    pub regret_arena: Arena<i16>,
     /// Strategy arena: contiguous f32 storage.
-    /// Layout per entry: [strat_0..strat_{n-1}]
-    pub strategy_arena: Vec<f32>,
+    pub strategy_arena: Arena<f32>,
     /// Optional frozen MPHF index. When set, find_or_add checks MPHF first.
-    /// Not cloneable — freeze must be re-applied after checkpoint resume.
     pub(crate) frozen: Option<FrozenIndex>,
 }
 
@@ -77,8 +203,25 @@ impl CompactCfrState {
         let strategy_capacity = capacity * 6;
         Self {
             index: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
-            regret_arena: Vec::with_capacity(regret_capacity),
-            strategy_arena: Vec::with_capacity(strategy_capacity),
+            regret_arena: Arena::Mem(Vec::with_capacity(regret_capacity)),
+            strategy_arena: Arena::Mem(Vec::with_capacity(strategy_capacity)),
+            frozen: None,
+        }
+    }
+
+    /// Create a new state with mmap-backed arenas for low-memory training.
+    /// `dir` is the directory where arena files will be stored.
+    pub fn new_mmap(capacity: usize, dir: &std::path::Path, player: u8) -> Self {
+        let regret_path = dir.join(format!("regret_p{}.bin", player));
+        let strategy_path = dir.join(format!("strategy_p{}.bin", player));
+        let regret_cap = capacity * 6;
+        let strategy_cap = capacity * 6;
+        Self {
+            index: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
+            regret_arena: Arena::Mmap(MmapArena::new(&regret_path, regret_cap)
+                .expect("failed to create regret mmap")),
+            strategy_arena: Arena::Mmap(MmapArena::new(&strategy_path, strategy_cap)
+                .expect("failed to create strategy mmap")),
             frozen: None,
         }
     }
@@ -194,47 +337,45 @@ impl CompactCfrState {
     /// Get the regret value for action `i` at the given entry.
     #[inline(always)]
     pub fn regret(&self, entry: &CompactEntry, i: usize) -> f32 {
-        self.regret_arena[entry.regret_offset as usize + i] as f32
+        self.regret_arena.get(entry.regret_offset as usize + i) as f32
     }
 
     /// Get the strategy sum for action `i` at the given entry.
     #[inline(always)]
     pub fn strategy(&self, entry: &CompactEntry, i: usize) -> f32 {
-        self.strategy_arena[entry.strategy_offset as usize + i]
+        self.strategy_arena.get(entry.strategy_offset as usize + i)
     }
 
     /// Add a delta to regret for action `i`. Clamps to i16 range.
     #[inline(always)]
     pub fn add_regret(&mut self, entry: &CompactEntry, i: usize, delta: f32) {
         let idx = entry.regret_offset as usize + i;
-        let new = (self.regret_arena[idx] as f32 + delta) as i32;
-        self.regret_arena[idx] = new.clamp(-32767, 32767) as i16;
+        let new = (self.regret_arena.get(idx) as f32 + delta) as i32;
+        self.regret_arena.set(idx, new.clamp(-32767, 32767) as i16);
     }
 
     /// Set regret for action `i`. Clamps to i16 range.
     #[inline(always)]
     pub fn set_regret(&mut self, entry: &CompactEntry, i: usize, v: f32) {
         let idx = entry.regret_offset as usize + i;
-        self.regret_arena[idx] = (v as i32).clamp(-32767, 32767) as i16;
+        self.regret_arena.set(idx, (v as i32).clamp(-32767, 32767) as i16);
     }
 
     /// Add a delta to strategy sum for action `i`. Direct f32 add — no clamping.
     #[inline(always)]
     pub fn add_strategy(&mut self, entry: &CompactEntry, i: usize, delta: f32) {
         let idx = entry.strategy_offset as usize + i;
-        self.strategy_arena[idx] += delta;
+        let old = self.strategy_arena.get(idx);
+        self.strategy_arena.set(idx, old + delta);
     }
 
     /// Set strategy sum for action `i`. Direct f32 — no clamping.
     #[inline(always)]
     pub fn set_strategy(&mut self, entry: &CompactEntry, i: usize, v: f32) {
-        let idx = entry.strategy_offset as usize + i;
-        self.strategy_arena[idx] = v;
+        self.strategy_arena.set(entry.strategy_offset as usize + i, v);
     }
 
-    /// Halve all regrets in the arena (arithmetic right-shift by 1).
-    /// Prevents i16 saturation during long training runs. Cache-friendly
-    /// single pass over contiguous memory.
+    /// Halve all regrets in the arena.
     pub fn halve_regrets(&mut self) {
         for r in self.regret_arena.iter_mut() {
             *r /= 2;

@@ -123,21 +123,33 @@ pub fn train_mccfr(
             // Clone the states for resumed training
             let s0 = CompactCfrState {
                 index: states[0].index.clone(),
-                regret_arena: states[0].regret_arena.clone(),
-                strategy_arena: states[0].strategy_arena.clone(),
-                frozen: None, // Frozen state not cloneable; re-freeze after resume
+                regret_arena: states[0].regret_arena.clone_mem(),
+                strategy_arena: states[0].strategy_arena.clone_mem(),
+                frozen: None,
             };
             let s1 = CompactCfrState {
                 index: states[1].index.clone(),
-                regret_arena: states[1].regret_arena.clone(),
-                strategy_arena: states[1].strategy_arena.clone(),
+                regret_arena: states[1].regret_arena.clone_mem(),
+                strategy_arena: states[1].strategy_arena.clone_mem(),
                 frozen: None,
             };
             ([s0, s1], iter)
         }
         None => {
-            let s0 = CompactCfrState::new(train_config.initial_size);
-            let s1 = CompactCfrState::new(train_config.initial_size);
+            let (s0, s1) = if train_config.mmap_arenas {
+                let dir = std::path::Path::new(".");
+                std::fs::create_dir_all(dir).ok();
+                eprintln!("[mmap] Using mmap-backed arenas in {:?}", dir);
+                (
+                    CompactCfrState::new_mmap(train_config.initial_size, dir, 0),
+                    CompactCfrState::new_mmap(train_config.initial_size, dir, 1),
+                )
+            } else {
+                (
+                    CompactCfrState::new(train_config.initial_size),
+                    CompactCfrState::new(train_config.initial_size),
+                )
+            };
             ([s0, s1], 0)
         }
     };
@@ -463,6 +475,7 @@ mod tests {
             bucket_method: BucketMethod::Equity,
             regret_scale_every: 0,
             freeze_after: 0,
+            mmap_arenas: false,
         };
         let assignments = default_assignments();
 
@@ -488,6 +501,7 @@ mod tests {
             bucket_method: BucketMethod::Equity,
             regret_scale_every: 0,
             freeze_after: 0,
+            mmap_arenas: false,
         };
         let assignments = default_assignments();
 
@@ -510,6 +524,7 @@ mod tests {
             bucket_method: BucketMethod::Equity,
             regret_scale_every: 0,
             freeze_after: 0,
+            mmap_arenas: false,
         };
         let assignments = default_assignments();
 
@@ -532,6 +547,7 @@ mod tests {
             bucket_method: BucketMethod::Equity,
             regret_scale_every: 0,
             freeze_after: 0,
+            mmap_arenas: false,
         };
         let assignments = default_assignments();
 
@@ -561,6 +577,7 @@ mod tests {
             bucket_method: BucketMethod::Equity,
             regret_scale_every: 0,
             freeze_after: 0,
+            mmap_arenas: false,
         };
         let assignments = default_assignments();
 
@@ -611,6 +628,7 @@ mod tests {
             bucket_method: BucketMethod::Equity,
             regret_scale_every: 0,
             freeze_after: 0,
+            mmap_arenas: false,
         };
         let assignments = default_assignments();
 
