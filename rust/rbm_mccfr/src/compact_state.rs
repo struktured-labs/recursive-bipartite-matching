@@ -47,12 +47,16 @@ pub struct CompactEntry {
 /// When present, `find_or_add` checks the MPHF first (~2.1 bits/key, 8ns lookup)
 /// before falling back to the FxHashMap for overflow entries. The FxHashMap is
 /// cleared of frozen keys, freeing ~32GB at 1B entries.
+///
+/// The flat arrays (keys, n_actions, epochs, offsets) can be mmap-backed,
+/// allowing the OS to page cold index entries to disk. Only the MPHF structure
+/// itself (~0.3 bytes/key) must stay in RAM.
 pub struct FrozenIndex {
     mphf: fmph::GOFunction,
-    keys: Vec<u64>,
-    n_actions: Vec<u8>,
-    epochs: Vec<u16>,
-    offsets: Vec<u32>,
+    keys: Arena<u64>,
+    n_actions: Arena<u8>,
+    epochs: Arena<u16>,
+    offsets: Arena<u32>,
 }
 
 /// Arena backend: in-memory Vec or disk-backed mmap.
@@ -195,6 +199,9 @@ pub struct CompactCfrState {
     pub strategy_arena: Arena<f32>,
     /// Optional frozen MPHF index. When set, find_or_add checks MPHF first.
     pub(crate) frozen: Option<FrozenIndex>,
+    /// Player ID for mmap file naming.
+    pub(crate) player_id: u8,
+    pub(crate) use_mmap: bool,
 }
 
 impl CompactCfrState {
@@ -206,11 +213,12 @@ impl CompactCfrState {
             regret_arena: Arena::Mem(Vec::with_capacity(regret_capacity)),
             strategy_arena: Arena::Mem(Vec::with_capacity(strategy_capacity)),
             frozen: None,
+            player_id: 0,
+            use_mmap: false,
         }
     }
 
     /// Create a new state with mmap-backed arenas for low-memory training.
-    /// `dir` is the directory where arena files will be stored.
     pub fn new_mmap(capacity: usize, dir: &std::path::Path, player: u8) -> Self {
         let regret_path = dir.join(format!("regret_p{}.bin", player));
         let strategy_path = dir.join(format!("strategy_p{}.bin", player));
@@ -223,6 +231,8 @@ impl CompactCfrState {
             strategy_arena: Arena::Mmap(MmapArena::new(&strategy_path, strategy_cap)
                 .expect("failed to create strategy mmap")),
             frozen: None,
+            player_id: player,
+            use_mmap: true,
         }
     }
 
@@ -268,21 +278,19 @@ impl CompactCfrState {
 
         // Build key vector: reuse old frozen keys vec + append overflow keys.
         // This avoids a full copy — we extend in-place.
-        let mut all_keys = match old_frozen {
-            Some(ref f) => {
-                let mut k = Vec::with_capacity(total);
-                k.extend_from_slice(&f.keys);
-                k
+        let mut all_keys: Vec<u64> = Vec::with_capacity(total);
+        if let Some(ref f) = old_frozen {
+            for key in f.keys.iter() {
+                all_keys.push(*key);
             }
-            None => Vec::with_capacity(total),
-        };
+        }
         all_keys.extend(self.index.keys());
 
         // Build MPHF from combined keys
         let mphf = fmph::GOFunction::from_slice(&all_keys);
-        drop(all_keys); // free the key collection vector
+        drop(all_keys);
 
-        // Allocate new flat arrays
+        // Allocate new flat arrays (temporary Vecs, converted to mmap later)
         let mut keys = vec![0u64; total];
         let mut n_actions_arr = vec![0u8; total];
         let mut epochs_arr = vec![0u16; total];
@@ -290,16 +298,17 @@ impl CompactCfrState {
 
         // Populate from old frozen entries, then drop old frozen to free memory
         if let Some(ref frozen) = old_frozen {
-            for (old_slot, &key) in frozen.keys.iter().enumerate() {
+            for old_slot in 0..frozen.keys.len() {
+                let key = frozen.keys.get(old_slot);
                 let new_slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
                 keys[new_slot] = key;
-                n_actions_arr[new_slot] = frozen.n_actions[old_slot];
-                epochs_arr[new_slot] = frozen.epochs[old_slot];
-                offsets_arr[new_slot] = frozen.offsets[old_slot];
+                n_actions_arr[new_slot] = frozen.n_actions.get(old_slot);
+                epochs_arr[new_slot] = frozen.epochs.get(old_slot);
+                offsets_arr[new_slot] = frozen.offsets.get(old_slot);
             }
         }
         let old_frozen_bytes = frozen_len * 15;
-        drop(old_frozen); // FREE old frozen metadata before populating from overflow
+        drop(old_frozen);
 
         // Populate from overflow HashMap
         let old_overflow_bytes = overflow_len * 48;
@@ -316,12 +325,45 @@ impl CompactCfrState {
         self.index.shrink_to(1024);
 
         let new_total_bytes = total * 15;
+
+        // Convert flat arrays to mmap-backed if in mmap mode
+        let (keys_arena, na_arena, ep_arena, off_arena) = if self.use_mmap {
+            let dir = std::path::Path::new(".");
+            let p = self.player_id;
+
+            fn vec_to_mmap<T: Copy + Default + bytemuck::Pod>(
+                v: Vec<T>, path: &std::path::Path,
+            ) -> Arena<T> {
+                let n = v.len();
+                let mut m = MmapArena::new(path, n).expect("mmap create failed");
+                m.resize(n, T::default()).expect("mmap resize failed");
+                for (i, &val) in v.iter().enumerate() {
+                    m.set(i, val);
+                }
+                Arena::Mmap(m)
+            }
+
+            (
+                vec_to_mmap(keys, &dir.join(format!("frozen_keys_p{}.bin", p))),
+                vec_to_mmap(n_actions_arr, &dir.join(format!("frozen_na_p{}.bin", p))),
+                vec_to_mmap(epochs_arr, &dir.join(format!("frozen_ep_p{}.bin", p))),
+                vec_to_mmap(offsets_arr, &dir.join(format!("frozen_off_p{}.bin", p))),
+            )
+        } else {
+            (
+                Arena::Mem(keys),
+                Arena::Mem(n_actions_arr),
+                Arena::Mem(epochs_arr),
+                Arena::Mem(offsets_arr),
+            )
+        };
+
         self.frozen = Some(FrozenIndex {
             mphf,
-            keys,
-            n_actions: n_actions_arr,
-            epochs: epochs_arr,
-            offsets: offsets_arr,
+            keys: keys_arena,
+            n_actions: na_arena,
+            epochs: ep_arena,
+            offsets: off_arena,
         });
 
         eprintln!(
@@ -389,12 +431,12 @@ impl CompactCfrState {
         // Fast path: check MPHF if frozen
         if let Some(ref frozen) = self.frozen {
             let slot = frozen.mphf.get(&key).unwrap_or(u64::MAX) as usize;
-            if slot < frozen.keys.len() && frozen.keys[slot] == key {
+            if slot < frozen.keys.len() && frozen.keys.get(slot) == key {
                 return CompactEntry {
-                    regret_offset: frozen.offsets[slot],
-                    strategy_offset: frozen.offsets[slot],
-                    n_actions: frozen.n_actions[slot],
-                    last_discount_epoch: frozen.epochs[slot],
+                    regret_offset: frozen.offsets.get(slot),
+                    strategy_offset: frozen.offsets.get(slot),
+                    n_actions: frozen.n_actions.get(slot),
+                    last_discount_epoch: frozen.epochs.get(slot),
                 };
             }
         }
@@ -430,12 +472,12 @@ impl CompactCfrState {
         // Fast path: check MPHF if frozen
         if let Some(ref mut frozen) = self.frozen {
             let slot = frozen.mphf.get(&key).unwrap_or(u64::MAX) as usize;
-            if slot < frozen.keys.len() && frozen.keys[slot] == key {
-                if frozen.epochs[slot] < current_epoch {
+            if slot < frozen.keys.len() && frozen.keys.get(slot) == key {
+                if frozen.epochs.get(slot) < current_epoch {
                     let (pos_factor, neg_factor, strat_factor) =
-                        dcfr_table.discount_factors(frozen.epochs[slot] as u32, current_epoch as u32);
-                    let n = frozen.n_actions[slot] as usize;
-                    let base = frozen.offsets[slot] as usize;
+                        dcfr_table.discount_factors(frozen.epochs.get(slot) as u32, current_epoch as u32);
+                    let n = frozen.n_actions.get(slot) as usize;
+                    let base = frozen.offsets.get(slot) as usize;
                     for i in 0..n {
                         let r = self.regret_arena[base + i] as f32;
                         let w = if r >= 0.0 { pos_factor } else { neg_factor };
@@ -444,13 +486,13 @@ impl CompactCfrState {
                     for i in 0..n {
                         self.strategy_arena[base + i] *= strat_factor as f32;
                     }
-                    frozen.epochs[slot] = current_epoch;
+                    frozen.epochs.set(slot, current_epoch);
                 }
                 return CompactEntry {
-                    regret_offset: frozen.offsets[slot],
-                    strategy_offset: frozen.offsets[slot],
-                    n_actions: frozen.n_actions[slot],
-                    last_discount_epoch: frozen.epochs[slot],
+                    regret_offset: frozen.offsets.get(slot),
+                    strategy_offset: frozen.offsets.get(slot),
+                    n_actions: frozen.n_actions.get(slot),
+                    last_discount_epoch: frozen.epochs.get(slot),
                 };
             }
         }

@@ -126,12 +126,16 @@ pub fn train_mccfr(
                 regret_arena: states[0].regret_arena.clone_mem(),
                 strategy_arena: states[0].strategy_arena.clone_mem(),
                 frozen: None,
+                player_id: 0,
+                use_mmap: false,
             };
             let s1 = CompactCfrState {
                 index: states[1].index.clone(),
                 regret_arena: states[1].regret_arena.clone_mem(),
                 strategy_arena: states[1].strategy_arena.clone_mem(),
                 frozen: None,
+                player_id: 1,
+                use_mmap: false,
             };
             ([s0, s1], iter)
         }
