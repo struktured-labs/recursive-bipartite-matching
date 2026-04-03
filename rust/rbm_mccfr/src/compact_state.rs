@@ -42,21 +42,45 @@ pub struct CompactEntry {
     pub last_discount_epoch: u16,
 }
 
-/// Optional MPHF-based frozen index that replaces FxHashMap lookups.
-///
-/// When present, `find_or_add` checks the MPHF first (~2.1 bits/key, 8ns lookup)
-/// before falling back to the FxHashMap for overflow entries. The FxHashMap is
-/// cleared of frozen keys, freeing ~32GB at 1B entries.
-///
-/// The flat arrays (keys, n_actions, epochs, offsets) can be mmap-backed,
-/// allowing the OS to page cold index entries to disk. Only the MPHF structure
-/// itself (~0.3 bytes/key) must stay in RAM.
-pub struct FrozenIndex {
+/// A single immutable MPHF layer with flat metadata arrays.
+pub struct FrozenLayer {
     mphf: fmph::GOFunction,
     keys: Arena<u64>,
     n_actions: Arena<u8>,
     epochs: Arena<u16>,
     offsets: Arena<u32>,
+}
+
+impl FrozenLayer {
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Look up a key in this layer. Returns slot index if found.
+    #[inline]
+    fn lookup(&self, key: u64) -> Option<usize> {
+        let slot = self.mphf.get(&key).unwrap_or(u64::MAX) as usize;
+        if slot < self.keys.len() && self.keys.get(slot) == key {
+            Some(slot)
+        } else {
+            None
+        }
+    }
+}
+
+/// Layered frozen index — like an LSM tree of MPHFs.
+///
+/// Level 0 (base): large, rebuilt rarely (millions of entries)
+/// Level 1+: smaller overflow layers, rebuilt frequently
+/// FxHashMap: hot overflow (tiny, in RAM)
+///
+/// Lookup checks layers newest-first, then HashMap.
+/// Incremental freeze: only builds MPHF for the overflow HashMap,
+/// pushes it as a new layer. Full compaction merges all layers into
+/// one (expensive, done rarely).
+pub struct FrozenIndex {
+    /// Frozen layers, ordered oldest (largest) to newest (smallest).
+    layers: Vec<FrozenLayer>,
 }
 
 /// Arena backend: in-memory Vec or disk-backed mmap.
@@ -237,7 +261,8 @@ impl CompactCfrState {
     }
 
     pub fn len(&self) -> usize {
-        let frozen_len = self.frozen.as_ref().map_or(0, |f| f.keys.len());
+        let frozen_len = self.frozen.as_ref()
+            .map_or(0, |f| f.layers.iter().map(|l| l.len()).sum());
         self.index.len() + frozen_len
     }
 
@@ -246,133 +271,103 @@ impl CompactCfrState {
         self.frozen.is_some()
     }
 
-    /// Freeze or re-freeze: build MPHF from all known keys, move them
-    /// to flat arrays, then CLEAR the FxHashMap to free memory.
+    /// Incremental freeze: build MPHF from overflow HashMap only,
+    /// push as a new layer. Existing layers are untouched.
     ///
-    /// On first call: freezes all HashMap entries into MPHF.
-    /// On subsequent calls: absorbs overflow HashMap into a new, larger MPHF.
-    /// Arenas are NOT moved — offsets remain valid.
+    /// Like an LSM tree: each freeze creates a small new layer.
+    /// Lookup checks layers newest-first. O(layers) per lookup,
+    /// but layers are small and few (typically 10-30).
     ///
-    /// Memory-optimized: extracts old frozen data before allocating new arrays,
-    /// minimizing peak memory during the transition.
+    /// This avoids the 15-minute full rebuild at 3B+ entries.
     pub fn freeze(&mut self) {
         let overflow_len = self.index.len();
-        let frozen_len = self.frozen.as_ref().map_or(0, |f| f.keys.len());
-        let total = frozen_len + overflow_len;
-
-        if overflow_len == 0 && self.frozen.is_some() {
+        if overflow_len == 0 {
             return;
         }
 
-        let is_refreeze = self.frozen.is_some();
+        let n_layers = self.frozen.as_ref().map_or(0, |f| f.layers.len());
+        let total_frozen: usize = self.frozen.as_ref()
+            .map_or(0, |f| f.layers.iter().map(|l| l.len()).sum());
+
         eprintln!(
-            "[{}] Building MPHF for {} entries ({} frozen + {} overflow)...",
-            if is_refreeze { "re-freeze" } else { "freeze" },
-            total, frozen_len, overflow_len
+            "[freeze] Building MPHF for {} overflow entries ({} existing layers, {} frozen total)...",
+            overflow_len, n_layers, total_frozen
         );
         let start = std::time::Instant::now();
 
-        // Extract old frozen data (take ownership to free memory after use).
-        // For re-freeze: reuse the old keys Vec, extend with overflow keys.
-        let old_frozen = self.frozen.take();
-
-        // Build key vector: reuse old frozen keys vec + append overflow keys.
-        // This avoids a full copy — we extend in-place.
-        let mut all_keys: Vec<u64> = Vec::with_capacity(total);
-        if let Some(ref f) = old_frozen {
-            for key in f.keys.iter() {
-                all_keys.push(*key);
-            }
-        }
-        all_keys.extend(self.index.keys());
-
-        // Build MPHF from combined keys
+        // Build MPHF from overflow keys only
+        let all_keys: Vec<u64> = self.index.keys().copied().collect();
         let mphf = fmph::GOFunction::from_slice(&all_keys);
-        drop(all_keys);
 
-        // Allocate new flat arrays (temporary Vecs, converted to mmap later)
-        let mut keys = vec![0u64; total];
-        let mut n_actions_arr = vec![0u8; total];
-        let mut epochs_arr = vec![0u16; total];
-        let mut offsets_arr = vec![0u32; total];
+        // Build flat arrays for this layer
+        let n = overflow_len;
+        let mut keys = vec![0u64; n];
+        let mut n_actions_arr = vec![0u8; n];
+        let mut epochs_arr = vec![0u16; n];
+        let mut offsets_arr = vec![0u32; n];
 
-        // Populate from old frozen entries, then drop old frozen to free memory
-        if let Some(ref frozen) = old_frozen {
-            for old_slot in 0..frozen.keys.len() {
-                let key = frozen.keys.get(old_slot);
-                let new_slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
-                keys[new_slot] = key;
-                n_actions_arr[new_slot] = frozen.n_actions.get(old_slot);
-                epochs_arr[new_slot] = frozen.epochs.get(old_slot);
-                offsets_arr[new_slot] = frozen.offsets.get(old_slot);
-            }
-        }
-        let old_frozen_bytes = frozen_len * 15;
-        drop(old_frozen);
-
-        // Populate from overflow HashMap
-        let old_overflow_bytes = overflow_len * 48;
         for (&key, &entry) in &self.index {
-            let new_slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
-            keys[new_slot] = key;
-            n_actions_arr[new_slot] = entry.n_actions;
-            epochs_arr[new_slot] = entry.last_discount_epoch;
-            offsets_arr[new_slot] = entry.regret_offset;
+            let slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
+            keys[slot] = key;
+            n_actions_arr[slot] = entry.n_actions;
+            epochs_arr[slot] = entry.last_discount_epoch;
+            offsets_arr[slot] = entry.regret_offset;
         }
 
-        // Clear overflow HashMap
+        let old_overflow_bytes = overflow_len * 48;
         self.index.clear();
         self.index.shrink_to(1024);
 
-        let new_total_bytes = total * 15;
+        let new_layer_bytes = n * 15;
 
-        // Convert flat arrays to mmap-backed if in mmap mode
-        let (keys_arena, na_arena, ep_arena, off_arena) = if self.use_mmap {
+        // Convert to mmap if enabled
+        fn vec_to_mmap<T: Copy + Default + bytemuck::Pod>(
+            v: Vec<T>, path: &std::path::Path,
+        ) -> Arena<T> {
+            let n = v.len();
+            let mut m = MmapArena::new(path, n).expect("mmap create failed");
+            m.resize(n, T::default()).expect("mmap resize failed");
+            for (i, &val) in v.iter().enumerate() {
+                m.set(i, val);
+            }
+            Arena::Mmap(m)
+        }
+
+        let layer_id = n_layers;
+        let (k, na, ep, off) = if self.use_mmap {
             let dir = std::path::Path::new(".");
             let p = self.player_id;
-
-            fn vec_to_mmap<T: Copy + Default + bytemuck::Pod>(
-                v: Vec<T>, path: &std::path::Path,
-            ) -> Arena<T> {
-                let n = v.len();
-                let mut m = MmapArena::new(path, n).expect("mmap create failed");
-                m.resize(n, T::default()).expect("mmap resize failed");
-                for (i, &val) in v.iter().enumerate() {
-                    m.set(i, val);
-                }
-                Arena::Mmap(m)
-            }
-
             (
-                vec_to_mmap(keys, &dir.join(format!("frozen_keys_p{}.bin", p))),
-                vec_to_mmap(n_actions_arr, &dir.join(format!("frozen_na_p{}.bin", p))),
-                vec_to_mmap(epochs_arr, &dir.join(format!("frozen_ep_p{}.bin", p))),
-                vec_to_mmap(offsets_arr, &dir.join(format!("frozen_off_p{}.bin", p))),
+                vec_to_mmap(keys, &dir.join(format!("frozen_keys_p{}_L{}.bin", p, layer_id))),
+                vec_to_mmap(n_actions_arr, &dir.join(format!("frozen_na_p{}_L{}.bin", p, layer_id))),
+                vec_to_mmap(epochs_arr, &dir.join(format!("frozen_ep_p{}_L{}.bin", p, layer_id))),
+                vec_to_mmap(offsets_arr, &dir.join(format!("frozen_off_p{}_L{}.bin", p, layer_id))),
             )
         } else {
-            (
-                Arena::Mem(keys),
-                Arena::Mem(n_actions_arr),
-                Arena::Mem(epochs_arr),
-                Arena::Mem(offsets_arr),
-            )
+            (Arena::Mem(keys), Arena::Mem(n_actions_arr), Arena::Mem(epochs_arr), Arena::Mem(offsets_arr))
         };
 
-        self.frozen = Some(FrozenIndex {
+        let new_layer = FrozenLayer {
             mphf,
-            keys: keys_arena,
-            n_actions: na_arena,
-            epochs: ep_arena,
-            offsets: off_arena,
-        });
+            keys: k,
+            n_actions: na,
+            epochs: ep,
+            offsets: off,
+        };
+
+        // Push new layer
+        match &mut self.frozen {
+            Some(f) => f.layers.push(new_layer),
+            None => self.frozen = Some(FrozenIndex { layers: vec![new_layer] }),
+        }
 
         eprintln!(
-            "[{}] Complete in {:.1}s: {} total entries. Overflow {}MB freed, MPHF index = {}MB",
-            if is_refreeze { "re-freeze" } else { "freeze" },
+            "[freeze] Complete in {:.1}s: layer {} with {} entries. Overflow {}MB freed, layer = {}MB",
             start.elapsed().as_secs_f64(),
-            total,
+            layer_id,
+            n,
             old_overflow_bytes / 1024 / 1024,
-            new_total_bytes / 1024 / 1024,
+            new_layer_bytes / 1024 / 1024,
         );
     }
 
@@ -425,19 +420,20 @@ impl CompactCfrState {
     }
 
     /// Get or create an entry for the given key. Returns a copy of the entry.
-    /// If frozen, checks MPHF first (fast path), then falls back to HashMap (overflow).
+    /// Checks frozen layers (newest first), then HashMap overflow.
     #[inline]
     pub fn find_or_add(&mut self, key: u64, n_actions: u8) -> CompactEntry {
-        // Fast path: check MPHF if frozen
+        // Check frozen layers (newest first for temporal locality)
         if let Some(ref frozen) = self.frozen {
-            let slot = frozen.mphf.get(&key).unwrap_or(u64::MAX) as usize;
-            if slot < frozen.keys.len() && frozen.keys.get(slot) == key {
-                return CompactEntry {
-                    regret_offset: frozen.offsets.get(slot),
-                    strategy_offset: frozen.offsets.get(slot),
-                    n_actions: frozen.n_actions.get(slot),
-                    last_discount_epoch: frozen.epochs.get(slot),
-                };
+            for layer in frozen.layers.iter().rev() {
+                if let Some(slot) = layer.lookup(key) {
+                    return CompactEntry {
+                        regret_offset: layer.offsets.get(slot),
+                        strategy_offset: layer.offsets.get(slot),
+                        n_actions: layer.n_actions.get(slot),
+                        last_discount_epoch: layer.epochs.get(slot),
+                    };
+                }
             }
         }
         // HashMap path (normal or overflow)
@@ -469,31 +465,33 @@ impl CompactCfrState {
         current_epoch: u16,
         dcfr_table: &super::cfr_state::DcfrTable,
     ) -> CompactEntry {
-        // Fast path: check MPHF if frozen
+        // Check frozen layers (newest first)
         if let Some(ref mut frozen) = self.frozen {
-            let slot = frozen.mphf.get(&key).unwrap_or(u64::MAX) as usize;
-            if slot < frozen.keys.len() && frozen.keys.get(slot) == key {
-                if frozen.epochs.get(slot) < current_epoch {
-                    let (pos_factor, neg_factor, strat_factor) =
-                        dcfr_table.discount_factors(frozen.epochs.get(slot) as u32, current_epoch as u32);
-                    let n = frozen.n_actions.get(slot) as usize;
-                    let base = frozen.offsets.get(slot) as usize;
-                    for i in 0..n {
-                        let r = self.regret_arena[base + i] as f32;
-                        let w = if r >= 0.0 { pos_factor } else { neg_factor };
-                        self.regret_arena[base + i] = ((r * w as f32) as i32).clamp(-32767, 32767) as i16;
+            for layer in frozen.layers.iter_mut().rev() {
+                if let Some(slot) = layer.lookup(key) {
+                    if layer.epochs.get(slot) < current_epoch {
+                        let (pos_factor, neg_factor, strat_factor) =
+                            dcfr_table.discount_factors(layer.epochs.get(slot) as u32, current_epoch as u32);
+                        let n = layer.n_actions.get(slot) as usize;
+                        let base = layer.offsets.get(slot) as usize;
+                        for i in 0..n {
+                            let r = self.regret_arena.get(base + i) as f32;
+                            let w = if r >= 0.0 { pos_factor } else { neg_factor };
+                            self.regret_arena.set(base + i, ((r * w as f32) as i32).clamp(-32767, 32767) as i16);
+                        }
+                        for i in 0..n {
+                            let old = self.strategy_arena.get(base + i);
+                            self.strategy_arena.set(base + i, old * strat_factor as f32);
+                        }
+                        layer.epochs.set(slot, current_epoch);
                     }
-                    for i in 0..n {
-                        self.strategy_arena[base + i] *= strat_factor as f32;
-                    }
-                    frozen.epochs.set(slot, current_epoch);
+                    return CompactEntry {
+                        regret_offset: layer.offsets.get(slot),
+                        strategy_offset: layer.offsets.get(slot),
+                        n_actions: layer.n_actions.get(slot),
+                        last_discount_epoch: layer.epochs.get(slot),
+                    };
                 }
-                return CompactEntry {
-                    regret_offset: frozen.offsets.get(slot),
-                    strategy_offset: frozen.offsets.get(slot),
-                    n_actions: frozen.n_actions.get(slot),
-                    last_discount_epoch: frozen.epochs.get(slot),
-                };
             }
         }
 
