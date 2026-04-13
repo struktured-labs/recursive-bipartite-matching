@@ -670,22 +670,44 @@ pub fn apply_dcfr_discount(
 }
 
 /// Average strategy: normalize strategy sums.
+/// Iterates BOTH frozen layers AND overflow HashMap to capture all entries.
 pub fn average_strategy(state: &CompactCfrState) -> FxHashMap<u64, Vec<f32>> {
     let mut result = FxHashMap::with_capacity_and_hasher(state.len(), Default::default());
-    for (&key, entry) in &state.index {
-        let n = entry.n_actions as usize;
-        let base = entry.strategy_offset as usize;
+
+    // Helper to normalize one entry's strategy sums
+    let mut add_entry = |key: u64, n_actions: u8, strategy_offset: u32| {
+        let n = n_actions as usize;
+        let base = strategy_offset as usize;
         let mut total: f32 = 0.0;
         for i in 0..n {
-            total += state.strategy_arena[base + i];
+            total += state.strategy_arena.get(base + i);
         }
         let avg = if total > 0.0 {
-            (0..n).map(|i| state.strategy_arena[base + i] / total).collect()
+            (0..n).map(|i| state.strategy_arena.get(base + i) / total).collect()
         } else {
             vec![1.0 / n as f32; n]
         };
         result.insert(key, avg);
+    };
+
+    // Frozen layers first
+    if let Some(ref frozen) = state.frozen {
+        for layer in &frozen.layers {
+            for slot in 0..layer.len() {
+                add_entry(
+                    layer.keys.get(slot),
+                    layer.n_actions.get(slot),
+                    layer.offsets.get(slot),
+                );
+            }
+        }
     }
+
+    // Overflow HashMap
+    for (&key, entry) in &state.index {
+        add_entry(key, entry.n_actions, entry.strategy_offset);
+    }
+
     result
 }
 

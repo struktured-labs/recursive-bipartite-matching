@@ -20,10 +20,9 @@ use crate::tree::Tree;
 use crate::buckets;
 
 /// Default MC sampling parameters for showdown distribution trees.
-/// Matches OCaml: 2 board completions × 5 opponent hands = 10 leaves.
-/// With deterministic seeds (0 intra-hand noise) and normalized distances,
-/// these small trees are sufficient for epsilon=0.5 clustering while keeping
-/// the hot loop fast (~16ns per showdown × 10 = 160ns per tree).
+/// 2 board completions × 5 opponent hands = 10 leaves.
+/// Fast bucketing (~5K iter/s) — distance range 0-20, integer-quantized.
+/// For fine-grained RBM (e.g., on cloud), bump to 5×10=50 leaves and re-tune epsilon.
 const DEFAULT_MAX_BOARD_SAMPLES: usize = 2;
 const DEFAULT_MAX_OPPONENTS: usize = 5;
 
