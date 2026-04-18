@@ -361,14 +361,99 @@ impl CompactCfrState {
             None => self.frozen = Some(FrozenIndex { layers: vec![new_layer] }),
         }
 
+        let total_layers = self.frozen.as_ref().map_or(0, |f| f.layers.len());
         eprintln!(
-            "[freeze] Complete in {:.1}s: layer {} with {} entries. Overflow {}MB freed, layer = {}MB",
+            "[freeze] Complete in {:.1}s: layer {} with {} entries ({} layers total). Overflow {}MB freed, layer = {}MB",
             start.elapsed().as_secs_f64(),
             layer_id,
             n,
+            total_layers,
             old_overflow_bytes / 1024 / 1024,
             new_layer_bytes / 1024 / 1024,
         );
+
+        // Compact layers if too many (prevents O(layers) lookup slowdown).
+        // Merges all layers into one by rebuilding MPHF from combined keys.
+        const MAX_LAYERS: usize = 20;
+        if total_layers > MAX_LAYERS {
+            self.compact_layers();
+        }
+    }
+
+    /// Merge all frozen layers into a single layer.
+    /// Rebuilds MPHF from combined keys. Arena offsets stay valid.
+    fn compact_layers(&mut self) {
+        let frozen = match self.frozen.take() {
+            Some(f) => f,
+            None => return,
+        };
+
+        let total: usize = frozen.layers.iter().map(|l| l.len()).sum();
+        eprintln!("[compact] Merging {} layers ({} entries) into 1...", frozen.layers.len(), total);
+        let start = std::time::Instant::now();
+
+        // Collect all keys
+        let mut all_keys: Vec<u64> = Vec::with_capacity(total);
+        for layer in &frozen.layers {
+            for i in 0..layer.len() {
+                all_keys.push(layer.keys.get(i));
+            }
+        }
+
+        let mphf = fmph::GOFunction::from_slice(&all_keys);
+
+        // Build merged flat arrays
+        let mut keys = vec![0u64; total];
+        let mut n_actions_arr = vec![0u8; total];
+        let mut epochs_arr = vec![0u16; total];
+        let mut offsets_arr = vec![0u32; total];
+
+        for layer in &frozen.layers {
+            for i in 0..layer.len() {
+                let key = layer.keys.get(i);
+                let slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
+                keys[slot] = key;
+                n_actions_arr[slot] = layer.n_actions.get(i);
+                epochs_arr[slot] = layer.epochs.get(i);
+                offsets_arr[slot] = layer.offsets.get(i);
+            }
+        }
+
+        drop(frozen); // Free old layers
+
+        // Convert to mmap if needed
+        let layer_id = 0;
+        let (k, na, ep, off) = if self.use_mmap {
+            let dir = std::path::Path::new(".");
+            let p = self.player_id;
+
+            fn vec_to_mmap<T: Copy + Default + bytemuck::Pod>(
+                v: Vec<T>, path: &std::path::Path,
+            ) -> Arena<T> {
+                let n = v.len();
+                let mut m = crate::mmap_arena::MmapArena::new(path, n).expect("mmap create failed");
+                m.resize(n, T::default()).expect("mmap resize failed");
+                for (i, &val) in v.iter().enumerate() {
+                    m.set(i, val);
+                }
+                Arena::Mmap(m)
+            }
+
+            (
+                vec_to_mmap(keys, &dir.join(format!("frozen_keys_p{}_L{}.bin", p, layer_id))),
+                vec_to_mmap(n_actions_arr, &dir.join(format!("frozen_na_p{}_L{}.bin", p, layer_id))),
+                vec_to_mmap(epochs_arr, &dir.join(format!("frozen_ep_p{}_L{}.bin", p, layer_id))),
+                vec_to_mmap(offsets_arr, &dir.join(format!("frozen_off_p{}_L{}.bin", p, layer_id))),
+            )
+        } else {
+            (Arena::Mem(keys), Arena::Mem(n_actions_arr), Arena::Mem(epochs_arr), Arena::Mem(offsets_arr))
+        };
+
+        self.frozen = Some(FrozenIndex {
+            layers: vec![FrozenLayer { mphf, keys: k, n_actions: na, epochs: ep, offsets: off }],
+        });
+
+        eprintln!("[compact] Complete in {:.1}s: {} entries in 1 layer", start.elapsed().as_secs_f64(), total);
     }
 
     /// Get the regret value for action `i` at the given entry.

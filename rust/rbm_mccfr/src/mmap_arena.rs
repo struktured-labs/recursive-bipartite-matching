@@ -53,6 +53,17 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
+        // Hint to OS: random access pattern — don't do readahead.
+        // Reduces wasted I/O when page faults are scattered.
+        #[cfg(unix)]
+        unsafe {
+            libc::madvise(
+                mmap.as_ptr() as *mut libc::c_void,
+                byte_cap,
+                libc::MADV_RANDOM,
+            );
+        }
+
         Ok(Self {
             path,
             file,
