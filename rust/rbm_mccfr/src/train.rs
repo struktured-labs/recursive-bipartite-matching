@@ -144,7 +144,9 @@ pub fn train_mccfr(
         None => {
             let (s0, s1) = if train_config.mmap_arenas {
                 let dir = std::path::Path::new(".");
-                std::fs::create_dir_all(dir).ok();
+                std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+                    panic!("mmap arena dir {:?} create failed: {}", dir, e)
+                });
                 eprintln!("[mmap] Using mmap-backed arenas in {:?}", dir);
                 (
                     CompactCfrState::new_mmap(train_config.initial_size, dir, 0),
@@ -295,6 +297,22 @@ pub fn train_mccfr_parallel(
     num_threads: usize,
     mmap_dir: Option<&std::path::Path>,
 ) -> ([CompactCfrState; 2], [PostflopState; 2]) {
+    // Per-thread RBM PostflopStates can't be merged today (cluster IDs are
+    // thread-local). Returning empty PostflopState would silently downgrade
+    // eval to cluster 0 for every postflop hand — same class as the
+    // equity-vs-RBM bucketing bug. Refuse the configuration until cluster
+    // merge is implemented; user can drop to --threads 1 for RBM runs.
+    if num_threads > 1 {
+        if let BucketMethod::Rbm { .. } = train_config.bucket_method {
+            panic!(
+                "RBM bucketing with --threads {} is not supported: per-thread \
+                 PostflopStates do not merge. Use --threads 1 for RBM runs, \
+                 or BucketMethod::Equity for parallel runs.",
+                num_threads
+            );
+        }
+    }
+
     let mmap_dir_owned: std::path::PathBuf = mmap_dir
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -306,8 +324,16 @@ pub fn train_mccfr_parallel(
     let iters_per_thread = train_config.iterations / num_threads as u64;
     let remainder = train_config.iterations % num_threads as u64;
 
-    // Collect results from all threads
-    let thread_results: Vec<[CompactCfrState; 2]> = pool.scope(|s| {
+    // Collect results from all threads.
+    //
+    // Failure handling: each spawned closure runs inside catch_unwind and sends
+    // Result<states, panic_reason> over an mpsc channel. The receiver applies
+    // a watchdog timeout so a silently-panicked worker (e.g. SIGBUS from a
+    // full mmap region, NaN-sort panic in RBM distance) cannot leave the
+    // rendezvous wedged forever — that bug ate a 13h post-training merge on
+    // 2026-05-03.
+    type ThreadResult = Result<[CompactCfrState; 2], String>;
+    let thread_results: Vec<ThreadResult> = pool.scope(|s| {
         let mut handles = Vec::with_capacity(num_threads);
 
         for thread_id in 0..num_threads {
@@ -335,9 +361,15 @@ pub fn train_mccfr_parallel(
             let tid = thread_id;
             let thread_mmap_dir = mmap_dir_owned.clone();
 
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = std::sync::mpsc::channel::<ThreadResult>();
 
             s.spawn(move |_| {
+                // catch_unwind around the thread body so a panic in one worker
+                // doesn't leave the receiver hanging. AssertUnwindSafe is
+                // sound here because we never observe partial state — the
+                // closure either runs to completion and sends Ok, or unwinds
+                // and we send Err with the panic message.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut rng = Xoshiro256PlusPlus::seed_from_u64(
                     (tid as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ 0xBEEF_CAFE,
                 );
@@ -345,7 +377,9 @@ pub fn train_mccfr_parallel(
                 let per_thread_cap = thread_train_config.initial_size / num_threads.max(1);
                 let mut cfr_states = if thread_train_config.mmap_arenas {
                     let dir = thread_mmap_dir.join(format!("thread_{}", tid));
-                    std::fs::create_dir_all(&dir).ok();
+                    std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
+                        panic!("[thread {}] mmap dir {:?} create failed: {}", tid, dir, e)
+                    });
                     [
                         CompactCfrState::new_mmap(per_thread_cap, &dir, 0),
                         CompactCfrState::new_mmap(per_thread_cap, &dir, 1),
@@ -426,15 +460,25 @@ pub fn train_mccfr_parallel(
                         );
                     }
 
-                    // Per-thread checkpoint. File path includes thread_id so
-                    // threads don't clobber each other. Recovery: load every
-                    // checkpoint_t*_<iter>.bin and merge.
+                    // Per-thread checkpoint. In mmap mode, write into the
+                    // thread's mmap subdir so the checkpoint and its sidecar
+                    // mmap files share a parent — the play-time loader uses
+                    // checkpoint.parent() to find sidecars, and pre-fix this
+                    // mismatch caused parallel checkpoints to load with empty
+                    // frozen layers (uniform-random play). In non-mmap mode,
+                    // write under mmap_dir (which defaults to ".") so the
+                    // file lands in a stable, test-controllable directory.
                     if thread_train_config.checkpoint_every > 0
                         && (iter + 1) % thread_train_config.checkpoint_every == 0
                     {
-                        let ckpt_path = format!("checkpoint_t{}_{}.bin", tid, iter + 1);
+                        let ckpt_dir: std::path::PathBuf = if thread_train_config.mmap_arenas {
+                            thread_mmap_dir.join(format!("thread_{}", tid))
+                        } else {
+                            thread_mmap_dir.clone()
+                        };
+                        let ckpt_path = ckpt_dir.join(format!("checkpoint_t{}_{}.bin", tid, iter + 1));
                         if let Err(e) = checkpoint::save_compact_raw_states(
-                            Path::new(&ckpt_path),
+                            &ckpt_path,
                             &cfr_states,
                             iter + 1,
                         ) {
@@ -443,30 +487,90 @@ pub fn train_mccfr_parallel(
                     }
                 }
 
-                tx.send(cfr_states).unwrap();
+                cfr_states
+                })); // end catch_unwind
+
+                let to_send: ThreadResult = match result {
+                    Ok(states) => Ok(states),
+                    Err(panic_payload) => {
+                        let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            (*s).to_string()
+                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "<non-string panic payload>".to_string()
+                        };
+                        eprintln!("[thread {}] PANIC during training: {}", tid, msg);
+                        Err(msg)
+                    }
+                };
+                // If the receiver has been dropped (caller bailed early),
+                // log + drop. Never unwrap a closed-channel send: the panic
+                // would propagate inside catch_unwind's caller and abort the
+                // whole rayon scope.
+                if let Err(e) = tx.send(to_send) {
+                    eprintln!("[thread {}] result channel closed before send: {}", tid, e);
+                }
             });
 
             handles.push(rx);
         }
 
-        handles.into_iter().map(|rx| rx.recv().unwrap()).collect()
+        // Watchdog: after the iter loop should have finished, recv with a
+        // timeout so a silently-dead worker doesn't park us forever. We size
+        // the timeout generously — these threads can be doing 24h of work,
+        // and freeze() at 1B keys can take 5+ minutes; 6h covers freeze +
+        // final flush comfortably and still trips before "infinite hang."
+        const RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+        handles
+            .into_iter()
+            .enumerate()
+            .map(|(tid, rx)| match rx.recv_timeout(RECV_TIMEOUT) {
+                Ok(r) => r,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    eprintln!("[thread {}] WATCHDOG: no result after {:?} — treating as dead",
+                        tid, RECV_TIMEOUT);
+                    Err(format!("watchdog timeout after {:?}", RECV_TIMEOUT))
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    eprintln!("[thread {}] sender disconnected before send (likely panic in rayon scope)", tid);
+                    Err("sender disconnected".to_string())
+                }
+            })
+            .collect()
     });
 
-    // Merge all thread results
+    // Merge all thread results. Skip dead threads (they reported via stderr).
     let mut merged = [
         CompactCfrState::new(train_config.initial_size),
         CompactCfrState::new(train_config.initial_size),
     ];
 
-    for thread_states in thread_results {
-        for player in 0..2 {
-            merge_cfr_state(&mut merged[player], &thread_states[player]);
+    let mut alive = 0usize;
+    let mut dead = 0usize;
+    for r in thread_results {
+        match r {
+            Ok(thread_states) => {
+                for player in 0..2 {
+                    merge_cfr_state(&mut merged[player], &thread_states[player]);
+                }
+                alive += 1;
+            }
+            Err(_) => dead += 1,
         }
     }
 
+    if dead > 0 {
+        eprintln!(
+            "[parallel] WARNING: {}/{} threads died; merging {} survivors only",
+            dead, num_threads, alive
+        );
+    }
+
     eprintln!(
-        "Parallel training complete ({} threads): P0={} P1={} info sets",
+        "Parallel training complete ({} threads, {} alive): P0={} P1={} info sets",
         num_threads,
+        alive,
         merged[0].len(),
         merged[1].len(),
     );

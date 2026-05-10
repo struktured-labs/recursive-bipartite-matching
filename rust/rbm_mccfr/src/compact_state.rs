@@ -274,18 +274,69 @@ impl CompactCfrState {
         let regret_arena = Arena::Mmap(MmapArena::<f32>::open_existing(&regret_path)?);
         let strategy_arena = Arena::Mmap(MmapArena::<f32>::open_existing(&strategy_path)?);
 
+        // Walk frozen layers L0, L1, ... contiguously. Pre-fix this loop
+        // silently `break`d on the first missing keys file, which masked two
+        // distinct hazards: (a) a partially-written training run where L0
+        // was missing but L1+ existed (gap → silently truncated index → 99%
+        // uniform-random play), and (b) any one of the four sidecar files
+        // (keys/na/ep/off) being truncated mid-write while the others were
+        // intact (length mismatch → garbage reads via MPHF slot lookup).
+        // We now require all four sidecars per layer to exist together with
+        // matching lengths, and we error out on a layer-id gap rather than
+        // silently stopping enumeration short.
         let mut layers: Vec<FrozenLayer> = Vec::new();
         for layer_id in 0usize.. {
             let keys_path = dir.join(format!("frozen_keys_p{}_L{}.bin", player, layer_id));
-            if !keys_path.exists() {
-                break;
-            }
             let na_path = dir.join(format!("frozen_na_p{}_L{}.bin", player, layer_id));
             let ep_path = dir.join(format!("frozen_ep_p{}_L{}.bin", player, layer_id));
             let off_path = dir.join(format!("frozen_off_p{}_L{}.bin", player, layer_id));
 
+            let any_present = keys_path.exists() || na_path.exists()
+                || ep_path.exists() || off_path.exists();
+            let all_present = keys_path.exists() && na_path.exists()
+                && ep_path.exists() && off_path.exists();
+
+            if !any_present {
+                // End of the contiguous layer chain — normal termination.
+                break;
+            }
+            if !all_present {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "p{} layer {}: partial sidecar set in {:?} \
+                         (keys={} na={} ep={} off={}) — refusing to load \
+                         a torn frozen layer. Investigate before resuming.",
+                        player, layer_id, dir,
+                        keys_path.exists(), na_path.exists(),
+                        ep_path.exists(), off_path.exists(),
+                    ),
+                ));
+            }
+
             let keys_mmap = MmapArena::<u64>::open_existing(&keys_path)?;
+            let na_mmap = MmapArena::<u8>::open_existing(&na_path)?;
+            let ep_mmap = MmapArena::<u16>::open_existing(&ep_path)?;
+            let off_mmap = MmapArena::<u64>::open_existing(&off_path)?;
+
             let n = keys_mmap.len();
+            // All four sidecars must have identical length. Pre-fix, a
+            // truncated na/ep/off would silently misalign with keys and
+            // every MPHF slot lookup past the truncation point would read
+            // zero bytes — i.e. n_actions=0 frozen entries that the
+            // traversal layer would later interpret as "this info set has
+            // no actions" and produce nonsense regret accumulations.
+            if na_mmap.len() != n || ep_mmap.len() != n || off_mmap.len() != n {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "p{} layer {}: sidecar length mismatch in {:?} \
+                         (keys={} na={} ep={} off={})",
+                        player, layer_id, dir,
+                        n, na_mmap.len(), ep_mmap.len(), off_mmap.len(),
+                    ),
+                ));
+            }
 
             // MPHF is not persisted — rebuild from keys. For small layers (15-30M keys)
             // this is ~2-3 seconds; for compacted layers (1B+ keys) it can be minutes.
@@ -299,10 +350,6 @@ impl CompactCfrState {
             let mphf = fmph::GOFunction::from_slice(&keys_vec);
             eprintln!("[load_from_dir] p{} layer {} MPHF built in {:.1}s",
                 player, layer_id, start.elapsed().as_secs_f64());
-
-            let na_mmap = MmapArena::<u8>::open_existing(&na_path)?;
-            let ep_mmap = MmapArena::<u16>::open_existing(&ep_path)?;
-            let off_mmap = MmapArena::<u64>::open_existing(&off_path)?;
 
             layers.push(FrozenLayer {
                 mphf,
@@ -891,6 +938,14 @@ pub fn merge_compact_state(dst: &mut CompactCfrState, src: &CompactCfrState) {
     // Helper: merge one entry's regret + strategy slices from src into dst.
     // For frozen entries, regret_offset == strategy_offset (parallel layouts);
     // for overflow HashMap entries, the two offsets are independent.
+    //
+    // Safety assertion: `find_or_add` returns whatever entry already exists
+    // for `key`, even when its `n_actions` differs from the one we just
+    // passed. If a stale entry shaped for k actions overlaps with an
+    // incoming entry shaped for k' > k actions, the unchecked add below
+    // would write past `dst_entry`'s slot into the next entry's region —
+    // corrupting an unrelated info set. Catch the mismatch loudly here
+    // rather than silently scribbling.
     fn merge_one(
         dst: &mut CompactCfrState,
         src: &CompactCfrState,
@@ -901,6 +956,12 @@ pub fn merge_compact_state(dst: &mut CompactCfrState, src: &CompactCfrState) {
     ) {
         let n = n_actions as usize;
         let dst_entry = dst.find_or_add(key, n_actions);
+        assert_eq!(
+            dst_entry.n_actions, n_actions,
+            "merge_compact_state: n_actions mismatch for key {} (dst={}, src={}); \
+             would corrupt adjacent entries",
+            key, dst_entry.n_actions, n_actions,
+        );
         let dst_r_base = dst_entry.regret_offset as usize;
         let dst_s_base = dst_entry.strategy_offset as usize;
         let src_r = src_r_base as usize;
@@ -1039,16 +1100,18 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_i16_clamp() {
+    fn test_compact_regret_no_clamp() {
+        // Regret arena was widened from i16 to f32 to eliminate the
+        // halve-cycle precision loss that regressed Rust vs OCaml. Large
+        // values must round-trip intact — no clamping at ±32767.
         let mut state = CompactCfrState::new(100);
         let entry = state.find_or_add(42, 2);
 
-        // Try to set a regret value exceeding i16 range
         state.set_regret(&entry, 0, 50000.0);
-        assert_eq!(state.regret(&entry, 0), 32767.0);
+        assert_eq!(state.regret(&entry, 0), 50000.0);
 
         state.set_regret(&entry, 0, -50000.0);
-        assert_eq!(state.regret(&entry, 0), -32767.0);
+        assert_eq!(state.regret(&entry, 0), -50000.0);
     }
 
     #[test]
@@ -1177,9 +1240,12 @@ mod tests {
 
     #[test]
     fn test_compact_size_savings() {
-        // Verify CompactEntry is small
-        assert!(std::mem::size_of::<CompactEntry>() <= 16,
-            "CompactEntry should be <= 16 bytes, got {}",
+        // CompactEntry grew from 16 to 24 bytes when offsets widened from u32
+        // to u64 — the u32 ceiling was hit at ~26% of P1 strategies at iter
+        // 40M (silent offset wrap, see CompactEntry comment). 24 bytes is
+        // still well below the per-Vec heap-overhead of the pre-arena layout.
+        assert!(std::mem::size_of::<CompactEntry>() <= 24,
+            "CompactEntry should be <= 24 bytes, got {}",
             std::mem::size_of::<CompactEntry>());
     }
 
@@ -1210,6 +1276,9 @@ mod tests {
 
     #[test]
     fn test_halve_regrets() {
+        // Regret storage is f32; halve is exact /2.0 with no integer
+        // truncation (the prior i16 path truncated 32767/2 to 16383 and
+        // 8191; both now round to mathematical halves).
         let mut state = CompactCfrState::new(100);
         let e1 = state.find_or_add(1, 3);
         let e2 = state.find_or_add(2, 2);
@@ -1217,20 +1286,19 @@ mod tests {
         state.set_regret(&e1, 0, 30000.0);
         state.set_regret(&e1, 1, -20000.0);
         state.set_regret(&e1, 2, 100.0);
-        state.set_regret(&e2, 0, 32767.0); // max i16
-        state.set_regret(&e2, 1, -32767.0); // min i16
+        state.set_regret(&e2, 0, 32767.0);
+        state.set_regret(&e2, 1, -32767.0);
 
         state.halve_regrets();
 
         assert_eq!(state.regret(&e1, 0), 15000.0);
         assert_eq!(state.regret(&e1, 1), -10000.0);
         assert_eq!(state.regret(&e1, 2), 50.0);
-        assert_eq!(state.regret(&e2, 0), 16383.0); // 32767 / 2 truncated
-        assert_eq!(state.regret(&e2, 1), -16383.0);
+        assert_eq!(state.regret(&e2, 0), 16383.5);
+        assert_eq!(state.regret(&e2, 1), -16383.5);
 
-        // Second halve
         state.halve_regrets();
         assert_eq!(state.regret(&e1, 0), 7500.0);
-        assert_eq!(state.regret(&e2, 0), 8191.0);
+        assert_eq!(state.regret(&e2, 0), 16383.5 / 2.0);
     }
 }

@@ -253,6 +253,18 @@ pub fn mccfr_traverse(
             // Entry was already lazily discounted above; no need to discount again.
             // find_or_add returns a Copy handle (CompactEntry).
             let entry = cfr_st.find_or_add(key, na);
+            // A cached entry's n_actions must match the current call's na.
+            // Mismatch would indicate either bucket-method change mid-resume
+            // or a key-collision bug in the info-set encoder; either way,
+            // the next `accumulate_strategy` indexes `strat[..num_actions]`
+            // while iterating `entry.n_actions` and silently writes past
+            // the entry's slot when entry.n_actions > num_actions, or skips
+            // legitimate updates when entry.n_actions < num_actions.
+            debug_assert_eq!(
+                entry.n_actions, na,
+                "traversal: n_actions mismatch for key {} (cached={}, requested={})",
+                key, entry.n_actions, na,
+            );
 
             // Accumulate strategy (with LCFR weighting)
             compact_state::accumulate_strategy(cfr_st, &entry, &strat[..num_actions], 1.0, lcfr_iter);
@@ -285,6 +297,18 @@ pub fn mccfr_traverse(
         {
             let cfr_st = &mut cfr_states[player as usize];
             let entry = cfr_st.find_or_add(key, na);
+            // A cached entry's n_actions must match the current call's na.
+            // Mismatch would indicate either bucket-method change mid-resume
+            // or a key-collision bug in the info-set encoder; either way,
+            // the next `accumulate_strategy` indexes `strat[..num_actions]`
+            // while iterating `entry.n_actions` and silently writes past
+            // the entry's slot when entry.n_actions > num_actions, or skips
+            // legitimate updates when entry.n_actions < num_actions.
+            debug_assert_eq!(
+                entry.n_actions, na,
+                "traversal: n_actions mismatch for key {} (cached={}, requested={})",
+                key, entry.n_actions, na,
+            );
             compact_state::accumulate_strategy(cfr_st, &entry, &strat[..num_actions], 1.0, lcfr_iter);
         }
 

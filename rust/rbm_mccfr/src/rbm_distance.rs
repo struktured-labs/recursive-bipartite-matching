@@ -67,18 +67,22 @@ fn try_leaf_matching(c1: &[Tree], c2: &[Tree]) -> Option<f64> {
     let mut b: Vec<f64> = Vec::with_capacity(c2.len());
     for t in c1 {
         match t {
-            Tree::Leaf { value } => a.push(*value),
+            Tree::Leaf { value } if value.is_finite() => a.push(*value),
+            // Non-finite leaves bail out so the caller falls back to general
+            // Hungarian. Sorting NaN with partial_cmp().unwrap() panics, which
+            // — under parallel rayon — silently kills the worker and hangs the
+            // mpsc receiver at end of training.
             _ => return None,
         }
     }
     for t in c2 {
         match t {
-            Tree::Leaf { value } => b.push(*value),
+            Tree::Leaf { value } if value.is_finite() => b.push(*value),
             _ => return None,
         }
     }
-    a.sort_by(|x, y| x.partial_cmp(y).unwrap());
-    b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    a.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    b.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
     let mut sum = 0.0f64;
     for (x, y) in a.iter().zip(b.iter()) {
         sum += (x - y).abs();
