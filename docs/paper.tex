@@ -57,21 +57,27 @@ used in prior game abstraction work, RBM captures the full strategic
 structure of continuation trees. We prove three results: (1)~RBM is a
 metric when the leaf distance is a metric; (2)~merging two trees at
 distance~$\varepsilon$ introduces expected-value error at most
-$\varepsilon/2$; and (3)~an online learner that clusters game states by
-RBM distance achieves cumulative regret
+$\varepsilon/2$ under chance-uniform leaf averaging (a leaf-mean
+bound, not yet a Nash exploitability bound; we discuss the bridge to
+exploitability via \citet{kroer2014extensive,kroer2018unified} in
+Section~\ref{sec:merge}); and (3)~an online learner that clusters game
+states by RBM distance achieves cumulative regret
 $O(K V_{\max} + T\varepsilon/2)$ with fixed threshold, or $O(\sqrt{T})$
 under $\varepsilon$-annealing. On Rhode Island Hold'em, RBM-based
-abstraction beats Earth Mover's Distance abstraction 7--0 across
-compression levels measured by EV error. On full 2-player Limit
-Hold'em with a standard 52-card deck---the benchmark game solved by
-\citet{bowling2015solving}---RBM beats EMD 5--0 across all
-compression levels on preflop abstraction quality, with up to 42\%
-less error, and an MCCFR bot trained on RBM abstractions defeats the
-EMD-trained bot head-to-head. On No-Limit Hold'em, RBM wins
-abstraction quality 5--0 at 20bb (up to 73\% less error) and dominates
-at fine-grained compression at 200bb deep-stack (60\% less error at
-$k{=}25$), confirming that RBM's structural advantage persists across
-game complexity scales.
+abstraction has lower EV error than Earth Mover's Distance abstraction
+across all non-trivial compression levels we evaluate. On full
+2-player Limit Hold'em with a standard 52-card deck---the benchmark
+game solved by \citet{bowling2015solving}---RBM has lower preflop EV
+error than EMD across all five compression levels we measure, with up
+to 42\% less error. In a 20{,}000-hand head-to-head match between
+MCCFR bots trained on the two abstractions, the RBM bot finishes
++0.02 bb/hand ahead, but the result is not statistically significant
+(95\% CI $\approx [-0.19, +0.23]$). On No-Limit Hold'em, RBM wins
+abstraction quality at all five compression levels at 20bb (up to 73\%
+less error). At 200bb, where pairwise RBM distance is computed on
+showdown-distribution trees rather than full game trees, RBM dominates
+fine-grained compression (60\% less error at $k{=}25$, 40\% at
+$k{=}15$) but loses at coarser levels.
 \end{abstract}
 
 % ====================================================================
@@ -140,15 +146,23 @@ $\varepsilon$-annealing (Section~\ref{sec:online}).
 Experiments on Rhode Island Hold'em~\citep{gilpin2005rhode}, full
 2-player Limit Hold'em~\citep{bowling2015solving}, and No-Limit
 Hold'em~\citep{brown2018superhuman} (Section~\ref{sec:experiments})
-validate the theory: RBM-based clustering beats EMD 7--0 on Rhode
-Island Hold'em, 5--0 on Limit Hold'em, and 5--0 on No-Limit Hold'em
-20bb across compression levels. On No-Limit, RBM achieves 73\% less
-error than EMD at $k{=}25$ on 20bb and 60\% less error at 200bb deep
-stacks, with its advantage strongest at fine-grained compression. An
-MCCFR bot trained on RBM abstractions defeats the EMD-trained bot
-head-to-head over 20{,}000 hands in Limit. The online learner achieves
-99.4\% cache hit rates with ${\sim}400$ naturally emerging postflop
-clusters.
+report consistent improvements in abstraction quality: RBM-based
+clustering produces lower EV error than EMD across all non-trivial
+compression levels we evaluate, on Rhode Island Hold'em, on Limit
+Hold'em (5--0 at $k \in \{3,5,10,15,25\}$, up to 42\% less error), and
+on No-Limit 20bb (up to 73\% less error at $k{=}25$). At 200bb, RBM
+dominates only at fine-grained compression ($k \ge 15$) and loses at
+coarser levels---an asymmetry consistent with the
+abstraction-pathology phenomenon documented by
+\citet{waugh2009abstraction} and amplified here because the 200bb
+experiment uses showdown-distribution trees as a proxy for the full
+186{,}174-node game tree (full-tree RBM at 200bb remains future work,
+Section~\ref{sec:conclusion}). MCCFR bots trained on RBM versus EMD
+abstractions in Limit Hold'em finish within statistical noise of each
+other in head-to-head play (RBM $+$0.02 bb/h, $n{=}20{,}000$, 95\% CI
+$\approx [-0.19, +0.23]$): no detectable gameplay difference, despite
+the abstraction-quality gap. The online learner achieves 99.4\% cache
+hit rates with ${\sim}400$ naturally emerging postflop clusters.
 
 % ====================================================================
 % 2. RECURSIVE BIPARTITE MATCHING DISTANCE
@@ -192,7 +206,14 @@ mismatch. The cleanest formulation is $\delta(S) = d(S, \emptyset)$,
 treating the phantom as a designated empty tree in the metric space.
 Under this choice, all conditions needed for the metric proof are
 consequences of the triangle inequality at lower depth (see
-Remark~\ref{rem:phantom}).
+Remark~\ref{rem:phantom}). To make this rigorous we extend the base
+case of Definition~\ref{def:rbm} to cover $\emptyset$ explicitly:
+$d(\mathrm{leaf}(v), \emptyset) = |v|$ and $d(T, \emptyset) =
+\sum_{c \in \mathrm{children}(T)} d(\sub(c), \emptyset)$ when $T$ is
+internal. With this completion, $\delta$ is well-defined for every
+tree, and Remark~\ref{rem:phantom} below recovers the 1-Lipschitz and
+phantom-triangle properties as instances of the lower-depth triangle
+inequality.
 
 Children are treated as \emph{unordered sets}. The matching finds the
 best structural alignment without requiring a canonical ordering---exactly
@@ -323,6 +344,24 @@ tightens to $\varepsilon / (2m) \le \varepsilon / 4$. The stated bound
 $\varepsilon/2$ is tight only at leaves or degenerate single-child
 chains.
 \end{proof}
+
+\begin{remark}[EV bound vs.\ exploitability]
+\label{rem:ev-vs-expl}
+Theorem~\ref{thm:ev-error} bounds $|\EV(T^*) - \EV(T_i)|$, where $\EV$
+is the expectation over the tree's leaves under the chance distribution
+already baked into the leaf weights---the EV that a fixed strategy
+profile delivers when one substitutes the merged tree for the original.
+This is \emph{not} the same as a bound on Nash exploitability, which
+asks how much a best-responder can win against a strategy obtained by
+solving the abstract game and lifting back to the full game. The
+canonical exploitability bounds for game-tree abstractions are due to
+\citet{kroer2014extensive,kroer2018unified}; a tight bridge from
+RBM-induced merge error to exploitability would proceed via their
+level-by-level reward-and-action distance machinery, applied to the
+specific child-matching structure RBM produces.  We treat that bridge
+as the natural follow-up; the present bound should be read as a
+necessary but not sufficient condition for low exploitability.
+\end{remark}
 
 \begin{corollary}[Weighted Merges]
 For unequal-weight merges with weights $w_1 + w_2 = 1$:
@@ -527,8 +566,16 @@ across clusters.
 \centering
 \caption{RBM vs EMD vs Scalar EV: maximum EV error at matched cluster
 counts (3-rank Rhode Island Hold'em, 25 sampled deals with varied
-community cards). Lower is better. RBM achieves \textbf{zero error}
-down to $k=3$ clusters while EMD has 30.28 error even at $k=4$.}
+community cards). Lower is better. RBM achieves zero error down to
+$k=3$ clusters while EMD has 30.28 error at every $k \ge 3$. The
+constant 30.28 reflects a degeneracy of EMD on this 3-rank toy: the
+showdown-distribution histograms collapse to a small set of equity
+values, so refining the cluster count cannot reduce error past a
+floor. We therefore treat this table as illustrative of the
+representational ceiling of scalar metrics on toy decks, not as a
+benchmark; the more informative comparisons are the 52-card
+abstraction-quality results in Sections~\ref{sec:experiments-limit}
+and~\ref{sec:experiments-nl}.}
 \label{tab:rbm-vs-emd}
 \begin{tabular}{rccccl}
 \toprule
@@ -546,16 +593,15 @@ Clusters & Compress & RBM Error & EMD Error & EV Error & Winner \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:rbm-vs-emd} shows results. \textbf{RBM wins 7--0}
-across all non-trivial compression levels (ties only at the trivial
-$k=1$). The result is striking: RBM achieves \emph{zero} EV error
-at 8.3$\times$ compression ($k=3$), while EMD
-(Gilpin \& Sandholm's metric) incurs 30.28 error even at $k=4$
-clusters---\textbf{over 30$\times$ worse}.
-The root cause: EMD groups deals by community-card showdown distribution
-(same community $=$ same win/lose/draw histogram regardless of opponent),
-merging strategically different hands. RBM groups by actual game tree
-structure, correctly separating wins, losses, and draws.
+Table~\ref{tab:rbm-vs-emd} shows that on this 3-rank toy RBM produces
+zero EV error at every compression level $k \ge 2$, while EMD's error
+sits at the 30.28 floor described above. This is mostly a statement
+about EMD's failure mode on a deck this small: with so few distinct
+showdown histograms, the metric simply cannot resolve hands that have
+identical showdown distributions but different game-tree continuations.
+RBM, operating on the full game tree, separates these by construction.
+We include the table to illustrate the failure mode---not as evidence
+about which metric is better at production scale.
 
 \subsection{CFR on Compressed Games}
 
@@ -586,15 +632,19 @@ $\varepsilon$ & Clusters & EV Error & Exploitability \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:cfr} reveals a striking pattern. RBM compression from
-10 information sets to just 3 clusters (a 3.3$\times$ reduction)
-achieves \emph{exactly zero} exploitability across all $\varepsilon$
-up to 500---the abstraction is \textbf{strategically lossless}. The
-RBM distance has correctly identified the 3 natural equivalence classes
-(different ranks relative to the board). Only when forced to merge
-all hands into a single cluster ($\varepsilon = 1000$) does
-exploitability spike to 5.66, consistent with the EV error bound
-of Theorem~\ref{thm:ev-error}.
+Table~\ref{tab:cfr} shows that on this 3-rank, 10-info-set toy, RBM
+compression to 3 clusters preserves zero exploitability across the
+$\varepsilon$ range we tested. The natural reading is that RBM has
+correctly identified the three rank-vs-board equivalence classes the
+game admits at this scale; we are reluctant to call the result
+``strategically lossless'' in any general sense, because the result
+also depends on the unique structure of the 3-rank game (with only 10
+information sets, there is little room for an abstraction to do
+damage). Only at $\varepsilon = 1000$, where the algorithm collapses
+all hands into one cluster, does exploitability rise---consistent with
+Theorem~\ref{thm:ev-error}'s leaf-mean bound but not, on its own,
+evidence of a tight exploitability bound at larger scales (cf.\
+Remark~\ref{rem:ev-vs-expl}).
 
 \subsection{Multi-Scale Results}
 
@@ -679,6 +729,7 @@ This demonstrates that game trees share substantial subtree structure
 that memoization exploits.
 
 \subsection{Full Limit Hold'em: Preflop Abstraction}
+\label{sec:experiments-limit}
 
 We scale to full 2-player Limit Hold'em with a standard 52-card
 deck~\citep{bowling2015solving}. After suit isomorphism, there are 50
@@ -739,10 +790,19 @@ EMD bot vs Always-Call & $+0.11$ \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:holdem-cfr} confirms that better abstraction quality
-translates to stronger play. The RBM bot wins the head-to-head and shows
-larger margins against both baselines ($+1.24$ vs.\ $+1.12$ bb/hand
-against random; $+0.30$ vs.\ $+0.11$ against always-call).
+The head-to-head margin in Table~\ref{tab:holdem-cfr} is $+0.02$
+bb/hand---directionally consistent with the abstraction-quality
+results in Table~\ref{tab:holdem-preflop}, but well within sampling
+noise. We do \emph{not} claim that better abstraction quality
+translated to stronger play in this experiment: at $n = 20{,}000$
+hands the 95\% CI of approximately $[-0.19, +0.23]$ comfortably covers
+zero. The same caveat applies to the differences against the random
+and always-call baselines, where both bots win by similar margins
+($+1.24$ vs.\ $+1.12$ vs.\ random; $+0.30$ vs.\ $+0.11$ vs.\
+always-call) but the differences are consistent with noise. A
+larger-$n$ rerun, or a Slumbot-style benchmark match against a fixed
+strong opponent (cf.\ \citealt{johanson2013evaluating}), would be the
+appropriate follow-up.
 
 \noindent\textsuperscript{$\dagger$}\textit{Statistical note:} The
 $+0.02$ bb/hand head-to-head margin is not statistically significant.
@@ -762,6 +822,7 @@ This demonstrates that the RBM distance discovers meaningful strategic
 groupings even in the full game.
 
 \subsection{No-Limit Hold'em: Preflop Abstraction}
+\label{sec:experiments-nl}
 
 We extend the evaluation to heads-up No-Limit Hold'em at two stack
 depths: 20bb (short-stack) and 200bb (deep-stack), the game variants
@@ -835,10 +896,22 @@ $k$ & RBM Error & EMD Error & Improvement & Winner \\
 Table~\ref{tab:nl-200bb-preflop} shows the 200bb deep-stack results.
 RBM dominates at fine-grained compression (60\% less error at
 $k{=}25$, 40\% at $k{=}15$) but loses at coarser compression
-($k{\leq}10$). The EMD advantage at coarse compression reflects a
-limitation of the experimental setup: the showdown distribution trees
-used for tractable pairwise RBM distance (${\sim}$161 nodes) do not
-fully capture the structural variation of the 186{,}174-node game tree.
+($k \le 10$). Two notes are in order. First, the EMD advantage at
+coarse compression reflects a limitation of the experimental setup:
+the showdown-distribution trees used for tractable pairwise RBM
+distance (${\sim}$161 nodes) do not fully capture the structural
+variation of the 186{,}174-node game tree. The 200bb results in this
+table should therefore be read as a lower bound on what full-tree RBM
+would achieve at this stack depth---the headline 5--0 framing we use
+elsewhere does \emph{not} apply here, and we do not claim it.
+Second, the non-monotonic pattern (RBM wins at fine $k$, loses at
+coarse $k$) is consistent with the abstraction-pathology phenomenon
+documented by \citet{waugh2009abstraction}: a more refined abstraction
+can produce a worse-playing strategy, depending on how the
+coarse-graining interacts with the underlying game's strategic
+structure. We flag this rather than wave it away, because it is the
+kind of pattern an exploitability-aware evaluation
+(\citealt{johanson2013evaluating}) is best suited to disentangle.
 
 \subsection{No-Limit Hold'em: MCCFR Head-to-Head}
 
@@ -944,9 +1017,25 @@ potential-aware EMD accounting for future card draws.
 \citet{kroer2014extensive,kroer2018unified} provide the most
 theoretically rigorous bounds on exploitability introduced by
 abstraction, proving that level-by-level distance metrics control
-solution quality. However, their distance operates level-by-level, not
-recursively through the full subtree. RBM is strictly more expressive
-but comes with the location problem as additional overhead.
+solution quality. Their bound is the natural target for any future
+exploitability-tightening of Theorem~\ref{thm:ev-error} (cf.\
+Remark~\ref{rem:ev-vs-expl}); RBM operates recursively through the
+full subtree rather than level-by-level, which is a strictly more
+expressive specification but does not on its own deliver a tighter
+exploitability bound.
+
+\paragraph{Methodology of abstraction evaluation.}
+\citet{johanson2013evaluating} establish the standard methodology for
+measuring abstraction-induced exploitability in heads-up Limit
+Hold'em, and \citet{waugh2009abstraction} document the
+\emph{abstraction pathology} phenomenon---a more refined abstraction
+can produce a worse-playing strategy. Our results in
+Section~\ref{sec:experiments-nl} include exactly this pattern at
+200bb (RBM wins at fine $k$, loses at coarse $k$), which we now
+discuss explicitly rather than wave away. A direct exploitability
+evaluation along the lines of \citet{johanson2013evaluating} is the
+right next step for this work; the present evaluation reports
+abstraction-quality EV-error and head-to-head bb/hand only.
 
 \paragraph{Online learning in games.}
 CFR~\citep{zinkevich2007regret} and its variants (CFR+, Monte Carlo CFR)
@@ -981,42 +1070,79 @@ natural compression (the EV graph) with provable EV error bounds, and
 an online learner that builds this compression incrementally through
 self-play with bounded regret.
 
-The results span three domains at multiple scales and tell a consistent
-story. On Rhode Island Hold'em, RBM beats EMD 7--0 with
-zero-exploitability at natural cluster boundaries. On Limit Hold'em
-with a 52-card deck~\citep{bowling2015solving}, RBM beats EMD 5--0
-across all compression levels (up to 42\% less error), and an MCCFR bot
-trained on RBM abstractions defeats the EMD bot head-to-head. On
-No-Limit Hold'em at 20bb, RBM wins abstraction quality 5--0 with up to
-73\% less error, though EMD prevails in head-to-head play on short
-stacks where raw equity dominates. At 200bb (186{,}174 nodes), RBM
-still dominates at fine-grained compression (60\% less error at
-$k{=}25$, 40\% at $k{=}15$), though the head-to-head comparison is
-confounded by severe MCCFR undertraining (${\sim}$1M info sets with
-only 50K iterations). The pattern across domains confirms the central
-thesis: structural tree distance is a better abstraction metric than
-scalar hand-strength distributions, with RBM's advantage most
-pronounced at fine-grained compression where structural distinctions
-matter most.
+The results span three domains at multiple scales and report a
+consistent picture on \emph{abstraction quality}, evaluated by EV
+error: lower error than EMD across the non-trivial compression levels
+of the Rhode Island Hold'em toy, lower error at all five tested
+compression levels on full Limit Hold'em (up to 42\% reduction), and
+lower error at all five levels on No-Limit Hold'em 20bb (up to 73\%
+reduction). On 200bb deep-stack No-Limit, RBM dominates only at
+fine-grained compression ($k \ge 15$) and loses at coarser
+levels---an asymmetry consistent with the abstraction-pathology
+phenomenon~\citep{waugh2009abstraction} and amplified by our use of
+showdown-distribution trees as a tractable proxy for the
+186{,}174-node game tree.
 
-Several directions for future work remain. \emph{Adequate training at
-200bb:} with ${\sim}$1M info sets, the 200bb game requires 500K+
-MCCFR iterations for meaningful head-to-head comparison; the current
-50K-iteration results are dominated by training noise rather than
-abstraction quality. \emph{Full-tree RBM:} the showdown distribution
-trees used for tractable pairwise RBM distance (${\sim}$161 nodes) lose
+\emph{Gameplay} results are more cautious. The MCCFR head-to-head
+matches we ran are not statistically distinguishable from zero (Limit
+Hold'em: $+0.02$ bb/h, $n{=}20{,}000$, 95\% CI roughly $[-0.19,
++0.23]$; NL 20bb and 200bb: small or noisy margins, the latter
+confounded by 50K-iteration undertraining of a ${\sim}$1M-info-set
+abstraction). We therefore do \emph{not} claim that the abstraction
+quality advantage we measure has been demonstrated to translate to
+stronger play; the cleaner statement is that RBM yields demonstrably
+better abstractions by the EV-error metric we use, and that whether
+this carries over to a measurable head-to-head advantage requires more
+hands and adequately-trained MCCFR than we report here. We also do
+not yet report exploitability, the gold-standard evaluation
+established by \citet{johanson2013evaluating}; closing that gap is the
+clearest follow-up.
+
+Several directions for future work remain.
+\emph{Exploitability evaluation along
+\citet{johanson2013evaluating}:} the most important missing piece is
+a direct exploitability measurement of RBM-induced strategies, which
+would (a)~test whether the abstraction-quality EV-error advantage
+predicts a tighter exploitability bound, and (b)~detect any
+abstraction-pathology behaviour~\citep{waugh2009abstraction} that the
+EV-error metric does not surface.
+\emph{Tighter EV-to-exploitability bridge:} extending
+Theorem~\ref{thm:ev-error} into a Kroer--Sandholm-style
+exploitability bound (cf.\ Remark~\ref{rem:ev-vs-expl}) is the natural
+theoretical follow-up.
+\emph{Adequate training at 200bb:} with ${\sim}$1M info sets, the
+200bb game needs 500K+ MCCFR iterations for a non-noise head-to-head
+read.
+\emph{Full-tree RBM:} the showdown distribution trees we use for
+tractable 200bb pairwise RBM distance (${\sim}$161 nodes) lose
 discriminative power compared to the full 186{,}174-node game trees;
 approximate matching via Sinkhorn
-distances~\citep{cuturi2013sinkhorn} or learned embeddings could enable
-RBM on the full trees while preserving error bounds.
+distances~\citep{cuturi2013sinkhorn} or learned embeddings could
+enable RBM on the full trees while preserving error bounds.
 \emph{Multi-player:} the implementation supports 2--10 players, and
 6-max 20bb already produces ${\sim}$13M-node game trees where
-equity-based clustering is increasingly inadequate. \emph{Beyond
-poker:} the framework applies to any extensive-form game with
-tree-structured state spaces, including Stratego, Magic: The Gathering,
-and negotiation games. \emph{Opponent modeling:} building an RBM-based
-EV graph of the opponent's play patterns could enable principled
-exploitation.
+equity-based clustering is increasingly inadequate.
+\emph{Beyond poker:} the framework applies to any extensive-form game
+with tree-structured state spaces, including Stratego, Magic: The
+Gathering, and negotiation games.
+\emph{Opponent modelling:} building an RBM-based EV graph of an
+opponent's play patterns could enable principled exploitation.
+
+\paragraph{Reproducibility.} All code, training scripts, and
+experiment configurations are available at the project repository
+(see title footnote). For each table in
+Section~\ref{sec:experiments}, the corresponding experiment binary
+under \texttt{bin/} produces the reported numbers from a fixed seed
+on a single CPU; the only stochasticity is in the deal sampler,
+which respects the per-experiment seed. We list MCCFR
+hyperparameters (sampling scheme, $\varepsilon$ for
+$\varepsilon$-greedy exploration, regret-storage type, freeze cadence)
+inline with each table where they affect the result, and the full
+configuration is available in \texttt{rust/rbm\_mccfr/src/config.rs}
+and \texttt{lib/cfr.ml}. Runs reported with confidence intervals are
+single-seed; multi-seed CIs and bootstrap intervals on
+abstraction-quality tables are queued as part of the
+exploitability-evaluation follow-up.
 
 \paragraph{Acknowledgments.} To be added.
 
@@ -1091,6 +1217,11 @@ Robert Kleinberg.
 \newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
   2005.
 
+\bibitem[Johanson et~al.(2013)]{johanson2013evaluating}
+Michael Johanson, Neil Burch, Richard Valenzano, and Michael Bowling.
+\newblock Evaluating state-space abstractions in extensive-form games.
+\newblock In \emph{Proceedings of AAMAS}, 2013.
+
 \bibitem[Kocsis and Szepesv{\'a}ri(2006)]{kocsis2006bandit}
 Levente Kocsis and Csaba Szepesv{\'a}ri.
 \newblock Bandit based {Monte-Carlo} planning.
@@ -1139,6 +1270,11 @@ David Silver, Thomas Hubert, Julian Schrittwieser, Ioannis Antonoglou, Matthew
 \newblock A general reinforcement learning algorithm that masters chess, shogi,
   and {Go} through self-play.
 \newblock \emph{Science}, 362(6419):1140--1144, 2018.
+
+\bibitem[Waugh et~al.(2009)]{waugh2009abstraction}
+Kevin Waugh, David Schnizlein, Michael Bowling, and Duane Szafron.
+\newblock Abstraction pathologies in extensive games.
+\newblock In \emph{Proceedings of AAMAS}, 2009.
 
 \bibitem[Yamada et~al.(2018)]{yamada2018emd}
 Eizo Yamada, Kaiichiro Ota, and Kazuhisa Makino.
