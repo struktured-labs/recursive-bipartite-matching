@@ -50,8 +50,8 @@ pub struct TrainConfig {
     pub lcfr: bool,
     pub n_buckets: u32,
     pub bucket_method: BucketMethod,
-    /// Halve all regrets every N iterations to prevent i16 saturation.
-    /// Acts as implicit regret discounting (DCFR-like). 0 = disabled.
+    /// Halve all regrets every N iterations. Acts as DCFR-like discounting
+    /// that biases toward more recent learning. 0 = disabled.
     pub regret_scale_every: u64,
     /// Freeze CompactCfrState → FrozenCfrState after this many iterations.
     /// Replaces FxHashMap (~48B/key) with MPHF (~2.1 bits/key) + flat arrays.
@@ -61,6 +61,11 @@ pub struct TrainConfig {
     /// Allows training to exceed physical RAM by paging cold entries to disk.
     /// Speed cost: ~2-3x for cold entries, negligible for hot entries.
     pub mmap_arenas: bool,
+    /// In parallel-training mode, set to Some(thread_id) so the per-thread
+    /// checkpoint file is named `checkpoint_t{tid}_{iter}.bin` instead of
+    /// the single-thread `checkpoint_{iter}.bin`. None = single-thread mode
+    /// (default), uses unsuffixed name.
+    pub checkpoint_thread_id: Option<usize>,
 }
 
 impl Default for TrainConfig {
@@ -78,6 +83,7 @@ impl Default for TrainConfig {
             regret_scale_every: 1_000_000,
             freeze_after: 5_000_000,
             mmap_arenas: false,
+            checkpoint_thread_id: None,
         }
     }
 }

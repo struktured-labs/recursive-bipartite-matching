@@ -154,6 +154,48 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Open an existing mmap-backed arena file without truncating.
+    /// `len` is set from the file size (file_size / sizeof(T)).
+    /// Use this when restoring arena state from disk after a training run.
+    pub fn open_existing(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let elem_size = std::mem::size_of::<T>();
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+
+        let file_size = file.metadata()?.len() as usize;
+        if file_size % elem_size != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("file size {} not a multiple of sizeof(T)={}", file_size, elem_size),
+            ));
+        }
+
+        let n = file_size / elem_size;
+        let mmap = unsafe { MmapMut::map_mut(&file)? };
+
+        #[cfg(unix)]
+        unsafe {
+            libc::madvise(
+                mmap.as_ptr() as *mut libc::c_void,
+                file_size,
+                libc::MADV_RANDOM,
+            );
+        }
+
+        Ok(Self {
+            path,
+            file,
+            mmap,
+            len: n,
+            capacity: n,
+            _phantom: std::marker::PhantomData,
+        })
+    }
 }
 
 impl<T: Copy + Default + bytemuck::Pod> Drop for MmapArena<T> {

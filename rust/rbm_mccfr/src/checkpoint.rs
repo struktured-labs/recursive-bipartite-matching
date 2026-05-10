@@ -57,7 +57,9 @@ use crate::cfr_state::{self, CfrState};
 use crate::compact_state::{CompactCfrState, CompactEntry};
 
 const MAGIC: &[u8; 8] = b"RBMRUST1";
-const MAGIC_COMPACT_RAW: &[u8; 8] = b"RBMCMP02";
+const MAGIC_COMPACT_RAW: &[u8; 8] = b"RBMCMP04";
+const MAGIC_COMPACT_RAW_V3: &[u8; 8] = b"RBMCMP03";
+const MAGIC_COMPACT_RAW_V2: &[u8; 8] = b"RBMCMP02";
 const MAGIC_COMPACT_RAW_V1: &[u8; 8] = b"RBMCMP01";
 
 // -----------------------------------------------------------------------
@@ -354,14 +356,14 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
         r.read_exact(&mut buf8)?;
         let n_entries = u64::from_le_bytes(buf8) as usize;
 
-        // Read regret arena
+        // Read regret arena (f32 storage)
         r.read_exact(&mut buf8)?;
         let regret_arena_len = u64::from_le_bytes(buf8) as usize;
-        let mut regret_vec: Vec<i16> = Vec::with_capacity(regret_arena_len);
-        let mut buf2 = [0u8; 2];
+        let mut regret_vec: Vec<f32> = Vec::with_capacity(regret_arena_len);
+        let mut buf4r = [0u8; 4];
         for _ in 0..regret_arena_len {
-            r.read_exact(&mut buf2)?;
-            regret_vec.push(i16::from_le_bytes(buf2));
+            r.read_exact(&mut buf4r)?;
+            regret_vec.push(f32::from_le_bytes(buf4r));
         }
         states[player].regret_arena = crate::compact_state::Arena::from_vec(regret_vec);
 
@@ -382,13 +384,13 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
             r.read_exact(&mut buf8)?;
             let key = u64::from_le_bytes(buf8);
 
-            let mut buf4r = [0u8; 4];
-            r.read_exact(&mut buf4r)?;
-            let regret_offset = u32::from_le_bytes(buf4r);
+            let mut buf8r = [0u8; 8];
+            r.read_exact(&mut buf8r)?;
+            let regret_offset = u64::from_le_bytes(buf8r);
 
-            let mut buf4s = [0u8; 4];
-            r.read_exact(&mut buf4s)?;
-            let strategy_offset = u32::from_le_bytes(buf4s);
+            let mut buf8s = [0u8; 8];
+            r.read_exact(&mut buf8s)?;
+            let strategy_offset = u64::from_le_bytes(buf8s);
 
             let mut buf1 = [0u8; 1];
             r.read_exact(&mut buf1)?;
@@ -474,12 +476,12 @@ fn load_compact_raw_states_v1(path: &Path) -> io::Result<([CompactCfrState; 2], 
         for oe in &old_entries {
             let n = oe.n_actions as usize;
             let old_base = oe.arena_offset as usize;
-            let regret_offset = states[player].regret_arena.len() as u32;
-            let strategy_offset = states[player].strategy_arena.len() as u32;
+            let regret_offset = states[player].regret_arena.len() as u64;
+            let strategy_offset = states[player].strategy_arena.len() as u64;
 
-            // Copy regrets
+            // Copy regrets (legacy v1 stored i16; widen to f32)
             for i in 0..n {
-                states[player].regret_arena.push(old_arena[old_base + i]);
+                states[player].regret_arena.push(old_arena[old_base + i] as f32);
             }
             // Convert strategy sums from i16 to f32
             for i in 0..n {

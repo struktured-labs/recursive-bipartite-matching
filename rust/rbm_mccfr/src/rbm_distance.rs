@@ -51,6 +51,41 @@ fn phantom_cost(config: &Config, tree: &Tree) -> f64 {
     }
 }
 
+/// Fast-path optimal matching of N leaf values to N leaf values, minimizing
+/// sum of |a_i - b_j|. Equivalent to running the Hungarian algorithm on the
+/// |a-b| cost matrix, but uses the closed-form L1-transport-on-real-line
+/// solution: sort both, pair index-by-index. O(N log N) instead of O(N³).
+///
+/// Returns `Some(cost)` if both `c1` and `c2` are all-leaf with equal length,
+/// `None` otherwise (caller must fall back to general Hungarian).
+#[inline]
+fn try_leaf_matching(c1: &[Tree], c2: &[Tree]) -> Option<f64> {
+    if c1.len() != c2.len() {
+        return None;
+    }
+    let mut a: Vec<f64> = Vec::with_capacity(c1.len());
+    let mut b: Vec<f64> = Vec::with_capacity(c2.len());
+    for t in c1 {
+        match t {
+            Tree::Leaf { value } => a.push(*value),
+            _ => return None,
+        }
+    }
+    for t in c2 {
+        match t {
+            Tree::Leaf { value } => b.push(*value),
+            _ => return None,
+        }
+    }
+    a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let mut sum = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        sum += (x - y).abs();
+    }
+    Some(sum)
+}
+
 /// Compute the full RBM distance between two trees.
 ///
 /// Recursively matches children at each level using the Hungarian algorithm.
@@ -91,6 +126,11 @@ fn compute_impl(config: &Config, t1: &Tree, t2: &Tree) -> f64 {
                 (0, _) => c2.iter().map(|c| phantom_cost(config, c)).sum(),
                 (_, 0) => c1.iter().map(|c| phantom_cost(config, c)).sum(),
                 _ => {
+                    // Fast path: both children are all-leaves, equal length.
+                    // Optimal matching is sort + pair (L1 transport).
+                    if let Some(d) = try_leaf_matching(c1, c2) {
+                        return d;
+                    }
                     // Build cost matrix: recursive distance between each pair
                     let cost_matrix: Vec<Vec<f64>> = c1
                         .iter()
@@ -165,6 +205,11 @@ fn compute_truncated_impl(
                 (0, _) => c2.iter().map(|c| phantom_cost(config, c)).sum(),
                 (_, 0) => c1.iter().map(|c| phantom_cost(config, c)).sum(),
                 _ => {
+                    // Fast path: both children are all-leaves, equal length.
+                    // Optimal matching is sort + pair (L1 transport).
+                    if let Some(d) = try_leaf_matching(c1, c2) {
+                        return d;
+                    }
                     let cost_matrix: Vec<Vec<f64>> = c1
                         .iter()
                         .map(|a| {

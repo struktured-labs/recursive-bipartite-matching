@@ -94,6 +94,7 @@ pub unsafe extern "C" fn rbm_train(
         regret_scale_every: 1_000_000,
         freeze_after: 5_000_000,
         mmap_arenas: false,
+        checkpoint_thread_id: None,
     };
 
     // Preflop assignments
@@ -115,6 +116,7 @@ pub unsafe extern "C" fn rbm_train(
             &train_config,
             &assignments,
             num_threads as usize,
+            None,
         )
     } else {
         train::train_mccfr(

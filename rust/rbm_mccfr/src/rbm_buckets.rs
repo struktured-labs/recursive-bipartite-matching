@@ -21,10 +21,15 @@ use crate::buckets;
 
 /// Default MC sampling parameters for showdown distribution trees.
 /// 2 board completions × 5 opponent hands = 10 leaves.
-/// Fast bucketing (~5K iter/s) — distance range 0-20, integer-quantized.
-/// For fine-grained RBM (e.g., on cloud), bump to 5×10=50 leaves and re-tune epsilon.
-const DEFAULT_MAX_BOARD_SAMPLES: usize = 2;
-const DEFAULT_MAX_OPPONENTS: usize = 5;
+/// Distance range 0-20, integer-quantized.
+/// Bumped to 100 leaves (10×10) on 2026-04-30 after preflop-distance
+/// histogram analysis showed ε=0.5 at 10 leaves was below p10 of the
+/// pairwise-distance distribution — i.e., effectively no merging. At
+/// 100 leaves the distribution scales to p10=17, p50=32, so meaningful
+/// ε is in [15, 50]. Hostkey 32-core EPYC handles the 10× leaf-count
+/// cost easily.
+const DEFAULT_MAX_BOARD_SAMPLES: usize = 10;
+const DEFAULT_MAX_OPPONENTS: usize = 10;
 
 /// A cluster of strategically similar hands.
 #[derive(Debug, Clone)]
@@ -37,60 +42,69 @@ pub struct PostflopCluster {
     pub member_count: u32,
 }
 
-/// Per-player mutable cluster state for post-flop RBM bucketing.
+/// Per-player mutable cluster state for RBM bucketing.
 ///
-/// Clusters are indexed by street:
-///   - street 1 = flop (3 board cards visible)
-///   - street 2 = turn (4 board cards visible)
-///   - street 3 = river (5 board cards visible)
+/// Unified across all streets: a single cluster list indexed by RBM distance
+/// over showdown-distribution trees. Streets are not privileged — preflop
+/// (board_visible = 0 cards), flop (3), turn (4), river (5) all share the
+/// same cluster space. Info-set keys still include betting round, so
+/// cross-street clustering is only meaningful for bucketing, not for CFR
+/// strategy sharing.
 ///
-/// The cluster lists grow during training as new distinct hands are encountered.
+/// This is the "pure RBM" view: the game tree is one object, RBM distance
+/// is the abstraction metric, clusters emerge from the whole graph rather
+/// than being imposed per-street.
 #[derive(Debug, Clone)]
 pub struct PostflopState {
-    /// clusters[street_idx] is the list of clusters for that street.
-    /// street_idx 0 = flop (round_idx=1), 1 = turn (round_idx=2), 2 = river (round_idx=3).
-    pub clusters: [Vec<PostflopCluster>; 3],
+    /// All clusters, across all streets.
+    pub clusters: Vec<PostflopCluster>,
 }
 
 impl PostflopState {
-    /// Create a new empty post-flop state.
+    /// Create a new empty RBM state.
     pub fn new() -> Self {
         PostflopState {
-            clusters: [Vec::new(), Vec::new(), Vec::new()],
+            clusters: Vec::new(),
         }
     }
 
-    /// Get total cluster count across all streets.
+    /// Get total cluster count.
     pub fn total_clusters(&self) -> usize {
-        self.clusters.iter().map(|c| c.len()).sum()
+        self.clusters.len()
     }
 
-    /// Serialize to a writer. Format:
-    ///   For each of 3 streets:
+    /// Serialize to a writer. Format v2 (unified):
+    ///     magic: "RBMCLSTR" (8 bytes)
     ///     n_clusters: u32
     ///     For each cluster:
     ///       rep_ev: f64, member_count: u32
     ///       tree (recursive): tag u8 (0=leaf, 1=node) + data
     pub fn save(&self, w: &mut impl std::io::Write) -> std::io::Result<()> {
-        for street in &self.clusters {
-            w.write_all(&(street.len() as u32).to_le_bytes())?;
-            for cluster in street {
-                w.write_all(&cluster.rep_ev.to_le_bytes())?;
-                w.write_all(&cluster.member_count.to_le_bytes())?;
-                Self::save_tree(w, &cluster.representative)?;
-            }
+        w.write_all(b"RBMCLSTR")?;
+        w.write_all(&(self.clusters.len() as u32).to_le_bytes())?;
+        for cluster in &self.clusters {
+            w.write_all(&cluster.rep_ev.to_le_bytes())?;
+            w.write_all(&cluster.member_count.to_le_bytes())?;
+            Self::save_tree(w, &cluster.representative)?;
         }
         Ok(())
     }
 
-    /// Deserialize from a reader.
+    /// Deserialize from a reader. Accepts the unified v2 format ("RBMCLSTR"
+    /// magic) and falls back to the legacy per-street format (no magic, just
+    /// 3 consecutive per-street lengths) for backward compatibility. Legacy
+    /// files are loaded by concatenating all streets into the unified list.
     pub fn load(r: &mut impl std::io::Read) -> std::io::Result<Self> {
-        let mut clusters: [Vec<PostflopCluster>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for street in &mut clusters {
+        // Peek first 8 bytes
+        let mut first8 = [0u8; 8];
+        r.read_exact(&mut first8)?;
+
+        let clusters = if &first8 == b"RBMCLSTR" {
+            // v2 unified
             let mut buf4 = [0u8; 4];
             r.read_exact(&mut buf4)?;
             let n = u32::from_le_bytes(buf4) as usize;
-            *street = Vec::with_capacity(n);
+            let mut v = Vec::with_capacity(n);
             for _ in 0..n {
                 let mut buf8 = [0u8; 8];
                 r.read_exact(&mut buf8)?;
@@ -98,9 +112,57 @@ impl PostflopState {
                 r.read_exact(&mut buf4)?;
                 let member_count = u32::from_le_bytes(buf4);
                 let representative = Self::load_tree(r)?;
-                street.push(PostflopCluster { representative, rep_ev, member_count });
+                v.push(PostflopCluster { representative, rep_ev, member_count });
             }
-        }
+            v
+        } else {
+            // Legacy v1: 3 per-street lengths. The first 4 bytes we already
+            // consumed are the first street's length; bytes 4..8 are the first
+            // cluster's rep_ev prefix (or another length if street 0 was empty).
+            // Handle both.
+            let mut v: Vec<PostflopCluster> = Vec::new();
+            let n0 = u32::from_le_bytes([first8[0], first8[1], first8[2], first8[3]]) as usize;
+            if n0 > 0 {
+                // First cluster's first 4 rep_ev bytes already read
+                let rep_ev_low = &first8[4..8];
+                let mut rep_ev_hi = [0u8; 4];
+                r.read_exact(&mut rep_ev_hi)?;
+                let rep_ev = f64::from_le_bytes([
+                    rep_ev_low[0], rep_ev_low[1], rep_ev_low[2], rep_ev_low[3],
+                    rep_ev_hi[0], rep_ev_hi[1], rep_ev_hi[2], rep_ev_hi[3],
+                ]);
+                let mut buf4 = [0u8; 4];
+                r.read_exact(&mut buf4)?;
+                let member_count = u32::from_le_bytes(buf4);
+                let representative = Self::load_tree(r)?;
+                v.push(PostflopCluster { representative, rep_ev, member_count });
+                for _ in 1..n0 {
+                    let mut buf8 = [0u8; 8];
+                    r.read_exact(&mut buf8)?;
+                    let rep_ev = f64::from_le_bytes(buf8);
+                    r.read_exact(&mut buf4)?;
+                    let member_count = u32::from_le_bytes(buf4);
+                    let representative = Self::load_tree(r)?;
+                    v.push(PostflopCluster { representative, rep_ev, member_count });
+                }
+            }
+            for _ in 0..2 {
+                let mut buf4 = [0u8; 4];
+                r.read_exact(&mut buf4)?;
+                let n = u32::from_le_bytes(buf4) as usize;
+                for _ in 0..n {
+                    let mut buf8 = [0u8; 8];
+                    r.read_exact(&mut buf8)?;
+                    let rep_ev = f64::from_le_bytes(buf8);
+                    r.read_exact(&mut buf4)?;
+                    let member_count = u32::from_le_bytes(buf4);
+                    let representative = Self::load_tree(r)?;
+                    v.push(PostflopCluster { representative, rep_ev, member_count });
+                }
+            }
+            v
+        };
+
         Ok(PostflopState { clusters })
     }
 
@@ -306,16 +368,56 @@ fn find_nearest_postflop_cluster(
     Some((best_idx, best_dist))
 }
 
-/// Compute the RBM-based post-flop bucket for a hand.
+/// Compute the RBM bucket for a hand at any street (preflop / flop / turn /
+/// river). The single cluster list in `postflop` is shared across all streets.
 ///
 /// Builds a showdown distribution tree using the shared training RNG
-/// (matching OCaml's approach — no deterministic seeds, no cache).
-/// Each call produces a fresh random tree, which may classify differently
-/// than previous calls for the same hand. This is intentional: OCaml's
-/// random tree noise acts as implicit regularization, producing ~400
-/// clusters vs ~1200 with deterministic seeds at epsilon=0.5.
+/// (matching OCaml's approach — no deterministic seeds, no cache). Each
+/// call produces a fresh random tree, which may classify differently than
+/// previous calls for the same hand. The random tree noise acts as implicit
+/// regularization.
 ///
-/// Returns the bucket index (cluster index for this street).
+/// Returns the bucket index (cluster index in the unified list).
+pub fn compute_bucket_rbm(
+    hole_cards: &[Card; 2],
+    board_visible: &[Card],
+    player: u8,
+    epsilon: f64,
+    rbm_config: &RbmConfig,
+    postflop: &mut PostflopState,
+    rng: &mut impl Rng,
+) -> u32 {
+    let tree = showdown_distribution_tree(
+        hole_cards,
+        board_visible,
+        player,
+        DEFAULT_MAX_OPPONENTS,
+        DEFAULT_MAX_BOARD_SAMPLES,
+        rng,
+    );
+
+    let nearest = find_nearest_postflop_cluster(&postflop.clusters, &tree, epsilon, rbm_config);
+    match nearest {
+        Some((idx, d)) if d < epsilon => {
+            postflop.clusters[idx].member_count += 1;
+            idx as u32
+        }
+        _ => {
+            let new_idx = postflop.clusters.len();
+            let new_cluster = PostflopCluster {
+                rep_ev: tree.ev(),
+                representative: tree,
+                member_count: 1,
+            };
+            postflop.clusters.push(new_cluster);
+            new_idx as u32
+        }
+    }
+}
+
+/// Backward-compat shim for the old per-street postflop API. Delegates to
+/// `compute_bucket_rbm` with the appropriate board slice. Preserved so tests
+/// and callers that reference the old name keep compiling.
 pub fn compute_bucket_rbm_postflop(
     hole_cards: &[Card; 2],
     board: &[Card; 5],
@@ -326,70 +428,27 @@ pub fn compute_bucket_rbm_postflop(
     postflop: &mut PostflopState,
     rng: &mut impl Rng,
 ) -> u32 {
-    // Extract visible board cards based on street
     let board_visible: &[Card] = match round_idx {
-        1 => &board[..3], // flop
-        2 => &board[..4], // turn
-        _ => &board[..5], // river
+        0 => &board[..0],
+        1 => &board[..3],
+        2 => &board[..4],
+        _ => &board[..5],
     };
-
-    // Build showdown distribution tree with shared RNG (like OCaml).
-    // No cache — each call gets a fresh random tree.
-    let tree = showdown_distribution_tree(
-        hole_cards,
-        board_visible,
-        player,
-        DEFAULT_MAX_OPPONENTS,
-        DEFAULT_MAX_BOARD_SAMPLES,
-        rng,
-    );
-
-    // Map round_idx to cluster array index (round 1->0, 2->1, 3->2)
-    let street_idx = (round_idx - 1) as usize;
-    debug_assert!(street_idx < 3, "Invalid street index: {}", street_idx);
-
-    let clusters = &postflop.clusters[street_idx];
-    let nearest = find_nearest_postflop_cluster(clusters, &tree, epsilon, rbm_config);
-
-    match nearest {
-        Some((idx, d)) => {
-            if d < epsilon {
-                postflop.clusters[street_idx][idx].member_count += 1;
-                idx as u32
-            } else {
-                let new_cluster = PostflopCluster {
-                    rep_ev: tree.ev(),
-                    representative: tree,
-                    member_count: 1,
-                };
-                let new_idx = postflop.clusters[street_idx].len();
-                postflop.clusters[street_idx].push(new_cluster);
-                new_idx as u32
-            }
-        }
-        None => {
-            let new_cluster = PostflopCluster {
-                rep_ev: tree.ev(),
-                representative: tree,
-                member_count: 1,
-            };
-            postflop.clusters[street_idx].push(new_cluster);
-            0
-        }
-    }
+    compute_bucket_rbm(hole_cards, board_visible, player, epsilon, rbm_config, postflop, rng)
 }
 
-/// Precompute all 4 street buckets for a deal using RBM.
+/// Precompute all 4 street buckets for a deal using unified RBM.
 ///
-/// - Round 0 (preflop): uses the canonical hand ID -> preflop_assignments lookup
-///   (same as equity bucketing for preflop).
-/// - Rounds 1-3 (flop/turn/river): uses RBM-based clustering with shared RNG.
+/// No street privilege: preflop (round 0, no board visible) goes through the
+/// same RBM pipeline as flop/turn/river. The `preflop_assignments` argument
+/// is retained in the signature for backward compatibility with the equity
+/// path but is unused when bucket-method is RBM.
 ///
 /// `player` (0 or 1) determines the sign convention for showdown outcomes.
 pub fn precompute_buckets_rbm(
     hole_cards: &[Card; 2],
     board: &[Card; 5],
-    preflop_assignments: &[i32; 169],
+    _preflop_assignments: &[i32; 169],
     player: u8,
     epsilon: f64,
     rbm_config: &RbmConfig,
@@ -397,18 +456,8 @@ pub fn precompute_buckets_rbm(
     rng: &mut impl Rng,
 ) -> [u32; 4] {
     let mut result = [0u32; 4];
-
-    // Round 0: preflop uses canonical hand bucketing (same as equity)
-    let cid = buckets::canonical_hand_id(hole_cards[0], hole_cards[1]);
-    let preflop_bucket = preflop_assignments[cid];
-    result[0] = if preflop_bucket >= 0 {
-        preflop_bucket as u32
-    } else {
-        0
-    };
-
-    // Rounds 1-3: RBM-based post-flop bucketing (shared RNG, like OCaml)
-    for round_idx in 1..=3u8 {
+    // Unified RBM bucketing across all 4 rounds.
+    for round_idx in 0..=3u8 {
         result[round_idx as usize] = compute_bucket_rbm_postflop(
             hole_cards,
             board,
@@ -522,10 +571,10 @@ mod tests {
             &p1, &board, 1, 0, 10.0, &rbm_config, &mut postflop, &mut rng,
         );
         assert_eq!(
-            postflop.clusters[0].len(),
+            postflop.clusters.len(),
             1,
             "With high epsilon, same hand should create only 1 cluster, got {}",
-            postflop.clusters[0].len()
+            postflop.clusters.len()
         );
         assert_eq!(b1, b2);
     }

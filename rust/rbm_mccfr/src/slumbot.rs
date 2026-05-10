@@ -136,6 +136,12 @@ pub fn load_compact_for_play(path: &Path) -> std::io::Result<[CompactCfrState; 2
 
 /// Auto-detect checkpoint format and load as PlayStrategy.
 /// RBMCMP02/RBMCMP01 -> Compact (memory-efficient), RBMRUST1 -> Full (averaged strategy).
+///
+/// If `path` is next to `frozen_keys_p*_L*.bin` sidecar files (i.e. the training
+/// directory is still intact), reconstructs the full CompactCfrState from the
+/// on-disk mmap + frozen-layer files directly. This recovers the strategy that
+/// would otherwise be silently truncated by the RBMCMP02 format's missing
+/// frozen-layer serialization.
 pub fn load_play_strategy(path: &Path) -> std::io::Result<PlayStrategy> {
     // Read magic header to detect format
     let mut file = std::fs::File::open(path)?;
@@ -143,7 +149,39 @@ pub fn load_play_strategy(path: &Path) -> std::io::Result<PlayStrategy> {
     std::io::Read::read_exact(&mut file, &mut magic)?;
     drop(file);
 
-    if &magic == b"RBMCMP02" || &magic == b"RBMCMP01" {
+    if &magic == b"RBMCMP04" || &magic == b"RBMCMP03" || &magic == b"RBMCMP02" || &magic == b"RBMCMP01" {
+        // If the checkpoint is inside a training directory that still has the
+        // sidecar mmap + frozen-layer files, reconstruct directly from those.
+        // The compact checkpoint format alone is insufficient: it only serializes
+        // the overflow HashMap, omitting all frozen MPHF layers (which hold >99%
+        // of info sets in a converged run).
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let sidecars_present = dir.join("regret_p0.bin").exists()
+            && dir.join("strategy_p0.bin").exists()
+            && dir.join("frozen_keys_p0_L0.bin").exists();
+
+        if sidecars_present {
+            eprintln!("Detected compact checkpoint ({}) with sidecar mmap + frozen layers in {:?} -- reconstructing full state from training directory",
+                std::str::from_utf8(&magic).unwrap_or("???"), dir);
+            let s0 = crate::compact_state::CompactCfrState::load_from_dir(dir, 0)?;
+            let s1 = crate::compact_state::CompactCfrState::load_from_dir(dir, 1)?;
+            eprintln!("Reconstructed from training dir: P0={} P1={} info sets",
+                s0.len(), s1.len());
+            return Ok(PlayStrategy::Compact([s0, s1]));
+        }
+
+        // For RBMCMP01/02 without sidecars we fall back to the in-file arena
+        // (legacy path; data is likely partial). RBMCMP03 without sidecars is
+        // an error because RBMCMP03 always expects sidecars — the inline path
+        // would require an RBMCMP03-aware reader we haven't written.
+        if &magic == b"RBMCMP03" || &magic == b"RBMCMP04" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} checkpoint requires sidecar files (regret_p*.bin, strategy_p*.bin, frozen_keys_p*_L0.bin) in the same directory",
+                    std::str::from_utf8(&magic).unwrap_or("???")),
+            ));
+        }
+
         eprintln!("Detected compact checkpoint ({}) -- playing directly from compact state",
             std::str::from_utf8(&magic).unwrap_or("???"));
         let states = load_compact_for_play(path)?;

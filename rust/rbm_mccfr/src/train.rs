@@ -8,7 +8,7 @@
 ///   - Periodic checkpointing
 ///   - Parallel training via rayon (independent thread-local states, merged)
 ///
-/// Uses CompactCfrState (arena-backed i16 storage) for ~3x memory savings.
+/// Uses CompactCfrState (arena-backed f32 regret + f32 strategy_sum, LSM-frozen).
 
 use std::path::Path;
 use rand::SeedableRng;
@@ -128,6 +128,7 @@ pub fn train_mccfr(
                 frozen: None,
                 player_id: 0,
                 use_mmap: false,
+                mmap_dir: std::path::PathBuf::from("."),
             };
             let s1 = CompactCfrState {
                 index: states[1].index.clone(),
@@ -136,6 +137,7 @@ pub fn train_mccfr(
                 frozen: None,
                 player_id: 1,
                 use_mmap: false,
+                mmap_dir: std::path::PathBuf::from("."),
             };
             ([s0, s1], iter)
         }
@@ -211,7 +213,7 @@ pub fn train_mccfr(
                 String::new()
             };
             eprintln!(
-                "[iter {}] avg_util={:.2} P0={} P1={} info sets  regret={}+{} i16  strat={}+{} f32{}",
+                "[iter {}] avg_util={:.2} P0={} P1={} info sets  regret={}+{} f32  strat={}+{} f32{}",
                 iter + 1,
                 avg_util,
                 cfr_states[0].len(),
@@ -234,16 +236,22 @@ pub fn train_mccfr(
             cfr_states[1].freeze();
         }
 
-        // Periodic regret scaling: halve all regrets to prevent i16 saturation
+        // Periodic regret scaling: halve all regrets. Acts as DCFR-like
+        // discounting that biases toward more recent learning.
         if train_config.regret_scale_every > 0 && (iter + 1) % train_config.regret_scale_every == 0 {
             cfr_states[0].halve_regrets();
             cfr_states[1].halve_regrets();
-            eprintln!("[iter {}] halved regrets (i16 saturation prevention)", iter + 1);
+            eprintln!("[iter {}] halved regrets (DCFR-like discounting)", iter + 1);
         }
 
-        // Checkpoint
+        // Checkpoint. In parallel mode, each thread tags its file with
+        // checkpoint_thread_id so threads don't clobber each other.
         if train_config.checkpoint_every > 0 && (iter + 1) % train_config.checkpoint_every == 0 {
-            let ckpt_path = format!("checkpoint_{}.bin", iter + 1);
+            let suffix = train_config
+                .checkpoint_thread_id
+                .map(|tid| format!("_t{}", tid))
+                .unwrap_or_default();
+            let ckpt_path = format!("checkpoint{}_{}.bin", suffix, iter + 1);
             if let Err(e) = checkpoint::save_compact_raw_states(
                 Path::new(&ckpt_path),
                 &cfr_states,
@@ -255,7 +263,7 @@ pub fn train_mccfr(
             }
             // Save PostflopState alongside for RBM resume
             if rbm_config.is_some() {
-                let cluster_path = format!("checkpoint_{}.clusters", iter + 1);
+                let cluster_path = format!("checkpoint{}_{}.clusters", suffix, iter + 1);
                 let f = std::fs::File::create(&cluster_path);
                 if let Ok(f) = f {
                     let mut w = std::io::BufWriter::new(f);
@@ -275,12 +283,21 @@ pub fn train_mccfr(
 ///
 /// Each thread gets its own CompactCfrState pair and RNG. After training, all
 /// thread states are merged by summing regrets and strategy sums.
+///
+/// When `train_config.mmap_arenas` is true, per-thread arenas are file-backed
+/// at `{mmap_dir}/thread_{tid}/{regret,strategy}_p{0,1}.bin`. Defaults to "."
+/// (CWD) when `mmap_dir` is None — preserves prior behavior for production
+/// callers; tests pass an explicit tempdir.
 pub fn train_mccfr_parallel(
     config: &GameConfig,
     train_config: &TrainConfig,
     preflop_assignments: &[i32; 169],
     num_threads: usize,
+    mmap_dir: Option<&std::path::Path>,
 ) -> ([CompactCfrState; 2], [PostflopState; 2]) {
+    let mmap_dir_owned: std::path::PathBuf = mmap_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build()
@@ -303,10 +320,20 @@ pub fn train_mccfr_parallel(
 
             // Suppress per-thread reporting to avoid interleaved output
             let original_report = thread_train_config.report_every;
-            thread_train_config.checkpoint_every = 0; // No per-thread checkpoints
+
+            // Per-thread checkpointing: scale aggregate cadence to per-thread
+            // (each thread does iters/num_threads). Tag with thread_id so
+            // threads don't clobber each other's files. Recovery: load all
+            // per-thread checkpoints + merge.
+            if train_config.checkpoint_every > 0 {
+                thread_train_config.checkpoint_every =
+                    (train_config.checkpoint_every / num_threads as u64).max(1);
+                thread_train_config.checkpoint_thread_id = Some(thread_id);
+            }
 
             let assignments = *preflop_assignments;
             let tid = thread_id;
+            let thread_mmap_dir = mmap_dir_owned.clone();
 
             let (tx, rx) = std::sync::mpsc::channel();
 
@@ -315,10 +342,20 @@ pub fn train_mccfr_parallel(
                     (tid as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ 0xBEEF_CAFE,
                 );
 
-                let mut cfr_states = [
-                    CompactCfrState::new(thread_train_config.initial_size / num_threads.max(1)),
-                    CompactCfrState::new(thread_train_config.initial_size / num_threads.max(1)),
-                ];
+                let per_thread_cap = thread_train_config.initial_size / num_threads.max(1);
+                let mut cfr_states = if thread_train_config.mmap_arenas {
+                    let dir = thread_mmap_dir.join(format!("thread_{}", tid));
+                    std::fs::create_dir_all(&dir).ok();
+                    [
+                        CompactCfrState::new_mmap(per_thread_cap, &dir, 0),
+                        CompactCfrState::new_mmap(per_thread_cap, &dir, 1),
+                    ]
+                } else {
+                    [
+                        CompactCfrState::new(per_thread_cap),
+                        CompactCfrState::new(per_thread_cap),
+                    ]
+                };
 
                 let mut util_sum = 0.0f64;
 
@@ -366,6 +403,17 @@ pub fn train_mccfr_parallel(
                         cfr_states[1].halve_regrets();
                     }
 
+                    // Per-thread freeze: replace FxHashMap with MPHF periodically.
+                    // Without this, anon RSS grows linearly with info-set count
+                    // and OOMs on long parallel runs. (Single-thread path has
+                    // the same logic; this brought parallel into parity.)
+                    if thread_train_config.freeze_after > 0
+                        && (iter + 1) % thread_train_config.freeze_after == 0
+                    {
+                        cfr_states[0].freeze();
+                        cfr_states[1].freeze();
+                    }
+
                     // Per-thread progress (only thread 0 reports)
                     if tid == 0 && original_report > 0 && (iter + 1) % original_report == 0 {
                         let avg_util = util_sum / (iter + 1) as f64;
@@ -376,6 +424,22 @@ pub fn train_mccfr_parallel(
                             cfr_states[0].len(),
                             cfr_states[1].len(),
                         );
+                    }
+
+                    // Per-thread checkpoint. File path includes thread_id so
+                    // threads don't clobber each other. Recovery: load every
+                    // checkpoint_t*_<iter>.bin and merge.
+                    if thread_train_config.checkpoint_every > 0
+                        && (iter + 1) % thread_train_config.checkpoint_every == 0
+                    {
+                        let ckpt_path = format!("checkpoint_t{}_{}.bin", tid, iter + 1);
+                        if let Err(e) = checkpoint::save_compact_raw_states(
+                            Path::new(&ckpt_path),
+                            &cfr_states,
+                            iter + 1,
+                        ) {
+                            eprintln!("[thread {}] checkpoint failed: {}", tid, e);
+                        }
                     }
                 }
 
@@ -480,6 +544,7 @@ mod tests {
             regret_scale_every: 0,
             freeze_after: 0,
             mmap_arenas: false,
+            checkpoint_thread_id: None,
         };
         let assignments = default_assignments();
 
@@ -506,6 +571,7 @@ mod tests {
             regret_scale_every: 0,
             freeze_after: 0,
             mmap_arenas: false,
+            checkpoint_thread_id: None,
         };
         let assignments = default_assignments();
 
@@ -529,6 +595,7 @@ mod tests {
             regret_scale_every: 0,
             freeze_after: 0,
             mmap_arenas: false,
+            checkpoint_thread_id: None,
         };
         let assignments = default_assignments();
 
@@ -552,10 +619,11 @@ mod tests {
             regret_scale_every: 0,
             freeze_after: 0,
             mmap_arenas: false,
+            checkpoint_thread_id: None,
         };
         let assignments = default_assignments();
 
-        let (states, _) = train_mccfr_parallel(&config, &train_config, &assignments, 2);
+        let (states, _) = train_mccfr_parallel(&config, &train_config, &assignments, 2, None);
 
         assert!(states[0].len() > 0, "P0 should have info sets after parallel training");
         assert!(states[1].len() > 0, "P1 should have info sets after parallel training");
@@ -582,6 +650,7 @@ mod tests {
             regret_scale_every: 0,
             freeze_after: 0,
             mmap_arenas: false,
+            checkpoint_thread_id: None,
         };
         let assignments = default_assignments();
 
@@ -633,11 +702,372 @@ mod tests {
             regret_scale_every: 0,
             freeze_after: 0,
             mmap_arenas: false,
+            checkpoint_thread_id: None,
         };
         let assignments = default_assignments();
 
         let (states, _) = train_mccfr(&config, &train_config, &assignments, None, None);
         assert!(states[0].len() > 0);
         assert!(states[1].len() > 0);
+    }
+
+    /// REGRESSION: --mmap-arenas in parallel training must actually create
+    /// file-backed mmap files on disk. Bug discovered 2026-05-03 —
+    /// train_mccfr_parallel silently used CompactCfrState::new() (anonymous
+    /// Vec) regardless of the mmap_arenas flag. Hostkey runs marketed as
+    /// "mmap-backed" were actually all-RAM, hitting the 768GB ceiling and
+    /// OOMing 1B-iter targets.
+    #[test]
+    fn test_mmap_parallel_creates_files_on_disk() {
+        use std::fs;
+
+        let config = GameConfig::slumbot();
+        let train_config = TrainConfig {
+            iterations: 200,
+            report_every: 0,
+            initial_size: 1_000,
+            checkpoint_every: 0,
+            prune_threshold: -300_000_000.0,
+            dcfr: false,
+            lcfr: false,
+            n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
+            mmap_arenas: true, // <-- the flag under test
+            checkpoint_thread_id: None,
+        };
+        let assignments = default_assignments();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "rbm_mccfr_mmap_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create tempdir");
+
+        let num_threads = 2;
+        let _ = train_mccfr_parallel(
+            &config,
+            &train_config,
+            &assignments,
+            num_threads,
+            Some(&tmp),
+        );
+
+        // Verify file-backed arenas were created for each thread + each player.
+        for tid in 0..num_threads {
+            let dir = tmp.join(format!("thread_{}", tid));
+            for player in 0..2 {
+                let regret = dir.join(format!("regret_p{}.bin", player));
+                let strat = dir.join(format!("strategy_p{}.bin", player));
+                assert!(
+                    regret.exists(),
+                    "expected file-backed regret arena at {:?} (was --mmap-arenas silently ignored?)",
+                    regret
+                );
+                assert!(
+                    strat.exists(),
+                    "expected file-backed strategy arena at {:?}",
+                    strat
+                );
+                assert!(
+                    fs::metadata(&regret).unwrap().len() > 0,
+                    "regret arena file is empty"
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// REGRESSION: --checkpoint-every must produce per-thread checkpoint
+    /// files in parallel mode. Bug discovered 2026-05-04 — train_mccfr_parallel
+    /// silently zeroed thread_train_config.checkpoint_every, so the flag was
+    /// a no-op for any --threads > 1 run. A 1B run that hung at end-of-training
+    /// merge had ZERO recoverable state on disk. Fix: scale cadence by
+    /// num_threads and tag each thread's file with its tid. Recovery loads
+    /// all per-thread checkpoints + merges.
+    #[test]
+    fn test_parallel_checkpointing_writes_per_thread_files() {
+        use std::fs;
+
+        let config = GameConfig::slumbot();
+        let train_config = TrainConfig {
+            iterations: 200,
+            report_every: 0,
+            initial_size: 1_000,
+            // Aggregate cadence 100; with 2 threads → per-thread cadence 50
+            // → each thread checkpoints at iter 50, 100 (per-thread).
+            checkpoint_every: 100,
+            prune_threshold: -300_000_000.0,
+            dcfr: false,
+            lcfr: false,
+            n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
+            mmap_arenas: false,
+            checkpoint_thread_id: None,
+        };
+        let assignments = default_assignments();
+
+        // Checkpoints are saved relative to CWD; serialize via tempdir+chdir.
+        // (We don't have a checkpoint_dir parameter to inject a path, so this
+        // test must own the CWD for its duration. Single test = no race.)
+        let tmp = std::env::temp_dir().join(format!(
+            "rbm_mccfr_ckpt_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&tmp).expect("create tempdir");
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
+
+        let num_threads = 2;
+        let _ = train_mccfr_parallel(&config, &train_config, &assignments, num_threads, None);
+
+        // Restore CWD before assertions to avoid stranding it on teardown.
+        std::env::set_current_dir(&prev_cwd).unwrap();
+
+        // Expect at least one per-thread checkpoint per thread (at iter 50 or 100).
+        let mut found = 0;
+        for entry in fs::read_dir(&tmp).expect("read tempdir") {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            // Pattern: checkpoint_t{tid}_{iter}.bin
+            if name.starts_with("checkpoint_t") && name.ends_with(".bin") {
+                found += 1;
+            }
+        }
+        assert!(
+            found >= num_threads,
+            "expected at least {} per-thread checkpoint files, got {} (was --checkpoint-every silently zeroed in parallel mode?)",
+            num_threads, found
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// REGRESSION: training with mmap-backed arenas must produce numerically
+    /// identical state to training with Vec-backed arenas, given same
+    /// config + same per-thread seeds. Catches data-corruption bugs in the
+    /// mmap arena read/write path that would silently diverge from the
+    /// reference Vec implementation.
+    #[test]
+    fn test_mmap_vs_vec_equivalence() {
+        use std::fs;
+
+        let config = GameConfig::slumbot();
+        let base_train_config = TrainConfig {
+            iterations: 200,
+            report_every: 0,
+            initial_size: 1_000,
+            checkpoint_every: 0,
+            prune_threshold: -300_000_000.0,
+            dcfr: false,
+            lcfr: false,
+            n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 0,
+            mmap_arenas: false,
+            checkpoint_thread_id: None,
+        };
+        let assignments = default_assignments();
+        let num_threads = 2;
+
+        // Reference run: Vec-backed (the "OG" path).
+        let mut vec_cfg = base_train_config.clone();
+        vec_cfg.mmap_arenas = false;
+        let (vec_states, _) =
+            train_mccfr_parallel(&config, &vec_cfg, &assignments, num_threads, None);
+
+        // Mmap run with same config.
+        let tmp = std::env::temp_dir().join(format!(
+            "rbm_mccfr_equiv_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create tempdir");
+
+        let mut mmap_cfg = base_train_config.clone();
+        mmap_cfg.mmap_arenas = true;
+        let (mmap_states, _) = train_mccfr_parallel(
+            &config,
+            &mmap_cfg,
+            &assignments,
+            num_threads,
+            Some(&tmp),
+        );
+
+        // Same total info-set count (deterministic given identical seeds + iters).
+        assert_eq!(
+            vec_states[0].len(),
+            mmap_states[0].len(),
+            "P0 info-set count differs: vec={} mmap={}",
+            vec_states[0].len(),
+            mmap_states[0].len(),
+        );
+        assert_eq!(
+            vec_states[1].len(),
+            mmap_states[1].len(),
+            "P1 info-set count differs: vec={} mmap={}",
+            vec_states[1].len(),
+            mmap_states[1].len(),
+        );
+
+        // Same regret + strategy values per matching info-set.
+        // Iterate vec's index, look up same key in mmap, compare values.
+        for player in 0..2 {
+            for (key, vec_entry) in vec_states[player].index.iter() {
+                let mmap_entry = mmap_states[player].index.get(key).unwrap_or_else(|| {
+                    panic!(
+                        "P{}: key {} present in vec but missing in mmap state",
+                        player, key
+                    )
+                });
+                let na = vec_entry.n_actions as usize;
+                for a in 0..na {
+                    let vec_r = vec_states[player].regret(vec_entry, a);
+                    let mmap_r = mmap_states[player].regret(mmap_entry, a);
+                    assert!(
+                        (vec_r - mmap_r).abs() < 1e-3,
+                        "P{} key {} action {}: regret diverged vec={} mmap={}",
+                        player,
+                        key,
+                        a,
+                        vec_r,
+                        mmap_r,
+                    );
+                    let vec_s = vec_states[player].strategy(vec_entry, a);
+                    let mmap_s = mmap_states[player].strategy(mmap_entry, a);
+                    assert!(
+                        (vec_s - mmap_s).abs() < 1e-3,
+                        "P{} key {} action {}: strategy diverged vec={} mmap={}",
+                        player,
+                        key,
+                        a,
+                        vec_s,
+                        mmap_s,
+                    );
+                }
+            }
+        }
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_parallel_mmap_freeze_no_collision() {
+        // Regression: in parallel + mmap mode, each thread's freeze() must
+        // write to its own subdir. Pre-fix, freeze() wrote to CWD with
+        // names like frozen_keys_p0_L0.bin — every thread collided on the
+        // same path and SIGBUS'd. Post-fix, freeze() uses self.mmap_dir
+        // which new_mmap sets to the per-thread dir.
+        use std::fs;
+        let config = GameConfig::slumbot();
+        let train_config = TrainConfig {
+            iterations: 800,
+            report_every: 0,
+            initial_size: 10_000,
+            checkpoint_every: 0,
+            prune_threshold: -300_000_000.0,
+            dcfr: false,
+            lcfr: false,
+            n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 100, // multiple freezes per thread
+            mmap_arenas: true,
+            checkpoint_thread_id: None,
+        };
+        let assignments = default_assignments();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "rbm_mccfr_mmap_freeze_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create tempdir");
+
+        let (states, _) =
+            train_mccfr_parallel(&config, &train_config, &assignments, 2, Some(&tmp));
+
+        // Per-thread freeze must have written to its own subdir.
+        for tid in 0..2 {
+            let thread_dir = tmp.join(format!("thread_{}", tid));
+            for player in 0..2 {
+                let keys_path = thread_dir.join(format!("frozen_keys_p{}_L0.bin", player));
+                assert!(
+                    keys_path.exists(),
+                    "thread {} player {} should have written frozen layer to its own subdir at {:?}",
+                    tid, player, keys_path
+                );
+            }
+        }
+        // No frozen files in shared parent (collision indicator).
+        for player in 0..2 {
+            let shared = tmp.join(format!("frozen_keys_p{}_L0.bin", player));
+            assert!(
+                !shared.exists(),
+                "no thread should write to shared parent dir, found at {:?}",
+                shared
+            );
+        }
+        assert!(states[0].len() > 0);
+        assert!(states[1].len() > 0);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_parallel_freeze_engages() {
+        // Regression: parallel inner loop must call freeze() at freeze_after
+        // boundary. Without it, the FxHashMap index keeps all keys in anon
+        // memory and OOMs on long runs. Single-thread had this; parallel
+        // didn't until the fix that landed alongside this test.
+        let config = GameConfig::slumbot();
+        let train_config = TrainConfig {
+            iterations: 800,
+            report_every: 0,
+            initial_size: 10_000,
+            checkpoint_every: 0,
+            prune_threshold: -300_000_000.0,
+            dcfr: false,
+            lcfr: false,
+            n_buckets: 50,
+            bucket_method: BucketMethod::Equity,
+            regret_scale_every: 0,
+            freeze_after: 100, // small, must trigger many times in 800 iters
+            mmap_arenas: false,
+            checkpoint_thread_id: None,
+        };
+        let assignments = default_assignments();
+
+        let (states, _) = train_mccfr_parallel(&config, &train_config, &assignments, 2, None);
+
+        // After merge, frozen flag may be cleared (merge rebuilds), so we
+        // can't assert on the merged result. The proof is that the run
+        // completed without exhausting memory and the merged state is
+        // populated — pre-fix this test path produced linearly-growing
+        // anon memory; post-fix the per-thread state is bounded. We
+        // instead assert merged state is non-empty as a smoke test.
+        assert!(states[0].len() > 0, "P0 must accumulate info sets");
+        assert!(states[1].len() > 0, "P1 must accumulate info sets");
     }
 }

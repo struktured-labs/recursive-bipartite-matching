@@ -32,9 +32,11 @@ use crate::mmap_arena::MmapArena;
 #[derive(Clone, Copy, Debug)]
 pub struct CompactEntry {
     /// Index into the regret_arena Vec<i16> where this entry's regrets start.
-    pub regret_offset: u32,
+    /// u64: arenas can exceed u32::MAX (4.29B) entries at scale. Prior u32 caused
+    /// silent offset wrap and corrupted ~26% of P1 strategies at iter 40M.
+    pub regret_offset: u64,
     /// Index into the strategy_arena Vec<f32> where this entry's strategy sums start.
-    pub strategy_offset: u32,
+    pub strategy_offset: u64,
     /// Number of actions at this info set (max 12).
     pub n_actions: u8,
     /// Last DCFR discount epoch applied to this entry.
@@ -48,7 +50,7 @@ pub struct FrozenLayer {
     keys: Arena<u64>,
     n_actions: Arena<u8>,
     epochs: Arena<u16>,
-    offsets: Arena<u32>,
+    offsets: Arena<u64>,
 }
 
 impl FrozenLayer {
@@ -217,8 +219,11 @@ impl<T: Copy + Default + bytemuck::Pod> std::ops::IndexMut<usize> for Arena<T> {
 pub struct CompactCfrState {
     /// Index: info key -> compact entry metadata
     pub index: FxHashMap<u64, CompactEntry>,
-    /// Regret arena: contiguous i16 storage.
-    pub regret_arena: Arena<i16>,
+    /// Regret arena: contiguous f32 storage.
+    /// Was i16 + saturation-clamping + halve_regrets cycle; switched to f32
+    /// to eliminate the precision loss from the halve cycle (Rust pipeline
+    /// regression vs OCaml f32 baseline).
+    pub regret_arena: Arena<f32>,
     /// Strategy arena: contiguous f32 storage.
     pub strategy_arena: Arena<f32>,
     /// Optional frozen MPHF index. When set, find_or_add checks MPHF first.
@@ -226,6 +231,10 @@ pub struct CompactCfrState {
     /// Player ID for mmap file naming.
     pub(crate) player_id: u8,
     pub(crate) use_mmap: bool,
+    /// Directory for mmap files (regret/strategy/frozen layers). Set by new_mmap.
+    /// In parallel training, each thread gets its own subdir to avoid path
+    /// collisions when multiple threads call freeze() concurrently.
+    pub(crate) mmap_dir: std::path::PathBuf,
 }
 
 impl CompactCfrState {
@@ -239,7 +248,86 @@ impl CompactCfrState {
             frozen: None,
             player_id: 0,
             use_mmap: false,
+            mmap_dir: std::path::PathBuf::from("."),
         }
+    }
+
+    /// Load a CompactCfrState for a given player by reading the training directory's
+    /// on-disk state: `regret_p{player}.bin`, `strategy_p{player}.bin`, and all
+    /// `frozen_keys_p{player}_L{layer}.bin` / `frozen_na/ep/off_p{player}_L{layer}.bin`
+    /// sidecar files.
+    ///
+    /// This is the evaluator-side recovery for the RBMCMP02 checkpoint format, which
+    /// silently omits all frozen MPHF layer data (see `save_compact_raw_states`).
+    /// The trained strategy lives on disk in these sidecar files; this function
+    /// reconstructs the in-memory `CompactCfrState` such that queries resolve against
+    /// the same data that training was using.
+    ///
+    /// The in-memory `index` HashMap is left empty — any unfrozen overflow from the
+    /// last training cycle is inaccessible, but in a converged run the vast majority
+    /// of info sets have been pushed into frozen layers and the overflow is <1% of
+    /// the total. For eval this is a tolerable loss.
+    pub fn load_from_dir(dir: &std::path::Path, player: u8) -> std::io::Result<Self> {
+        let regret_path = dir.join(format!("regret_p{}.bin", player));
+        let strategy_path = dir.join(format!("strategy_p{}.bin", player));
+
+        let regret_arena = Arena::Mmap(MmapArena::<f32>::open_existing(&regret_path)?);
+        let strategy_arena = Arena::Mmap(MmapArena::<f32>::open_existing(&strategy_path)?);
+
+        let mut layers: Vec<FrozenLayer> = Vec::new();
+        for layer_id in 0usize.. {
+            let keys_path = dir.join(format!("frozen_keys_p{}_L{}.bin", player, layer_id));
+            if !keys_path.exists() {
+                break;
+            }
+            let na_path = dir.join(format!("frozen_na_p{}_L{}.bin", player, layer_id));
+            let ep_path = dir.join(format!("frozen_ep_p{}_L{}.bin", player, layer_id));
+            let off_path = dir.join(format!("frozen_off_p{}_L{}.bin", player, layer_id));
+
+            let keys_mmap = MmapArena::<u64>::open_existing(&keys_path)?;
+            let n = keys_mmap.len();
+
+            // MPHF is not persisted — rebuild from keys. For small layers (15-30M keys)
+            // this is ~2-3 seconds; for compacted layers (1B+ keys) it can be minutes.
+            let mut keys_vec: Vec<u64> = Vec::with_capacity(n);
+            for i in 0..n {
+                keys_vec.push(keys_mmap.get(i));
+            }
+            eprintln!("[load_from_dir] rebuilding MPHF for p{} layer {} ({} keys)...",
+                player, layer_id, n);
+            let start = std::time::Instant::now();
+            let mphf = fmph::GOFunction::from_slice(&keys_vec);
+            eprintln!("[load_from_dir] p{} layer {} MPHF built in {:.1}s",
+                player, layer_id, start.elapsed().as_secs_f64());
+
+            let na_mmap = MmapArena::<u8>::open_existing(&na_path)?;
+            let ep_mmap = MmapArena::<u16>::open_existing(&ep_path)?;
+            let off_mmap = MmapArena::<u64>::open_existing(&off_path)?;
+
+            layers.push(FrozenLayer {
+                mphf,
+                keys: Arena::Mmap(keys_mmap),
+                n_actions: Arena::Mmap(na_mmap),
+                epochs: Arena::Mmap(ep_mmap),
+                offsets: Arena::Mmap(off_mmap),
+            });
+        }
+
+        let frozen = if layers.is_empty() {
+            None
+        } else {
+            Some(FrozenIndex { layers })
+        };
+
+        Ok(Self {
+            index: FxHashMap::with_capacity_and_hasher(1024, Default::default()),
+            regret_arena,
+            strategy_arena,
+            frozen,
+            player_id: player,
+            use_mmap: true,
+            mmap_dir: dir.to_path_buf(),
+        })
     }
 
     /// Create a new state with mmap-backed arenas for low-memory training.
@@ -257,6 +345,7 @@ impl CompactCfrState {
             frozen: None,
             player_id: player,
             use_mmap: true,
+            mmap_dir: dir.to_path_buf(),
         }
     }
 
@@ -304,7 +393,7 @@ impl CompactCfrState {
         let mut keys = vec![0u64; n];
         let mut n_actions_arr = vec![0u8; n];
         let mut epochs_arr = vec![0u16; n];
-        let mut offsets_arr = vec![0u32; n];
+        let mut offsets_arr = vec![0u64; n];
 
         for (&key, &entry) in &self.index {
             let slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
@@ -335,7 +424,7 @@ impl CompactCfrState {
 
         let layer_id = n_layers;
         let (k, na, ep, off) = if self.use_mmap {
-            let dir = std::path::Path::new(".");
+            let dir = self.mmap_dir.as_path();
             let p = self.player_id;
             (
                 vec_to_mmap(keys, &dir.join(format!("frozen_keys_p{}_L{}.bin", p, layer_id))),
@@ -406,7 +495,7 @@ impl CompactCfrState {
         let mut keys = vec![0u64; total];
         let mut n_actions_arr = vec![0u8; total];
         let mut epochs_arr = vec![0u16; total];
-        let mut offsets_arr = vec![0u32; total];
+        let mut offsets_arr = vec![0u64; total];
 
         for layer in &frozen.layers {
             for i in 0..layer.len() {
@@ -424,7 +513,7 @@ impl CompactCfrState {
         // Convert to mmap if needed
         let layer_id = 0;
         let (k, na, ep, off) = if self.use_mmap {
-            let dir = std::path::Path::new(".");
+            let dir = self.mmap_dir.as_path();
             let p = self.player_id;
 
             fn vec_to_mmap<T: Copy + Default + bytemuck::Pod>(
@@ -459,7 +548,7 @@ impl CompactCfrState {
     /// Get the regret value for action `i` at the given entry.
     #[inline(always)]
     pub fn regret(&self, entry: &CompactEntry, i: usize) -> f32 {
-        self.regret_arena.get(entry.regret_offset as usize + i) as f32
+        self.regret_arena.get(entry.regret_offset as usize + i)
     }
 
     /// Get the strategy sum for action `i` at the given entry.
@@ -468,19 +557,19 @@ impl CompactCfrState {
         self.strategy_arena.get(entry.strategy_offset as usize + i)
     }
 
-    /// Add a delta to regret for action `i`. Clamps to i16 range.
+    /// Add a delta to regret for action `i`. f32 storage — no clamping.
     #[inline(always)]
     pub fn add_regret(&mut self, entry: &CompactEntry, i: usize, delta: f32) {
         let idx = entry.regret_offset as usize + i;
-        let new = (self.regret_arena.get(idx) as f32 + delta) as i32;
-        self.regret_arena.set(idx, new.clamp(-32767, 32767) as i16);
+        let new = self.regret_arena.get(idx) + delta;
+        self.regret_arena.set(idx, new);
     }
 
-    /// Set regret for action `i`. Clamps to i16 range.
+    /// Set regret for action `i`. f32 storage — no clamping.
     #[inline(always)]
     pub fn set_regret(&mut self, entry: &CompactEntry, i: usize, v: f32) {
         let idx = entry.regret_offset as usize + i;
-        self.regret_arena.set(idx, (v as i32).clamp(-32767, 32767) as i16);
+        self.regret_arena.set(idx, v);
     }
 
     /// Add a delta to strategy sum for action `i`. Direct f32 add — no clamping.
@@ -497,10 +586,12 @@ impl CompactCfrState {
         self.strategy_arena.set(entry.strategy_offset as usize + i, v);
     }
 
-    /// Halve all regrets in the arena.
+    /// Halve all regrets in the arena. With f32 storage this is rarely
+    /// needed (no saturation) but kept for backward-compat with DCFR-style
+    /// periodic discounting.
     pub fn halve_regrets(&mut self) {
         for r in self.regret_arena.iter_mut() {
-            *r /= 2;
+            *r *= 0.5;
         }
     }
 
@@ -525,10 +616,10 @@ impl CompactCfrState {
         if let Some(&entry) = self.index.get(&key) {
             return entry;
         }
-        let regret_offset = self.regret_arena.len() as u32;
-        let strategy_offset = self.strategy_arena.len() as u32;
+        let regret_offset = self.regret_arena.len() as u64;
+        let strategy_offset = self.strategy_arena.len() as u64;
         let n = n_actions as usize;
-        self.regret_arena.resize(self.regret_arena.len() + n, 0i16);
+        self.regret_arena.resize(self.regret_arena.len() + n, 0.0f32);
         self.strategy_arena.resize(self.strategy_arena.len() + n, 0.0f32);
         let entry = CompactEntry {
             regret_offset,
@@ -560,9 +651,9 @@ impl CompactCfrState {
                         let n = layer.n_actions.get(slot) as usize;
                         let base = layer.offsets.get(slot) as usize;
                         for i in 0..n {
-                            let r = self.regret_arena.get(base + i) as f32;
+                            let r = self.regret_arena.get(base + i);
                             let w = if r >= 0.0 { pos_factor } else { neg_factor };
-                            self.regret_arena.set(base + i, ((r * w as f32) as i32).clamp(-32767, 32767) as i16);
+                            self.regret_arena.set(base + i, r * w as f32);
                         }
                         for i in 0..n {
                             let old = self.strategy_arena.get(base + i);
@@ -589,9 +680,9 @@ impl CompactCfrState {
                 let r_base = entry.regret_offset as usize;
                 let s_base = entry.strategy_offset as usize;
                 for i in 0..n {
-                    let r = self.regret_arena[r_base + i] as f32;
+                    let r = self.regret_arena[r_base + i];
                     let w = if r >= 0.0 { pos_factor } else { neg_factor };
-                    self.regret_arena[r_base + i] = ((r * w as f32) as i32).clamp(-32767, 32767) as i16;
+                    self.regret_arena[r_base + i] = r * w as f32;
                 }
                 for i in 0..n {
                     self.strategy_arena[s_base + i] *= strat_factor as f32;
@@ -602,10 +693,10 @@ impl CompactCfrState {
         }
 
         // New entry (into HashMap)
-        let regret_offset = self.regret_arena.len() as u32;
-        let strategy_offset = self.strategy_arena.len() as u32;
+        let regret_offset = self.regret_arena.len() as u64;
+        let strategy_offset = self.strategy_arena.len() as u64;
         let n = n_actions as usize;
-        self.regret_arena.resize(self.regret_arena.len() + n, 0i16);
+        self.regret_arena.resize(self.regret_arena.len() + n, 0.0f32);
         self.strategy_arena.resize(self.strategy_arena.len() + n, 0.0f32);
         let entry = CompactEntry {
             regret_offset,
@@ -740,12 +831,11 @@ pub fn apply_dcfr_discount(
         let n = entry.n_actions as usize;
         let r_base = entry.regret_offset as usize;
         let s_base = entry.strategy_offset as usize;
-        // Discount regrets (i16)
+        // Discount regrets (f32)
         for i in 0..n {
-            let r = state.regret_arena[r_base + i] as f32;
+            let r = state.regret_arena[r_base + i];
             let w = if r >= 0.0 { pos_weight } else { neg_weight };
-            let new = (r * w) as i32;
-            state.regret_arena[r_base + i] = new.clamp(-32767, 32767) as i16;
+            state.regret_arena[r_base + i] = r * w;
         }
         // Discount strategy sums (f32)
         for i in 0..n {
@@ -760,7 +850,7 @@ pub fn average_strategy(state: &CompactCfrState) -> FxHashMap<u64, Vec<f32>> {
     let mut result = FxHashMap::with_capacity_and_hasher(state.len(), Default::default());
 
     // Helper to normalize one entry's strategy sums
-    let mut add_entry = |key: u64, n_actions: u8, strategy_offset: u32| {
+    let mut add_entry = |key: u64, n_actions: u8, strategy_offset: u64| {
         let n = n_actions as usize;
         let base = strategy_offset as usize;
         let mut total: f32 = 0.0;
@@ -798,24 +888,58 @@ pub fn average_strategy(state: &CompactCfrState) -> FxHashMap<u64, Vec<f32>> {
 
 /// Merge src CompactCfrState into dst by summing all regret and strategy entries.
 pub fn merge_compact_state(dst: &mut CompactCfrState, src: &CompactCfrState) {
-    for (&key, src_entry) in &src.index {
-        let n = src_entry.n_actions as usize;
-        let src_r_base = src_entry.regret_offset as usize;
-        let src_s_base = src_entry.strategy_offset as usize;
-
-        let dst_entry = dst.find_or_add(key, src_entry.n_actions);
+    // Helper: merge one entry's regret + strategy slices from src into dst.
+    // For frozen entries, regret_offset == strategy_offset (parallel layouts);
+    // for overflow HashMap entries, the two offsets are independent.
+    fn merge_one(
+        dst: &mut CompactCfrState,
+        src: &CompactCfrState,
+        key: u64,
+        n_actions: u8,
+        src_r_base: u64,
+        src_s_base: u64,
+    ) {
+        let n = n_actions as usize;
+        let dst_entry = dst.find_or_add(key, n_actions);
         let dst_r_base = dst_entry.regret_offset as usize;
         let dst_s_base = dst_entry.strategy_offset as usize;
+        let src_r = src_r_base as usize;
+        let src_s = src_s_base as usize;
+        for i in 0..n {
+            dst.regret_arena[dst_r_base + i] += src.regret_arena[src_r + i];
+        }
+        for i in 0..n {
+            dst.strategy_arena[dst_s_base + i] += src.strategy_arena[src_s + i];
+        }
+    }
 
-        // Sum regrets (i16, clamped)
-        for i in 0..n {
-            let new = dst.regret_arena[dst_r_base + i] as i32 + src.regret_arena[src_r_base + i] as i32;
-            dst.regret_arena[dst_r_base + i] = new.clamp(-32767, 32767) as i16;
+    // Frozen layers: iterate every slot. regret_offset == strategy_offset.
+    if let Some(ref frozen) = src.frozen {
+        for layer in &frozen.layers {
+            for slot in 0..layer.len() {
+                let off = layer.offsets.get(slot);
+                merge_one(
+                    dst,
+                    src,
+                    layer.keys.get(slot),
+                    layer.n_actions.get(slot),
+                    off,
+                    off,
+                );
+            }
         }
-        // Sum strategy sums (f32, no clamping)
-        for i in 0..n {
-            dst.strategy_arena[dst_s_base + i] += src.strategy_arena[src_s_base + i];
-        }
+    }
+
+    // Overflow HashMap entries.
+    for (&key, src_entry) in &src.index {
+        merge_one(
+            dst,
+            src,
+            key,
+            src_entry.n_actions,
+            src_entry.regret_offset,
+            src_entry.strategy_offset,
+        );
     }
 }
 
