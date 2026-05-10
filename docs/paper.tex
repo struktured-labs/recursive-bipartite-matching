@@ -896,22 +896,52 @@ $k$ & RBM Error & EMD Error & Improvement & Winner \\
 Table~\ref{tab:nl-200bb-preflop} shows the 200bb deep-stack results.
 RBM dominates at fine-grained compression (60\% less error at
 $k{=}25$, 40\% at $k{=}15$) but loses at coarser compression
-($k \le 10$). Two notes are in order. First, the EMD advantage at
-coarse compression reflects a limitation of the experimental setup:
-the showdown-distribution trees used for tractable pairwise RBM
-distance (${\sim}$161 nodes) do not fully capture the structural
-variation of the 186{,}174-node game tree. The 200bb results in this
-table should therefore be read as a lower bound on what full-tree RBM
-would achieve at this stack depth---the headline 5--0 framing we use
-elsewhere does \emph{not} apply here, and we do not claim it.
-Second, the non-monotonic pattern (RBM wins at fine $k$, loses at
-coarse $k$) is consistent with the abstraction-pathology phenomenon
-documented by \citet{waugh2009abstraction}: a more refined abstraction
-can produce a worse-playing strategy, depending on how the
-coarse-graining interacts with the underlying game's strategic
-structure. We flag this rather than wave it away, because it is the
-kind of pattern an exploitability-aware evaluation
-(\citealt{johanson2013evaluating}) is best suited to disentangle.
+($k \le 10$). Two effects compound to produce this asymmetry, and we
+discuss each rather than collapse them into a single ``experimental
+limitation.''
+
+\paragraph{Tree-proxy effect.} Pairwise RBM at 200bb is computed on
+showdown-distribution trees (${\sim}$161 nodes) as a tractable proxy
+for the 186{,}174-node game tree. The proxy preserves leaf payoff
+information but coarsens the branching structure that RBM is designed
+to exploit. The table should therefore be read as a lower bound on
+what full-tree RBM would achieve at this stack depth---the headline
+5--0 framing we use elsewhere does \emph{not} apply here, and we do
+not claim it. Full-tree RBM at 200bb via approximate matching
+(\citealt{cuturi2013sinkhorn}, learned embeddings) is queued as the
+direct fix; see Section~\ref{sec:conclusion}.
+
+\paragraph{Abstraction pathology.} Even with that caveat, the
+non-monotonic pattern---RBM wins at fine $k$, loses at coarse
+$k$---is exactly the empirical signature of the
+\emph{abstraction-pathology} phenomenon documented by
+\citet{waugh2009abstraction}, and we believe the second effect is at
+work here independently of the first. Waugh et al.\ show, in Leduc
+and small Hold'em variants, that a strictly more refined abstraction
+can produce a strictly worse-playing strategy than a coarser one,
+because the additional resolution magnifies whichever signal the
+abstraction uses---right or wrong---rather than monotonically
+reducing solution error. In our 200bb table, the four EMD rows at
+$k \le 10$ are nearly flat at $0.42$--$0.58$ while the RBM column
+\emph{degrades} from $0.17$ to $0.62$ as resolution decreases. That
+is not a story of RBM being beaten by EMD; it is a story of RBM
+losing to a coarsened version of itself. The same pattern would
+predict that a Johanson--et al.--style exploitability evaluation
+(\citealt{johanson2013evaluating}) of RBM-trained strategies would
+show non-monotonic exploitability in $k$, with the minimum at
+intermediate resolution. We have not run that evaluation; the
+prediction is testable and is the cleanest follow-up. Concretely:
+train MCCFR to convergence on the RBM and EMD abstractions at each
+$k$ in this table, lift each resulting strategy back to the full
+186{,}174-node game tree, and compute best-response exploitability
+either directly (the lifted game is small enough for the
+\citet{johanson2013evaluating} protocol) or via a Slumbot-style match
+against a fixed strong opponent. If the EV-error column predicts
+the exploitability column---i.e.\ if RBM's fine-$k$ wins survive
+lift-back and coarse-$k$ losses persist---then EV-error is doing
+its job as a proxy. If the columns disagree, we have learned
+something about where the proxy breaks, which is itself a more
+substantive contribution than a uniform-$k$ headline.
 
 \subsection{No-Limit Hold'em: MCCFR Head-to-Head}
 
@@ -1098,18 +1128,67 @@ not yet report exploitability, the gold-standard evaluation
 established by \citet{johanson2013evaluating}; closing that gap is the
 clearest follow-up.
 
-Several directions for future work remain.
-\emph{Exploitability evaluation along
-\citet{johanson2013evaluating}:} the most important missing piece is
-a direct exploitability measurement of RBM-induced strategies, which
-would (a)~test whether the abstraction-quality EV-error advantage
-predicts a tighter exploitability bound, and (b)~detect any
-abstraction-pathology behaviour~\citep{waugh2009abstraction} that the
-EV-error metric does not surface.
-\emph{Tighter EV-to-exploitability bridge:} extending
-Theorem~\ref{thm:ev-error} into a Kroer--Sandholm-style
-exploitability bound (cf.\ Remark~\ref{rem:ev-vs-expl}) is the natural
-theoretical follow-up.
+The clearest follow-up is an
+exploitability-based evaluation along the lines of
+\citet{johanson2013evaluating}, and we describe it in enough detail
+that it can be read as a concrete commitment rather than a hedge.
+The Johanson--et al.\ protocol asks not ``what is the in-abstraction
+exploitability of the solved strategy'' (which is misleading: a
+coarse abstraction can have low in-abstraction exploitability while
+the lifted strategy is catastrophically exploitable in the full
+game), but rather ``what is the full-game exploitability of the
+strategy obtained by solving the abstract game and lifting back.''
+For our setting the concrete experiment is:
+
+\begin{enumerate}[nosep]
+\item For each $k$ in Tables~\ref{tab:nl-preflop} and
+  \ref{tab:nl-200bb-preflop}, train MCCFR to convergence on both the
+  RBM and EMD preflop abstractions at that $k$. ``To convergence''
+  is operationalised as: average utility stable to within $\pm
+  0.1\,\mathrm{bb/h}$ over the final 10\% of iterations, with a
+  minimum of $10\,K$ iterations per info set.
+\item Lift each solved abstract strategy back to the full 2,988-node
+  (20bb) or 186{,}174-node (200bb) game tree via the natural
+  bucket-to-node map.
+\item Compute best-response exploitability against each lifted
+  strategy. At 20bb the lifted game is small enough for direct
+  best-response solution; at 200bb, a Slumbot-style match against a
+  fixed strong opponent serves as a finite-sample
+  exploitability proxy (the same approach used in modern
+  benchmarks~\citep{brown2018superhuman}).
+\item Report exploitability \emph{as a function of $k$} for each
+  metric, alongside the EV-error column already in the abstraction
+  tables.
+\end{enumerate}
+
+This experiment has three diagnostic outputs. First, does the
+EV-error advantage at fine $k$ predict a corresponding exploitability
+advantage? If yes, the leaf-mean EV-error metric introduced in
+Section~\ref{sec:merge} is doing its job as a tractable proxy for
+the gold-standard metric. Second, does the abstraction-pathology
+prediction hold? RBM's EV-error degrades non-monotonically with $k$
+on 200bb (cf.\ Section~\ref{sec:experiments-nl}); the corresponding
+exploitability curve should show the same non-monotonicity, with the
+minimum at intermediate $k$. Third, does the coarse-$k$ failure
+mode on 200bb persist under full-tree RBM, or is it driven by the
+showdown-distribution proxy? The combination of these three outputs
+either validates the central thesis (RBM produces tighter
+abstractions in the sense that matters) or pinpoints where it fails,
+which is itself the more useful contribution. Our existing
+Slumbot-evaluation infrastructure handles step~3 directly, so the
+cost of running the experiment is dominated by the to-convergence
+training in step~1, not by new tooling.
+
+\emph{Tighter EV-to-exploitability bridge.} The theoretical
+counterpart of the exploitability experiment above is to extend
+Theorem~\ref{thm:ev-error} into a Kroer--Sandholm-style bound on
+abstraction-induced exploitability (cf.\
+Remark~\ref{rem:ev-vs-expl}). The empirical exploitability curve
+serves as the validation target: a tight bound should be tight
+exactly where the empirical exploitability is low, and slack exactly
+where the abstraction-pathology asymmetry shows up.
+
+\paragraph{Other directions.}
 \emph{Adequate training at 200bb:} with ${\sim}$1M info sets, the
 200bb game needs 500K+ MCCFR iterations for a non-noise head-to-head
 read.
