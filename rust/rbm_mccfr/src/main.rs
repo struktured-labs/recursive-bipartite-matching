@@ -224,7 +224,7 @@ fn print_help() {
     eprintln!("  --prune-threshold F  Prune threshold (default: -3e8)");
     eprintln!("  --bucket-method M    Bucketing method: 'rbm' (default) or 'equity'");
     eprintln!("  --rbm-epsilon F      RBM cluster epsilon (default: 0.5)");
-    eprintln!("  --regret-scale-every N  Halve regrets every N iters to prevent i16 saturation (default: 1000000, 0 = off)");
+    eprintln!("  --regret-scale-every N  Halve regrets every N iters (DCFR-like discounting; default: 1000000, 0 = off)");
     eprintln!();
     eprintln!("Slumbot play options:");
     eprintln!("  --play N             Play N hands against Slumbot after training");
@@ -373,7 +373,7 @@ fn main() {
         BucketMethod::Equity => format!("equity ({} buckets)", cli.train_config.n_buckets),
     };
 
-    eprintln!("=== RBM-MCCFR Training (compact i16 storage) ===");
+    eprintln!("=== RBM-MCCFR Training (compact f32 storage) ===");
     eprintln!("Game:       {}/{} blinds, {} stack, {} bet fracs, max {} raises",
         cli.game_config.small_blind, cli.game_config.big_blind,
         cli.game_config.starting_stack,
@@ -427,7 +427,7 @@ fn main() {
             train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, Some((&loaded, iter)), resume_postflop)
         }
     } else if cli.num_threads > 1 {
-        train::train_mccfr_parallel(&cli.game_config, &cli.train_config, &cli.assignments, cli.num_threads)
+        train::train_mccfr_parallel(&cli.game_config, &cli.train_config, &cli.assignments, cli.num_threads, None)
     } else {
         train::train_mccfr(&cli.game_config, &cli.train_config, &cli.assignments, None, None)
     };
@@ -436,11 +436,11 @@ fn main() {
 
     eprintln!();
     eprintln!("Training complete in {:.1}s", elapsed.as_secs_f64());
-    eprintln!("P0: {} info sets ({} i16 regrets, {} f32 strats)", states[0].len(), states[0].regret_arena.len(), states[0].strategy_arena.len());
-    eprintln!("P1: {} info sets ({} i16 regrets, {} f32 strats)", states[1].len(), states[1].regret_arena.len(), states[1].strategy_arena.len());
+    eprintln!("P0: {} info sets ({} f32 regrets, {} f32 strats)", states[0].len(), states[0].regret_arena.len(), states[0].strategy_arena.len());
+    eprintln!("P1: {} info sets ({} f32 regrets, {} f32 strats)", states[1].len(), states[1].regret_arena.len(), states[1].strategy_arena.len());
 
     // Memory estimate
-    let regret_bytes = (states[0].regret_arena.len() + states[1].regret_arena.len()) * 2; // i16 = 2 bytes
+    let regret_bytes = (states[0].regret_arena.len() + states[1].regret_arena.len()) * 4; // f32 = 4 bytes
     let strategy_bytes = (states[0].strategy_arena.len() + states[1].strategy_arena.len()) * 4; // f32 = 4 bytes
     let index_bytes = (states[0].len() + states[1].len()) * 24; // ~24 bytes per hashmap entry
     let total_mb = (regret_bytes + strategy_bytes + index_bytes) as f64 / 1024.0 / 1024.0;

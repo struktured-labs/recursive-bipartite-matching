@@ -253,6 +253,18 @@ pub fn mccfr_traverse(
             // Entry was already lazily discounted above; no need to discount again.
             // find_or_add returns a Copy handle (CompactEntry).
             let entry = cfr_st.find_or_add(key, na);
+            // A cached entry's n_actions must match the current call's na.
+            // Mismatch would indicate either bucket-method change mid-resume
+            // or a key-collision bug in the info-set encoder; either way,
+            // the next `accumulate_strategy` indexes `strat[..num_actions]`
+            // while iterating `entry.n_actions` and silently writes past
+            // the entry's slot when entry.n_actions > num_actions, or skips
+            // legitimate updates when entry.n_actions < num_actions.
+            debug_assert_eq!(
+                entry.n_actions, na,
+                "traversal: n_actions mismatch for key {} (cached={}, requested={})",
+                key, entry.n_actions, na,
+            );
 
             // Accumulate strategy (with LCFR weighting)
             compact_state::accumulate_strategy(cfr_st, &entry, &strat[..num_actions], 1.0, lcfr_iter);
@@ -275,7 +287,31 @@ pub fn mccfr_traverse(
 
         node_value
     } else {
-        // Opponent: sample one action from strategy
+        // Opponent: accumulate THEIR strategy (canonical external-sampling MCCFR
+        // — every player adds their current strategy to strategy_sum at every
+        // info-set they visit, regardless of who the traverser is) then sample
+        // one action and recurse. Without this, the averaged strategy is built
+        // from only the iterations where this player is the traverser (~half),
+        // which slows convergence to Nash and degrades real-game performance.
+        // OCaml `compact_cfr.ml:978` does this; Rust was missing it.
+        {
+            let cfr_st = &mut cfr_states[player as usize];
+            let entry = cfr_st.find_or_add(key, na);
+            // A cached entry's n_actions must match the current call's na.
+            // Mismatch would indicate either bucket-method change mid-resume
+            // or a key-collision bug in the info-set encoder; either way,
+            // the next `accumulate_strategy` indexes `strat[..num_actions]`
+            // while iterating `entry.n_actions` and silently writes past
+            // the entry's slot when entry.n_actions > num_actions, or skips
+            // legitimate updates when entry.n_actions < num_actions.
+            debug_assert_eq!(
+                entry.n_actions, na,
+                "traversal: n_actions mismatch for key {} (cached={}, requested={})",
+                key, entry.n_actions, na,
+            );
+            compact_state::accumulate_strategy(cfr_st, &entry, &strat[..num_actions], 1.0, lcfr_iter);
+        }
+
         let r: f32 = rng.gen();
         let mut cumulative = 0.0f32;
         let mut chosen = num_actions - 1;

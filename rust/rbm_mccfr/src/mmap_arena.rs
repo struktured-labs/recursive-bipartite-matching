@@ -108,6 +108,15 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
     }
 
     /// Grow the arena to hold at least `new_len` elements, zero-filling new space.
+    ///
+    /// Durability note: after `set_len` extends the backing file, we sync the
+    /// inode metadata before remapping. Without this, a crash between extend
+    /// and the next OS writeback could leave a sparse file whose `metadata.len`
+    /// is "extended" but whose pages are unwritten — `open_existing` would
+    /// then infer `len = capacity` and treat zero-filled tail pages as valid
+    /// arena entries. The companion `len.bin` header (written on flush) is
+    /// the canonical length record; this sync just makes the file's apparent
+    /// size durable.
     pub fn resize(&mut self, new_len: usize, _fill: T) -> io::Result<()> {
         if new_len <= self.len {
             self.len = new_len;
@@ -119,6 +128,9 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
             let new_cap = (self.capacity * 2).max(new_len).max(1024);
             let byte_cap = new_cap * std::mem::size_of::<T>();
             self.file.set_len(byte_cap as u64)?;
+            // Make the extension durable before exposing it via mmap. Cost is
+            // a single fsync on a metadata-only change — cheap on modern FSs.
+            self.file.sync_all()?;
             // Remap
             self.mmap = unsafe { MmapMut::map_mut(&self.file)? };
             self.capacity = new_cap;
@@ -129,6 +141,16 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
         Ok(())
     }
 
+    /// Path to the sidecar file that records `self.len` durably. Used by
+    /// `flush_with_len` and `open_existing` so the on-disk arena length is
+    /// authoritative regardless of `metadata.len()` (which only reflects the
+    /// allocated capacity).
+    fn len_sidecar_path(&self) -> PathBuf {
+        let mut p = self.path.as_os_str().to_owned();
+        p.push(".len");
+        PathBuf::from(p)
+    }
+
     /// Iterate mutably over all elements.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.as_mut_slice().iter_mut()
@@ -136,7 +158,14 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
 
     /// Flush dirty pages to disk.
     pub fn flush(&self) -> io::Result<()> {
-        self.mmap.flush()
+        self.mmap.flush()?;
+        // Persist the canonical `len` so `open_existing` doesn't have to infer
+        // it from file size (which is the *capacity*, not the live length).
+        // Pre-fix, a crashed `resize` could leave file_size > 0 with no
+        // corresponding entries — recovery would silently expand `len` to
+        // capacity and treat zero pages as valid info-set data.
+        std::fs::write(self.len_sidecar_path(), (self.len as u64).to_le_bytes())?;
+        Ok(())
     }
 
     /// Raw byte access for Index trait.
@@ -154,12 +183,92 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Open an existing mmap-backed arena file without truncating.
+    ///
+    /// Length resolution: prefer the `.len` sidecar (canonical, written by
+    /// `flush`) over `file_size / sizeof(T)`. The latter is only the file's
+    /// allocated capacity — it includes any tail pages from a crashed
+    /// `resize` that were extended but never populated. Trusting that as
+    /// `len` would silently surface zero-filled entries as live info sets.
+    /// If the sidecar is missing (e.g. an arena written before this fix),
+    /// fall back to file-size inference and warn so the operator can decide
+    /// whether to trust the recovery.
+    pub fn open_existing(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let elem_size = std::mem::size_of::<T>();
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+
+        let file_size = file.metadata()?.len() as usize;
+        if file_size % elem_size != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("file size {} not a multiple of sizeof(T)={}", file_size, elem_size),
+            ));
+        }
+        let capacity = file_size / elem_size;
+
+        let mut len_sidecar = path.as_os_str().to_owned();
+        len_sidecar.push(".len");
+        let len_sidecar = PathBuf::from(len_sidecar);
+
+        let n = match std::fs::read(&len_sidecar) {
+            Ok(bytes) if bytes.len() == 8 => {
+                let recorded = u64::from_le_bytes(bytes.as_slice().try_into().unwrap()) as usize;
+                if recorded > capacity {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{:?}: .len sidecar records {} elements but file capacity is only {}",
+                            path, recorded, capacity
+                        ),
+                    ));
+                }
+                recorded
+            }
+            Ok(_) | Err(_) => {
+                eprintln!(
+                    "[mmap] {:?}: .len sidecar missing or malformed; falling back to file_size/sizeof — \
+                     this trusts that no resize() was interrupted",
+                    path
+                );
+                capacity
+            }
+        };
+        let mmap = unsafe { MmapMut::map_mut(&file)? };
+
+        #[cfg(unix)]
+        unsafe {
+            libc::madvise(
+                mmap.as_ptr() as *mut libc::c_void,
+                file_size,
+                libc::MADV_RANDOM,
+            );
+        }
+
+        Ok(Self {
+            path,
+            file,
+            mmap,
+            len: n,
+            capacity,
+            _phantom: std::marker::PhantomData,
+        })
+    }
 }
 
 impl<T: Copy + Default + bytemuck::Pod> Drop for MmapArena<T> {
     fn drop(&mut self) {
-        // Flush on drop (best-effort)
+        // Best-effort flush + len sidecar persist on drop. If the process is
+        // already unwinding from a panic, recording the current len here
+        // means the next process-start sees the right boundary instead of
+        // re-treating extended-but-unwritten tail pages as valid entries.
         let _ = self.mmap.flush();
+        let _ = std::fs::write(self.len_sidecar_path(), (self.len as u64).to_le_bytes());
     }
 }
 

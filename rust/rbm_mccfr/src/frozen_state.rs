@@ -33,10 +33,10 @@ pub struct FrozenCfrState {
     /// Per-slot metadata (flat arrays indexed by MPHF slot).
     n_actions: Vec<u8>,
     epochs: Vec<u16>,
-    arena_offsets: Vec<u32>,
+    arena_offsets: Vec<u64>,
 
-    /// Regret arena (i16), compacted in MPHF slot order.
-    pub regret_arena: Vec<i16>,
+    /// Regret arena (f32), compacted in MPHF slot order.
+    pub regret_arena: Vec<f32>,
     /// Strategy arena (f32), compacted in MPHF slot order.
     pub strategy_arena: Vec<f32>,
 
@@ -82,15 +82,15 @@ impl FrozenCfrState {
 
         // Compute arena offsets via prefix sum of n_actions
         let mut arena_offsets = Vec::with_capacity(n);
-        let mut offset = 0u32;
+        let mut offset = 0u64;
         for &na in &n_actions_arr {
             arena_offsets.push(offset);
-            offset += na as u32;
+            offset += na as u64;
         }
         debug_assert_eq!(offset as usize, total_actions);
 
         // Compact arenas in MPHF slot order
-        let mut regrets = vec![0i16; total_actions];
+        let mut regrets = vec![0.0f32; total_actions];
         let mut strategies = vec![0.0f32; total_actions];
 
         for (&key, &entry) in &old.index {
@@ -196,9 +196,9 @@ impl FrozenCfrState {
         let base = self.arena_offsets[slot] as usize;
 
         for i in 0..n {
-            let r = self.regret_arena[base + i] as f32;
+            let r = self.regret_arena[base + i];
             let w = if r >= 0.0 { pos_factor } else { neg_factor };
-            self.regret_arena[base + i] = ((r * w as f32) as i32).clamp(-32767, 32767) as i16;
+            self.regret_arena[base + i] = r * w as f32;
         }
         for i in 0..n {
             self.strategy_arena[base + i] *= strat_factor as f32;
@@ -210,9 +210,8 @@ impl FrozenCfrState {
     #[inline(always)]
     pub fn regret(&self, entry: &FrozenEntry, i: usize) -> f32 {
         let idx = entry.regret_offset as usize + i;
-        // If offset is in frozen range, use frozen arena; else overflow
         if idx < self.regret_arena.len() {
-            self.regret_arena[idx] as f32
+            self.regret_arena[idx]
         } else {
             self.overflow.regret(entry, i)
         }
@@ -223,8 +222,7 @@ impl FrozenCfrState {
     pub fn add_regret(&mut self, entry: &FrozenEntry, i: usize, delta: f32) {
         let idx = entry.regret_offset as usize + i;
         if idx < self.regret_arena.len() {
-            let new = (self.regret_arena[idx] as f32 + delta) as i32;
-            self.regret_arena[idx] = new.clamp(-32767, 32767) as i16;
+            self.regret_arena[idx] += delta;
         } else {
             self.overflow.add_regret(entry, i, delta);
         }
@@ -235,7 +233,7 @@ impl FrozenCfrState {
     pub fn set_regret(&mut self, entry: &FrozenEntry, i: usize, v: f32) {
         let idx = entry.regret_offset as usize + i;
         if idx < self.regret_arena.len() {
-            self.regret_arena[idx] = (v as i32).clamp(-32767, 32767) as i16;
+            self.regret_arena[idx] = v;
         } else {
             self.overflow.set_regret(entry, i, v);
         }
@@ -266,7 +264,7 @@ impl FrozenCfrState {
     /// Halve all regrets (both frozen and overflow arenas).
     pub fn halve_regrets(&mut self) {
         for r in self.regret_arena.iter_mut() {
-            *r /= 2;
+            *r *= 0.5;
         }
         self.overflow.halve_regrets();
     }

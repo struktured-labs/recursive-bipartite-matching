@@ -136,6 +136,12 @@ pub fn load_compact_for_play(path: &Path) -> std::io::Result<[CompactCfrState; 2
 
 /// Auto-detect checkpoint format and load as PlayStrategy.
 /// RBMCMP02/RBMCMP01 -> Compact (memory-efficient), RBMRUST1 -> Full (averaged strategy).
+///
+/// If `path` is next to `frozen_keys_p*_L*.bin` sidecar files (i.e. the training
+/// directory is still intact), reconstructs the full CompactCfrState from the
+/// on-disk mmap + frozen-layer files directly. This recovers the strategy that
+/// would otherwise be silently truncated by the RBMCMP02 format's missing
+/// frozen-layer serialization.
 pub fn load_play_strategy(path: &Path) -> std::io::Result<PlayStrategy> {
     // Read magic header to detect format
     let mut file = std::fs::File::open(path)?;
@@ -143,9 +149,70 @@ pub fn load_play_strategy(path: &Path) -> std::io::Result<PlayStrategy> {
     std::io::Read::read_exact(&mut file, &mut magic)?;
     drop(file);
 
-    if &magic == b"RBMCMP02" || &magic == b"RBMCMP01" {
-        eprintln!("Detected compact checkpoint ({}) -- playing directly from compact state",
-            std::str::from_utf8(&magic).unwrap_or("???"));
+    if &magic == b"RBMCMP04" || &magic == b"RBMCMP03" || &magic == b"RBMCMP02" || &magic == b"RBMCMP01" {
+        // If the checkpoint is inside a training directory that still has the
+        // sidecar mmap + frozen-layer files, reconstruct directly from those.
+        // The compact checkpoint format alone is insufficient: it only serializes
+        // the overflow HashMap, omitting all frozen MPHF layers (which hold >99%
+        // of info sets in a converged run).
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let sidecars_present = dir.join("regret_p0.bin").exists()
+            && dir.join("strategy_p0.bin").exists()
+            && dir.join("frozen_keys_p0_L0.bin").exists();
+
+        if sidecars_present {
+            eprintln!("Detected compact checkpoint ({}) with sidecar mmap + frozen layers in {:?} -- reconstructing full state from training directory",
+                std::str::from_utf8(&magic).unwrap_or("???"), dir);
+            let s0 = crate::compact_state::CompactCfrState::load_from_dir(dir, 0)?;
+            let s1 = crate::compact_state::CompactCfrState::load_from_dir(dir, 1)?;
+            eprintln!("Reconstructed from training dir: P0={} P1={} info sets",
+                s0.len(), s1.len());
+            return Ok(PlayStrategy::Compact([s0, s1]));
+        }
+
+        // No sidecars on disk. The checkpoint file alone never contains the
+        // frozen MPHF layers — it only carries the overflow HashMap, which
+        // is <1% of info sets in any run that was frozen at all (i.e. any
+        // run long enough to matter). Loading sidecar-less means uniform
+        // random play for >99% of postflop info sets, which silently
+        // produced "successful" Slumbot evals that were measuring nothing.
+        // Refuse the load by default. Opt-in via env var for the rare case
+        // where the user is intentionally playing a never-frozen short run
+        // (e.g. unit tests, < freeze_after iters).
+        if &magic == b"RBMCMP03" || &magic == b"RBMCMP04" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} checkpoint requires sidecar files (regret_p*.bin, strategy_p*.bin, frozen_keys_p*_L0.bin) in the same directory",
+                    std::str::from_utf8(&magic).unwrap_or("???")),
+            ));
+        }
+
+        let allow = std::env::var("RBM_ALLOW_NO_FROZEN")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+        if !allow {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} checkpoint at {:?} has NO sidecar frozen layers in {:?}. \
+                     Loading would silently fall back to uniform-random play for \
+                     >99% of postflop info sets (the frozen MPHF layers hold the \
+                     trained strategy). Refusing. \
+                     Set RBM_ALLOW_NO_FROZEN=1 to override (e.g. for a never-frozen \
+                     short run); otherwise, copy the training dir's mmap + \
+                     frozen_keys_p*_L*.bin sidecars next to the checkpoint.",
+                    std::str::from_utf8(&magic).unwrap_or("???"),
+                    path, dir,
+                ),
+            ));
+        }
+
+        eprintln!(
+            "WARNING: loading compact checkpoint ({}) WITHOUT frozen layers \
+             (RBM_ALLOW_NO_FROZEN=1). Strategy is uniform-random for any info \
+             set that was frozen during training.",
+            std::str::from_utf8(&magic).unwrap_or("???")
+        );
         let states = load_compact_for_play(path)?;
         Ok(PlayStrategy::Compact(states))
     } else if &magic == b"RBMRUST1" {

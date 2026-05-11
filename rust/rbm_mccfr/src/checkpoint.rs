@@ -57,7 +57,9 @@ use crate::cfr_state::{self, CfrState};
 use crate::compact_state::{CompactCfrState, CompactEntry};
 
 const MAGIC: &[u8; 8] = b"RBMRUST1";
-const MAGIC_COMPACT_RAW: &[u8; 8] = b"RBMCMP02";
+const MAGIC_COMPACT_RAW: &[u8; 8] = b"RBMCMP04";
+const MAGIC_COMPACT_RAW_V3: &[u8; 8] = b"RBMCMP03";
+const MAGIC_COMPACT_RAW_V2: &[u8; 8] = b"RBMCMP02";
 const MAGIC_COMPACT_RAW_V1: &[u8; 8] = b"RBMCMP01";
 
 // -----------------------------------------------------------------------
@@ -278,12 +280,21 @@ pub fn load_raw_states(path: &Path) -> io::Result<([CfrState; 2], u64)> {
 /// Save compact CFR states (split arenas: i16 regrets + f32 strategy) for resume.
 ///
 /// Format: RBMCMP02 + iteration + per-player { n_entries, regret_arena, strategy_arena, entries[] }
+///
+/// Atomicity: writes to `<path>.tmp`, fsyncs, then atomically renames into
+/// place. A crash mid-write leaves the previous good checkpoint intact;
+/// pre-fix, a Hostkey reboot mid-save corrupted the live checkpoint to a
+/// torn file that parsed but had wrong offsets.
 pub fn save_compact_raw_states(
     path: &Path,
     states: &[CompactCfrState; 2],
     iteration: u64,
 ) -> io::Result<()> {
-    let file = File::create(path)?;
+    let mut tmp_path = path.as_os_str().to_owned();
+    tmp_path.push(".tmp");
+    let tmp_path = std::path::PathBuf::from(tmp_path);
+
+    let file = File::create(&tmp_path)?;
     let mut w = BufWriter::new(file);
 
     w.write_all(MAGIC_COMPACT_RAW)?;
@@ -320,6 +331,15 @@ pub fn save_compact_raw_states(
     }
 
     w.flush()?;
+    // fsync the file so the rename's new inode pointer is durable. Without
+    // this, the rename can land while the file's data pages are still
+    // dirty in the page cache; a power-loss after rename leaves a zero-
+    // length live checkpoint that parses as "0 entries."
+    let inner = w.into_inner().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    inner.sync_all()?;
+    drop(inner);
+
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
@@ -350,24 +370,43 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
 
     let mut states = [CompactCfrState::new(100_000), CompactCfrState::new(100_000)];
 
+    // Sanity ceiling on header-declared arena lengths. A torn header can
+    // surface a `regret_arena_len` like 0xFFFF_FFFF_FFFF_FFFF; without this
+    // bound, `Vec::with_capacity` will either OOM the allocator or allocate
+    // a multi-TB vec before the read fails. 50B entries × 4 bytes = 200 GB,
+    // well beyond any realistic single-player arena.
+    const MAX_PLAUSIBLE_ARENA_LEN: u64 = 50_000_000_000;
+
     for player in 0..2 {
         r.read_exact(&mut buf8)?;
         let n_entries = u64::from_le_bytes(buf8) as usize;
 
-        // Read regret arena
+        // Read regret arena (f32 storage)
         r.read_exact(&mut buf8)?;
-        let regret_arena_len = u64::from_le_bytes(buf8) as usize;
-        let mut regret_vec: Vec<i16> = Vec::with_capacity(regret_arena_len);
-        let mut buf2 = [0u8; 2];
+        let regret_arena_len_u64 = u64::from_le_bytes(buf8);
+        if regret_arena_len_u64 > MAX_PLAUSIBLE_ARENA_LEN {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("p{}: regret_arena_len {} exceeds sanity ceiling {} — likely torn header",
+                    player, regret_arena_len_u64, MAX_PLAUSIBLE_ARENA_LEN)));
+        }
+        let regret_arena_len = regret_arena_len_u64 as usize;
+        let mut regret_vec: Vec<f32> = Vec::with_capacity(regret_arena_len);
+        let mut buf4r = [0u8; 4];
         for _ in 0..regret_arena_len {
-            r.read_exact(&mut buf2)?;
-            regret_vec.push(i16::from_le_bytes(buf2));
+            r.read_exact(&mut buf4r)?;
+            regret_vec.push(f32::from_le_bytes(buf4r));
         }
         states[player].regret_arena = crate::compact_state::Arena::from_vec(regret_vec);
 
         // Read strategy arena
         r.read_exact(&mut buf8)?;
-        let strategy_arena_len = u64::from_le_bytes(buf8) as usize;
+        let strategy_arena_len_u64 = u64::from_le_bytes(buf8);
+        if strategy_arena_len_u64 > MAX_PLAUSIBLE_ARENA_LEN {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("p{}: strategy_arena_len {} exceeds sanity ceiling {}",
+                    player, strategy_arena_len_u64, MAX_PLAUSIBLE_ARENA_LEN)));
+        }
+        let strategy_arena_len = strategy_arena_len_u64 as usize;
         let mut strategy_vec: Vec<f32> = Vec::with_capacity(strategy_arena_len);
         let mut buf4 = [0u8; 4];
         for _ in 0..strategy_arena_len {
@@ -376,19 +415,22 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
         }
         states[player].strategy_arena = crate::compact_state::Arena::from_vec(strategy_vec);
 
-        // Read index entries
+        // Read index entries. Each entry's offset+n_actions slice must fit
+        // inside its arena — pre-fix, a corrupted offset would land outside
+        // and `regret(entry, i)` would silently read garbage from page-aligned
+        // padding under a Vec backend, or page-fault under a Mmap backend.
         states[player].index.reserve(n_entries);
         for _ in 0..n_entries {
             r.read_exact(&mut buf8)?;
             let key = u64::from_le_bytes(buf8);
 
-            let mut buf4r = [0u8; 4];
-            r.read_exact(&mut buf4r)?;
-            let regret_offset = u32::from_le_bytes(buf4r);
+            let mut buf8r = [0u8; 8];
+            r.read_exact(&mut buf8r)?;
+            let regret_offset = u64::from_le_bytes(buf8r);
 
-            let mut buf4s = [0u8; 4];
-            r.read_exact(&mut buf4s)?;
-            let strategy_offset = u32::from_le_bytes(buf4s);
+            let mut buf8s = [0u8; 8];
+            r.read_exact(&mut buf8s)?;
+            let strategy_offset = u64::from_le_bytes(buf8s);
 
             let mut buf1 = [0u8; 1];
             r.read_exact(&mut buf1)?;
@@ -397,6 +439,17 @@ pub fn load_compact_raw_states(path: &Path) -> io::Result<([CompactCfrState; 2],
             let mut buf2_epoch = [0u8; 2];
             r.read_exact(&mut buf2_epoch)?;
             let last_discount_epoch = u16::from_le_bytes(buf2_epoch);
+
+            let na = n_actions as u64;
+            if regret_offset.saturating_add(na) > regret_arena_len_u64
+                || strategy_offset.saturating_add(na) > strategy_arena_len_u64
+            {
+                return Err(io::Error::new(io::ErrorKind::InvalidData,
+                    format!("p{}: entry key={} offset+na out of range \
+                            (r_off={} s_off={} na={}, r_len={} s_len={})",
+                        player, key, regret_offset, strategy_offset, na,
+                        regret_arena_len_u64, strategy_arena_len_u64)));
+            }
 
             states[player].index.insert(key, CompactEntry {
                 regret_offset,
@@ -474,12 +527,12 @@ fn load_compact_raw_states_v1(path: &Path) -> io::Result<([CompactCfrState; 2], 
         for oe in &old_entries {
             let n = oe.n_actions as usize;
             let old_base = oe.arena_offset as usize;
-            let regret_offset = states[player].regret_arena.len() as u32;
-            let strategy_offset = states[player].strategy_arena.len() as u32;
+            let regret_offset = states[player].regret_arena.len() as u64;
+            let strategy_offset = states[player].strategy_arena.len() as u64;
 
-            // Copy regrets
+            // Copy regrets (legacy v1 stored i16; widen to f32)
             for i in 0..n {
-                states[player].regret_arena.push(old_arena[old_base + i]);
+                states[player].regret_arena.push(old_arena[old_base + i] as f32);
             }
             // Convert strategy sums from i16 to f32
             for i in 0..n {
