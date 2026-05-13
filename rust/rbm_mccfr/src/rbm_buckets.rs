@@ -437,6 +437,84 @@ pub fn compute_bucket_rbm_postflop(
     compute_bucket_rbm(hole_cards, board_visible, player, epsilon, rbm_config, postflop, rng)
 }
 
+/// Look up bucket for a hand using a frozen (read-only) cluster set.
+/// Always maps to the nearest cluster, ignoring epsilon. This is the
+/// parallel-RBM phase-2 path: clusters were discovered in phase 1
+/// (single-thread) and now we just classify hands against them. Without
+/// inserts the function takes `&PostflopState`, so all threads can share
+/// one immutable Arc<PostflopState> for the entire parallel scope —
+/// eliminating both lock contention and the cluster-ID alignment problem
+/// that previously forced the hard-error guard in `train_mccfr_parallel`.
+///
+/// Returns 0 if the cluster set is empty (defensive — phase 1 should
+/// guarantee at least one cluster per player before phase 2 starts).
+pub fn compute_bucket_rbm_frozen(
+    hole_cards: &[Card; 2],
+    board_visible: &[Card],
+    player: u8,
+    rbm_config: &RbmConfig,
+    postflop: &PostflopState,
+    rng: &mut impl Rng,
+) -> u32 {
+    let tree = showdown_distribution_tree(
+        hole_cards,
+        board_visible,
+        player,
+        DEFAULT_MAX_OPPONENTS,
+        DEFAULT_MAX_BOARD_SAMPLES,
+        rng,
+    );
+    // f64::INFINITY ⇒ always return the nearest cluster regardless of distance.
+    // Out-of-distribution hands map to the closest seen cluster, which is the
+    // correct behavior for a frozen cluster set.
+    let nearest = find_nearest_postflop_cluster(
+        &postflop.clusters, &tree, f64::INFINITY, rbm_config,
+    );
+    match nearest {
+        Some((idx, _d)) => idx as u32,
+        None => 0,
+    }
+}
+
+/// Frozen-cluster wrapper that selects the right board slice per round.
+pub fn compute_bucket_rbm_postflop_frozen(
+    hole_cards: &[Card; 2],
+    board: &[Card; 5],
+    round_idx: u8,
+    player: u8,
+    rbm_config: &RbmConfig,
+    postflop: &PostflopState,
+    rng: &mut impl Rng,
+) -> u32 {
+    let board_visible: &[Card] = match round_idx {
+        0 => &board[..0],
+        1 => &board[..3],
+        2 => &board[..4],
+        _ => &board[..5],
+    };
+    compute_bucket_rbm_frozen(hole_cards, board_visible, player, rbm_config, postflop, rng)
+}
+
+/// Precompute all 4 street buckets using a frozen cluster set (read-only).
+/// Mirror of `precompute_buckets_rbm` but takes `&PostflopState` instead of
+/// `&mut`, suitable for sharing across threads.
+pub fn precompute_buckets_rbm_frozen(
+    hole_cards: &[Card; 2],
+    board: &[Card; 5],
+    player: u8,
+    rbm_config: &RbmConfig,
+    postflop: &PostflopState,
+    rng: &mut impl Rng,
+) -> [u32; 4] {
+    let mut result = [0u32; 4];
+    for round_idx in 0..=3u8 {
+        result[round_idx as usize] = compute_bucket_rbm_postflop_frozen(
+            hole_cards, board, round_idx, player, rbm_config, postflop, rng,
+        );
+    }
+    result
+}
+
 /// Precompute all 4 street buckets for a deal using unified RBM.
 ///
 /// No street privilege: preflop (round 0, no board visible) goes through the
