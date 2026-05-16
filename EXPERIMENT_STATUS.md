@@ -9,7 +9,7 @@ The Hostkey chainer (`nohup`'d, PPID=1) is running the parallel-RBM scaling swee
 | # | Run dir                                    | Iters | Status      | Result                          |
 |---|--------------------------------------------|-------|-------------|---------------------------------|
 | 1 | `run_100M_t32_eps35_parallel_rbm`         | 100M  | ✅ DONE      | **-1.41 [-1.76, -1.07] bb/h**  |
-| 2 | `run_250M_t32_eps35_parallel_rbm`         | 250M  | 🔄 running   | ETA ~25 hours                   |
+| 2 | `run_250M_t32_eps35_parallel_rbm`         | 250M  | ✅ DONE   | -1325.94 m [-1.66, -0.99] |
 | 3 | `run_1B_t32_eps35_parallel_rbm`           | 1B    | ⏳ queued    | ETA ~95 hours after #2          |
 
 ## How to resume after a Claude session restart
