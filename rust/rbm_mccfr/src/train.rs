@@ -632,11 +632,17 @@ pub fn train_mccfr_parallel(
         }
 
         // Watchdog: after the iter loop should have finished, recv with a
-        // timeout so a silently-dead worker doesn't park us forever. We size
-        // the timeout generously — these threads can be doing 24h of work,
-        // and freeze() at 1B keys can take 5+ minutes; 6h covers freeze +
-        // final flush comfortably and still trips before "infinite hang."
-        const RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+        // timeout so a silently-dead worker doesn't park us forever. Sized
+        // for the longest plausible parallel-RBM run: 1B iters / 32 threads
+        // ≈ 68 hours per thread at production speeds. Recvs are sequential,
+        // so total worst-case wait = num_threads × per-recv. We pick 96h
+        // per recv: that's ~1.4× the actual per-thread runtime, plus
+        // ample headroom for freeze+flush at the tail. (Original 6h was
+        // sized for shorter equity-only runs and silently truncated long
+        // parallel-RBM runs, marking healthy threads as "dead" and
+        // discarding ~10/32 of their work — see PR #4.) 96h still
+        // safeguards against a thread that's genuinely wedged.
+        const RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(96 * 3600);
         handles
             .into_iter()
             .enumerate()
