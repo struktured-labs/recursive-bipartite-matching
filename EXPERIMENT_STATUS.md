@@ -1,6 +1,6 @@
 # Active experiment chain — parallel-RBM ε=35 sweep
 
-_Last updated: 2026-05-14_
+_Last updated: 2026-05-22_
 
 The Hostkey chainer (`nohup`'d, PPID=1) is running the parallel-RBM scaling sweep on PR #3. **Experiments continue regardless of Claude session lifecycle.**
 
@@ -9,8 +9,8 @@ The Hostkey chainer (`nohup`'d, PPID=1) is running the parallel-RBM scaling swee
 | # | Run dir                                    | Iters | Status      | Result                          |
 |---|--------------------------------------------|-------|-------------|---------------------------------|
 | 1 | `run_100M_t32_eps35_parallel_rbm`         | 100M  | ✅ DONE      | **-1.41 [-1.76, -1.07] bb/h**  |
-| 2 | `run_250M_t32_eps35_parallel_rbm`         | 250M  | ✅ DONE   | -1325.94 m [-1.66, -0.99] |
-| 3 | `run_1B_t32_eps35_parallel_rbm`           | 1B    | ⏳ queued    | ETA ~95 hours after #2          |
+| 2 | `run_250M_t32_eps35_parallel_rbm`         | 250M  | ✅ DONE      | **-1.33 [-1.66, -0.99] bb/h**  |
+| 3 | `run_1B_t32_eps35_parallel_rbm`           | 1B    | 🏃 running   | fastest thread at 28.1M / 31.1M (~90%); ETA <24h |
 
 ## How to resume after a Claude session restart
 
