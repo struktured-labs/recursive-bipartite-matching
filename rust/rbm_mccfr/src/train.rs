@@ -11,6 +11,7 @@
 /// Uses CompactCfrState (arena-backed f32 regret + f32 strategy_sum, LSM-frozen).
 
 use std::path::Path;
+use std::sync::Arc;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
@@ -25,6 +26,31 @@ use crate::rbm_buckets::{self, PostflopState};
 use crate::rbm_distance::Config as RbmConfig;
 use crate::traversal;
 
+/// RBM bucketing mode for one MCCFR iteration.
+///
+/// `None`        — equity bucketing (preflop assignments + n_buckets).
+/// `Discover`    — RBM bucketing with mutable PostflopState that grows as
+///                  unseen hand profiles arrive. Used by `train_mccfr`
+///                  (single-thread) and by parallel-RBM phase 1.
+/// `Frozen`      — RBM bucketing against a read-only PostflopState shared
+///                  across threads via Arc. Phase 2 of parallel RBM. The
+///                  frozen lookup always returns the nearest seen cluster
+///                  (epsilon = ∞), guaranteeing every postflop hand maps
+///                  to a real cluster — the failure mode that the prior
+///                  hard-error guard was preventing.
+enum RbmIterMode<'a> {
+    None,
+    Discover {
+        rbm_config: &'a RbmConfig,
+        epsilon: f64,
+        postflop_states: &'a mut [PostflopState; 2],
+    },
+    Frozen {
+        rbm_config: &'a RbmConfig,
+        postflop_states: &'a [PostflopState; 2],
+    },
+}
+
 /// Merge src CompactCfrState into dst by summing all regret and strategy entries.
 pub fn merge_cfr_state(dst: &mut CompactCfrState, src: &CompactCfrState) {
     compact_state::merge_compact_state(dst, src);
@@ -32,8 +58,9 @@ pub fn merge_cfr_state(dst: &mut CompactCfrState, src: &CompactCfrState) {
 
 /// Run a single MCCFR iteration: sample a deal, compute buckets, traverse.
 ///
-/// When `rbm_state` is provided, uses RBM-based post-flop bucketing.
-/// Otherwise falls back to equity-based bucketing.
+/// `rbm_mode` selects between equity bucketing, RBM-with-discovery
+/// (mutable PostflopState, single-thread), and RBM-frozen (read-only
+/// PostflopState shared across threads — parallel phase 2).
 #[inline]
 fn run_one_iteration(
     config: &GameConfig,
@@ -43,12 +70,12 @@ fn run_one_iteration(
     rng: &mut Xoshiro256PlusPlus,
     iteration: u64,
     dcfr_table: Option<&DcfrTable>,
-    rbm_state: Option<(&RbmConfig, f64, &mut [PostflopState; 2])>,
+    rbm_mode: RbmIterMode<'_>,
 ) -> f64 {
     let (p1, p2, board) = card::sample_deal(rng);
 
-    let (p1_buckets, p2_buckets) = match rbm_state {
-        Some((rbm_config, epsilon, postflop_states)) => {
+    let (p1_buckets, p2_buckets) = match rbm_mode {
+        RbmIterMode::Discover { rbm_config, epsilon, postflop_states } => {
             let p1_b = rbm_buckets::precompute_buckets_rbm(
                 &p1, &board, preflop_assignments, 0, epsilon, rbm_config,
                 &mut postflop_states[0], rng,
@@ -59,7 +86,16 @@ fn run_one_iteration(
             );
             (p1_b, p2_b)
         }
-        None => {
+        RbmIterMode::Frozen { rbm_config, postflop_states } => {
+            let p1_b = rbm_buckets::precompute_buckets_rbm_frozen(
+                &p1, &board, 0, rbm_config, &postflop_states[0], rng,
+            );
+            let p2_b = rbm_buckets::precompute_buckets_rbm_frozen(
+                &p2, &board, 1, rbm_config, &postflop_states[1], rng,
+            );
+            (p1_b, p2_b)
+        }
+        RbmIterMode::None => {
             let p1_b = buckets::precompute_buckets(&p1, &board, train_config.n_buckets, preflop_assignments);
             let p2_b = buckets::precompute_buckets(&p2, &board, train_config.n_buckets, preflop_assignments);
             (p1_b, p2_b)
@@ -186,9 +222,14 @@ pub fn train_mccfr(
             dt.ensure_epoch(current_epoch);
         }
 
-        let rbm_arg = rbm_config.as_ref().map(|cfg| {
-            (cfg, rbm_epsilon, &mut postflop_states)
-        });
+        let rbm_mode = match rbm_config.as_ref() {
+            Some(cfg) => RbmIterMode::Discover {
+                rbm_config: cfg,
+                epsilon: rbm_epsilon,
+                postflop_states: &mut postflop_states,
+            },
+            None => RbmIterMode::None,
+        };
 
         let value = run_one_iteration(
             config,
@@ -198,7 +239,7 @@ pub fn train_mccfr(
             &mut rng,
             iter,
             dcfr_table.as_ref(),
-            rbm_arg,
+            rbm_mode,
         );
         util_sum += value;
 
@@ -297,21 +338,81 @@ pub fn train_mccfr_parallel(
     num_threads: usize,
     mmap_dir: Option<&std::path::Path>,
 ) -> ([CompactCfrState; 2], [PostflopState; 2]) {
-    // Per-thread RBM PostflopStates can't be merged today (cluster IDs are
-    // thread-local). Returning empty PostflopState would silently downgrade
-    // eval to cluster 0 for every postflop hand — same class as the
-    // equity-vs-RBM bucketing bug. Refuse the configuration until cluster
-    // merge is implemented; user can drop to --threads 1 for RBM runs.
-    if num_threads > 1 {
-        if let BucketMethod::Rbm { .. } = train_config.bucket_method {
+    // Two-phase parallel-RBM training:
+    //
+    //   Phase 1 (single-thread): discover clusters into a mutable
+    //           PostflopState. Cluster IDs are stable because exactly one
+    //           thread mutates the state.
+    //
+    //   Phase 2 (parallel): wrap the phase-1 PostflopState in an Arc and
+    //           share it read-only across `num_threads` rayon workers.
+    //           The frozen lookup always maps every postflop hand to the
+    //           nearest seen cluster (epsilon=∞), so no thread inserts
+    //           and no synchronization is needed.
+    //
+    // Pre-fix, the parallel path used a per-thread PostflopState and
+    // returned an empty cluster set — every postflop hand fell through
+    // to cluster 0 at Slumbot eval, indistinguishable from uniform
+    // random postflop play. The hard-error guard that previously sat
+    // here is no longer needed.
+    let is_rbm = matches!(train_config.bucket_method, BucketMethod::Rbm { .. });
+
+    let (phase1_cfr, phase1_postflop, phase1_iters) = if is_rbm {
+        // ~5% of iters, capped at 5M (clusters saturate quickly; once the
+        // common postflop scenarios are covered, extra phase-1 iters are
+        // wasted single-thread time). For 1B-iter targets this is 5M
+        // (~5-10 minutes serial). For tests with iterations < 20K we floor
+        // at min(1000, iterations) so the regression suite stays cheap.
+        let phase1_iters = ((train_config.iterations / 20).clamp(1, 5_000_000))
+            .min(train_config.iterations);
+        let mut phase1_cfg = train_config.clone();
+        phase1_cfg.iterations = phase1_iters;
+        // Phase 1 checkpoints would collide with phase 2 cadence naming;
+        // disable. Phase 2 still checkpoints normally.
+        phase1_cfg.checkpoint_every = 0;
+        // Suppress periodic re-freeze during phase 1: we want a compact
+        // result to merge into. (Final state is still mergeable either way;
+        // skipping mid-phase freezes avoids file-naming collisions with
+        // phase 2 frozen layers when both share a directory.)
+        phase1_cfg.freeze_after = 0;
+
+        eprintln!(
+            "[parallel-RBM] Phase 1: single-thread cluster discovery, {} iters",
+            phase1_iters,
+        );
+        let phase1_start = std::time::Instant::now();
+        let (states, postflop) = train_mccfr(
+            config,
+            &phase1_cfg,
+            preflop_assignments,
+            None,
+            None,
+        );
+        eprintln!(
+            "[parallel-RBM] Phase 1 done in {:.1}s: P0={} P1={} info sets, clusters={}+{}",
+            phase1_start.elapsed().as_secs_f64(),
+            states[0].len(),
+            states[1].len(),
+            postflop[0].total_clusters(),
+            postflop[1].total_clusters(),
+        );
+        // Defensive: an empty postflop cluster set would degenerate phase 2
+        // to the original silent-failure bug. Panic loud so the symptom is
+        // never a silent quality regression at Slumbot eval.
+        if postflop[0].total_clusters() == 0 || postflop[1].total_clusters() == 0 {
             panic!(
-                "RBM bucketing with --threads {} is not supported: per-thread \
-                 PostflopStates do not merge. Use --threads 1 for RBM runs, \
-                 or BucketMethod::Equity for parallel runs.",
-                num_threads
+                "[parallel-RBM] phase 1 produced ZERO postflop clusters \
+                 for at least one player (P0={}, P1={}). Refusing to enter \
+                 phase 2 — would silently degrade to bucket-0 for every \
+                 postflop hand.",
+                postflop[0].total_clusters(),
+                postflop[1].total_clusters(),
             );
         }
-    }
+        (Some(states), Some(Arc::new(postflop)), phase1_iters)
+    } else {
+        (None, None, 0)
+    };
 
     let mmap_dir_owned: std::path::PathBuf = mmap_dir
         .map(|p| p.to_path_buf())
@@ -321,8 +422,9 @@ pub fn train_mccfr_parallel(
         .build()
         .expect("failed to build rayon thread pool");
 
-    let iters_per_thread = train_config.iterations / num_threads as u64;
-    let remainder = train_config.iterations % num_threads as u64;
+    let phase2_total = train_config.iterations.saturating_sub(phase1_iters);
+    let iters_per_thread = phase2_total / num_threads as u64;
+    let remainder = phase2_total % num_threads as u64;
 
     // Collect results from all threads.
     //
@@ -360,6 +462,11 @@ pub fn train_mccfr_parallel(
             let assignments = *preflop_assignments;
             let tid = thread_id;
             let thread_mmap_dir = mmap_dir_owned.clone();
+            // Per-thread Arc clone: bumps refcount, share read-only.
+            // The clones are dropped when each spawn closure exits (panic
+            // or normal), so the strong count returns to 1 after the rayon
+            // scope joins — required by `Arc::try_unwrap` below.
+            let postflop_arc_t = phase1_postflop.as_ref().map(Arc::clone);
 
             let (tx, rx) = std::sync::mpsc::channel::<ThreadResult>();
 
@@ -400,12 +507,12 @@ pub fn train_mccfr_parallel(
                     None
                 };
 
-                // Per-thread RBM state (clusters don't merge across threads)
-                let (rbm_config_t, rbm_epsilon_t) = match &thread_train_config.bucket_method {
-                    BucketMethod::Rbm { epsilon } => (Some(RbmConfig::default()), *epsilon),
-                    BucketMethod::Equity => (None, 0.0),
+                // RBM bucketing config (read-only in phase 2 — clusters
+                // live in the shared `postflop_arc_t` Arc).
+                let rbm_config_t = match &thread_train_config.bucket_method {
+                    BucketMethod::Rbm { .. } => Some(RbmConfig::default()),
+                    BucketMethod::Equity => None,
                 };
-                let mut postflop_states_t = [PostflopState::new(), PostflopState::new()];
 
                 for iter in 0..my_iters {
                     let current_epoch = (iter / 1000) as u32;
@@ -413,9 +520,17 @@ pub fn train_mccfr_parallel(
                         dt.ensure_epoch(current_epoch);
                     }
 
-                    let rbm_arg = rbm_config_t.as_ref().map(|cfg| {
-                        (cfg, rbm_epsilon_t, &mut postflop_states_t)
-                    });
+                    // Phase 2: read-only frozen cluster lookup via shared Arc.
+                    // No thread inserts, no synchronization, all postflop
+                    // hands map to a real cluster (epsilon=∞ inside the
+                    // frozen lookup).
+                    let rbm_mode = match (rbm_config_t.as_ref(), postflop_arc_t.as_ref()) {
+                        (Some(cfg), Some(arc)) => RbmIterMode::Frozen {
+                            rbm_config: cfg,
+                            postflop_states: arc.as_ref(),
+                        },
+                        _ => RbmIterMode::None,
+                    };
 
                     let value = run_one_iteration(
                         &config,
@@ -425,7 +540,7 @@ pub fn train_mccfr_parallel(
                         &mut rng,
                         iter,
                         dcfr_table.as_ref(),
-                        rbm_arg,
+                        rbm_mode,
                     );
                     util_sum += value;
 
@@ -517,11 +632,17 @@ pub fn train_mccfr_parallel(
         }
 
         // Watchdog: after the iter loop should have finished, recv with a
-        // timeout so a silently-dead worker doesn't park us forever. We size
-        // the timeout generously — these threads can be doing 24h of work,
-        // and freeze() at 1B keys can take 5+ minutes; 6h covers freeze +
-        // final flush comfortably and still trips before "infinite hang."
-        const RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+        // timeout so a silently-dead worker doesn't park us forever. Sized
+        // for the longest plausible parallel-RBM run: 1B iters / 32 threads
+        // ≈ 68 hours per thread at production speeds. Recvs are sequential,
+        // so total worst-case wait = num_threads × per-recv. We pick 96h
+        // per recv: that's ~1.4× the actual per-thread runtime, plus
+        // ample headroom for freeze+flush at the tail. (Original 6h was
+        // sized for shorter equity-only runs and silently truncated long
+        // parallel-RBM runs, marking healthy threads as "dead" and
+        // discarding ~10/32 of their work — see PR #4.) 96h still
+        // safeguards against a thread that's genuinely wedged.
+        const RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(96 * 3600);
         handles
             .into_iter()
             .enumerate()
@@ -540,11 +661,14 @@ pub fn train_mccfr_parallel(
             .collect()
     });
 
-    // Merge all thread results. Skip dead threads (they reported via stderr).
-    let mut merged = [
+    // Merge all thread results. In RBM mode, start from phase 1's CFR
+    // state (already trained for phase1_iters) and accumulate the phase 2
+    // thread contributions into it. In equity mode, start from fresh
+    // in-memory states as before.
+    let mut merged = phase1_cfr.unwrap_or_else(|| [
         CompactCfrState::new(train_config.initial_size),
         CompactCfrState::new(train_config.initial_size),
-    ];
+    ]);
 
     let mut alive = 0usize;
     let mut dead = 0usize;
@@ -575,9 +699,22 @@ pub fn train_mccfr_parallel(
         merged[1].len(),
     );
 
-    // Note: parallel training creates per-thread PostflopState that can't easily
-    // be merged. Return empty states — caller should rebuild if needed.
-    (merged, [PostflopState::new(), PostflopState::new()])
+    // Extract the shared PostflopState from the Arc. After `pool.scope`
+    // has joined, every spawn closure has dropped its clone, so the strong
+    // count is 1 and `try_unwrap` succeeds. If it doesn't, that's a leak
+    // bug — panic loud rather than silently deep-copy.
+    let final_postflop = match phase1_postflop {
+        Some(arc) => match Arc::try_unwrap(arc) {
+            Ok(states) => states,
+            Err(arc) => panic!(
+                "[parallel-RBM] BUG: PostflopState Arc still has {} strong refs after parallel scope joined",
+                Arc::strong_count(&arc),
+            ),
+        },
+        None => [PostflopState::new(), PostflopState::new()],
+    };
+
+    (merged, final_postflop)
 }
 
 #[cfg(test)]
@@ -1173,5 +1310,52 @@ mod tests {
         // instead assert merged state is non-empty as a smoke test.
         assert!(states[0].len() > 0, "P0 must accumulate info sets");
         assert!(states[1].len() > 0, "P1 must accumulate info sets");
+    }
+
+    /// REGRESSION: parallel training with RBM bucketing must return a
+    /// populated PostflopState (the discovered cluster set). Pre-fix,
+    /// `train_mccfr_parallel` returned `[PostflopState::new(); 2]` (empty)
+    /// because per-thread cluster IDs were not comparable across threads.
+    /// Slumbot eval then read uniform-random postflop play — same class
+    /// as the equity-vs-RBM bucketing bug.
+    ///
+    /// Post-fix: phase 1 discovers clusters single-thread, phase 2
+    /// shares them read-only across threads via Arc, and the returned
+    /// PostflopState carries the phase-1 clusters.
+    #[test]
+    fn test_parallel_rbm_returns_clusters() {
+        let config = GameConfig::slumbot();
+        let train_config = TrainConfig {
+            iterations: 4000, // big enough for phase 1 floor (200) + phase 2 work
+            report_every: 0,
+            initial_size: 1_000,
+            checkpoint_every: 0,
+            prune_threshold: -300_000_000.0,
+            dcfr: false,
+            lcfr: false,
+            n_buckets: 50,
+            bucket_method: BucketMethod::Rbm { epsilon: 35.0 },
+            regret_scale_every: 0,
+            freeze_after: 0,
+            mmap_arenas: false,
+            checkpoint_thread_id: None,
+        };
+        let assignments = default_assignments();
+
+        let (states, postflop) =
+            train_mccfr_parallel(&config, &train_config, &assignments, 2, None);
+
+        assert!(states[0].len() > 0, "P0 must accumulate info sets");
+        assert!(states[1].len() > 0, "P1 must accumulate info sets");
+        // The whole point of the fix: clusters survive the parallel scope.
+        assert!(
+            postflop[0].total_clusters() > 0,
+            "P0 cluster set should be non-empty after parallel RBM training; \
+             empty means we regressed to silent bucket-0 play"
+        );
+        assert!(
+            postflop[1].total_clusters() > 0,
+            "P1 cluster set should be non-empty after parallel RBM training"
+        );
     }
 }

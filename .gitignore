@@ -6,6 +6,7 @@ _build/
 *.native
 tmp/
 log/
+logs/
 setenv.sh
 a.out
 *.dat

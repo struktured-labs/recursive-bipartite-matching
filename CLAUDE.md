@@ -1,5 +1,15 @@
 # CLAUDE.md
 
+## Live operations (read first)
+
+If you're a Claude session picking up this repo, **read [OPERATIONS.md](OPERATIONS.md)
+and [EXPERIMENT_STATUS.md](EXPERIMENT_STATUS.md) before doing anything else**.
+A scaling sweep is running on a Hostkey EPYC box, and a blackmage cron
+(`scripts/cron/hostkey_check_and_commit.sh`, every 2 hours) auto-harvests
+results. Don't duplicate the cron's work, don't re-launch experiments it's
+already chained, and don't try to ssh to Hostkey from a cloud-scheduled
+remote agent (no credentials there).
+
 ## Project Overview
 
 Recursive Bipartite Matching (RBM) distance on game trees — a tree metric that
