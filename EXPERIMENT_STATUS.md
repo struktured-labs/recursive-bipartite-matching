@@ -1,8 +1,10 @@
 # Active experiment chain — parallel-RBM ε=35 sweep
 
-_Last updated: 2026-05-22_
+_Last updated: 2026-06-02_
 
-The Hostkey chainer (`nohup`'d, PPID=1) is running the parallel-RBM scaling sweep on PR #3. **Experiments continue regardless of Claude session lifecycle.**
+**STATUS: Hostkey EPYC 9354 box (185.130.227.118) suspended / unreachable as of 2026-06-02.** SSH on port 22 times out; cutover to new EPYC 7402P / 512GB / $665-mo box is in flight. The in-progress `run_500M_t32_eps20_v6` was lost mid-phase-2.
+
+Rescue watcher polls SSH from blackmage every 60 s — when the old host comes back (or the new one is provisioned and we can rsync from any snapshot), strategy.bin / cluster sidecars / chainer state get pulled to `/mnt/data/rbm-results/`. See `/mnt/data/rbm-results/RESCUE_PLAN.md`.
 
 ## Runs
 
@@ -10,7 +12,9 @@ The Hostkey chainer (`nohup`'d, PPID=1) is running the parallel-RBM scaling swee
 |---|--------------------------------------------|-------|-------------|---------------------------------|
 | 1 | `run_100M_t32_eps35_parallel_rbm`         | 100M  | ✅ DONE      | **-1.41 [-1.76, -1.07] bb/h**  |
 | 2 | `run_250M_t32_eps35_parallel_rbm`         | 250M  | ✅ DONE      | **-1.33 [-1.66, -0.99] bb/h**  |
-| 3 | `run_1B_t32_eps35_parallel_rbm`           | 1B    | 🏃 running   | fastest thread at 28.1M / 31.1M (~90%); -1246.31 m [-1.58, -0.91] |
+| 3 | `run_1B_t32_eps35_parallel_rbm`           | 1B    | ✅ DONE      | **-1.25 [-1.58, -0.91] bb/h** (10/32 threads watchdog-killed) |
+| 4 | `run_500M_t32_eps20_v6`                   | 500M  | 💀 LOST      | Phase 2 lost to suspension; phase-1 cluster set (482 clusters) gone unless rescue succeeds |
+| 5 | `run_500M_t32_eps50_v6`                   | 500M  | 🚫 cancelled | Will re-queue on new Hostkey EPYC 7402P box |
 
 ## How to resume after a Claude session restart
 
