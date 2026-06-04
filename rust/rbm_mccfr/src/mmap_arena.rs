@@ -19,6 +19,30 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Issue the two `madvise` hints we want on every mmap arena:
+///   - `MADV_RANDOM`     — skip readahead on scattered access.
+///   - `MADV_HUGEPAGE`   — ask for 2 MiB transparent huge pages (THP).
+///
+/// Both are best-effort hints; the kernel can ignore either silently. The
+/// only downside is one extra syscall per arena creation, paid once.
+///
+/// Centralized here so the two MmapArena construction paths (new + open)
+/// stay consistent. Adding a third construction site? Call this helper.
+#[cfg(unix)]
+#[inline]
+unsafe fn advise_arena(ptr: *const u8, len: usize) {
+    libc::madvise(
+        ptr as *mut libc::c_void,
+        len,
+        libc::MADV_RANDOM,
+    );
+    libc::madvise(
+        ptr as *mut libc::c_void,
+        len,
+        libc::MADV_HUGEPAGE,
+    );
+}
+
 /// A growable mmap-backed array that behaves like Vec<T> for T in {i16, f32}.
 ///
 /// Internally manages a file + MmapMut. Grows by doubling the file size
@@ -55,13 +79,18 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
 
         // Hint to OS: random access pattern — don't do readahead.
         // Reduces wasted I/O when page faults are scattered.
+        //
+        // Also request transparent huge pages (2 MiB instead of 4 KiB).
+        // At billion-entry scale the 4 KiB TLB is the bottleneck on random
+        // access; 2 MiB pages cut TLB misses ~500x for the same working
+        // set. THP is best-effort — if the kernel can't satisfy a request
+        // it silently falls back to 4 KiB, so the worst case is no change.
+        // Phase 6 of MMAP_INDEX_PLAN.md. NOTE: 1 GiB hugepages are NOT a
+        // useful upgrade here per the research bundle's perf-realism review
+        // (only ~4 L1-TLB entries on EPYC, worst case 2.5x slower).
         #[cfg(unix)]
         unsafe {
-            libc::madvise(
-                mmap.as_ptr() as *mut libc::c_void,
-                byte_cap,
-                libc::MADV_RANDOM,
-            );
+            advise_arena(mmap.as_ptr(), byte_cap);
         }
 
         Ok(Self {
@@ -241,13 +270,10 @@ impl<T: Copy + Default + bytemuck::Pod> MmapArena<T> {
         };
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
+        // See `new` for advise rationale (MADV_RANDOM + MADV_HUGEPAGE).
         #[cfg(unix)]
         unsafe {
-            libc::madvise(
-                mmap.as_ptr() as *mut libc::c_void,
-                file_size,
-                libc::MADV_RANDOM,
-            );
+            advise_arena(mmap.as_ptr(), file_size);
         }
 
         Ok(Self {
