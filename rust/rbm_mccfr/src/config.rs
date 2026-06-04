@@ -66,6 +66,16 @@ pub struct TrainConfig {
     /// the single-thread `checkpoint_{iter}.bin`. None = single-thread mode
     /// (default), uses unsuffixed name.
     pub checkpoint_thread_id: Option<usize>,
+    /// Freeze-time pruning: drop an entry from the new frozen layer if
+    /// every action's absolute regret is below this AND the strategy sum
+    /// is below `freeze_prune_strategy_threshold`. Default 0.0 disables
+    /// pruning. Phase 3 of MMAP_INDEX_PLAN.md — Libratus-style total-RBP.
+    /// Conservative starting values: regret 1e-3, strategy 1e-4 — these
+    /// drop entries that have been visited but contribute nothing to the
+    /// averaged strategy. Validate on Slumbot eval before committing.
+    pub freeze_prune_regret_threshold: f32,
+    /// See `freeze_prune_regret_threshold`. Default 0.0 disables.
+    pub freeze_prune_strategy_threshold: f32,
 }
 
 impl Default for TrainConfig {
@@ -84,6 +94,8 @@ impl Default for TrainConfig {
             freeze_after: 5_000_000,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         }
     }
 }

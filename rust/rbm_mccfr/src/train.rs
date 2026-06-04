@@ -129,6 +129,8 @@ pub fn train_mccfr(
                 player_id: 0,
                 use_mmap: false,
                 mmap_dir: std::path::PathBuf::from("."),
+                freeze_prune_regret: train_config.freeze_prune_regret_threshold,
+                freeze_prune_strategy: train_config.freeze_prune_strategy_threshold,
             };
             let s1 = CompactCfrState {
                 index: states[1].index.clone(),
@@ -138,11 +140,13 @@ pub fn train_mccfr(
                 player_id: 1,
                 use_mmap: false,
                 mmap_dir: std::path::PathBuf::from("."),
+                freeze_prune_regret: train_config.freeze_prune_regret_threshold,
+                freeze_prune_strategy: train_config.freeze_prune_strategy_threshold,
             };
             ([s0, s1], iter)
         }
         None => {
-            let (s0, s1) = if train_config.mmap_arenas {
+            let (mut s0, mut s1) = if train_config.mmap_arenas {
                 let dir = std::path::Path::new(".");
                 std::fs::create_dir_all(dir).unwrap_or_else(|e| {
                     panic!("mmap arena dir {:?} create failed: {}", dir, e)
@@ -158,6 +162,17 @@ pub fn train_mccfr(
                     CompactCfrState::new(train_config.initial_size),
                 )
             };
+            // Phase 3: propagate freeze-prune thresholds from the train
+            // config so freeze() prunes during this run. Defaults to 0/0
+            // (no pruning) when the config doesn't set them.
+            s0.set_freeze_prune_thresholds(
+                train_config.freeze_prune_regret_threshold,
+                train_config.freeze_prune_strategy_threshold,
+            );
+            s1.set_freeze_prune_thresholds(
+                train_config.freeze_prune_regret_threshold,
+                train_config.freeze_prune_strategy_threshold,
+            );
             ([s0, s1], 0)
         }
     };
@@ -649,6 +664,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -676,6 +693,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -700,6 +719,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -724,6 +745,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -755,6 +778,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -807,6 +832,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -840,6 +867,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: true, // <-- the flag under test
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -917,6 +946,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -983,6 +1014,8 @@ mod tests {
             freeze_after: 0,
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
         let num_threads = 2;
@@ -1095,6 +1128,8 @@ mod tests {
             freeze_after: 100, // multiple freezes per thread
             mmap_arenas: true,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
@@ -1160,6 +1195,8 @@ mod tests {
             freeze_after: 100, // small, must trigger many times in 800 iters
             mmap_arenas: false,
             checkpoint_thread_id: None,
+            freeze_prune_regret_threshold: 0.0,
+            freeze_prune_strategy_threshold: 0.0,
         };
         let assignments = default_assignments();
 
