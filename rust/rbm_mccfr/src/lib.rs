@@ -95,6 +95,8 @@ pub unsafe extern "C" fn rbm_train(
         freeze_after: 5_000_000,
         mmap_arenas: false,
         checkpoint_thread_id: None,
+        freeze_prune_regret_threshold: 0.0,
+        freeze_prune_strategy_threshold: 0.0,
     };
 
     // Preflop assignments

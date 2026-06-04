@@ -273,6 +273,14 @@ pub struct CompactCfrState {
     /// In parallel training, each thread gets its own subdir to avoid path
     /// collisions when multiple threads call freeze() concurrently.
     pub(crate) mmap_dir: std::path::PathBuf,
+    /// Phase 3 freeze-time pruning: drop entries from the new frozen layer
+    /// when every action's `|regret| < freeze_prune_regret` AND
+    /// `sum(|strategy|) < freeze_prune_strategy`. Both default to 0.0 (no
+    /// pruning). The arena slots of pruned entries become unreferenced
+    /// "garbage" — they stay allocated for now and get reclaimed by Phase 5's
+    /// per-generation arena compaction.
+    pub(crate) freeze_prune_regret: f32,
+    pub(crate) freeze_prune_strategy: f32,
 }
 
 impl CompactCfrState {
@@ -287,7 +295,50 @@ impl CompactCfrState {
             player_id: 0,
             use_mmap: false,
             mmap_dir: std::path::PathBuf::from("."),
+            freeze_prune_regret: 0.0,
+            freeze_prune_strategy: 0.0,
         }
+    }
+
+    /// Enable Phase 3 freeze-time pruning. Both thresholds must be > 0 for
+    /// pruning to fire. An entry is dropped from the new frozen layer when
+    /// every action's `|regret| < regret_threshold` AND
+    /// `sum(|strategy|) < strategy_threshold`. Default state (no setter
+    /// called) is 0.0/0.0 → no pruning, no behavior change.
+    pub fn set_freeze_prune_thresholds(&mut self, regret: f32, strategy: f32) {
+        self.freeze_prune_regret = regret;
+        self.freeze_prune_strategy = strategy;
+    }
+
+    /// Returns true if the given entry passes the prune predicate (i.e.
+    /// should be DROPPED from the new frozen layer). Returns false when
+    /// pruning is disabled (both thresholds == 0).
+    #[inline]
+    fn should_prune(&self, entry: &CompactEntry) -> bool {
+        // Pruning is opt-in: both thresholds must be positive.
+        if self.freeze_prune_regret <= 0.0 || self.freeze_prune_strategy <= 0.0 {
+            return false;
+        }
+        let n = entry.n_actions as usize;
+        let r_base = entry.regret_offset as usize;
+        let s_base = entry.strategy_offset as usize;
+
+        // Every action's |regret| must be small.
+        let mut max_abs_regret = 0.0f32;
+        for i in 0..n {
+            let r = self.regret_arena.get(r_base + i).abs();
+            if r > max_abs_regret { max_abs_regret = r; }
+        }
+        if max_abs_regret >= self.freeze_prune_regret {
+            return false;
+        }
+
+        // Sum of absolute strategy contributions must also be small.
+        let mut sum_abs_strategy = 0.0f32;
+        for i in 0..n {
+            sum_abs_strategy += self.strategy_arena.get(s_base + i).abs();
+        }
+        sum_abs_strategy < self.freeze_prune_strategy
     }
 
     /// Load a CompactCfrState for a given player by reading the training directory's
@@ -436,6 +487,8 @@ impl CompactCfrState {
             player_id: player,
             use_mmap: true,
             mmap_dir: dir.to_path_buf(),
+            freeze_prune_regret: 0.0,
+            freeze_prune_strategy: 0.0,
         })
     }
 
@@ -455,6 +508,8 @@ impl CompactCfrState {
             player_id: player,
             use_mmap: true,
             mmap_dir: dir.to_path_buf(),
+            freeze_prune_regret: 0.0,
+            freeze_prune_strategy: 0.0,
         }
     }
 
@@ -487,31 +542,74 @@ impl CompactCfrState {
         let total_frozen: usize = self.frozen.as_ref()
             .map_or(0, |f| f.layers.iter().map(|l| l.len()).sum());
 
-        eprintln!(
-            "[freeze] Building MPHF for {} overflow entries ({} existing layers, {} frozen total)...",
-            overflow_len, n_layers, total_frozen
-        );
+        // Phase 3: build the set of keys that survive freeze-time pruning.
+        // When `freeze_prune_regret > 0 && freeze_prune_strategy > 0`, drop
+        // entries whose every action's |regret| is below the regret
+        // threshold AND whose absolute strategy-sum is below the strategy
+        // threshold. The arena slots of dropped entries become unreferenced
+        // "garbage" until Phase 5's per-generation arena compaction; this
+        // is intentional — we never reuse arena slots in place, so the
+        // surviving entries' offsets remain stable.
+        let prune_enabled = self.freeze_prune_regret > 0.0
+            && self.freeze_prune_strategy > 0.0;
+        let mut surviving_keys: Vec<u64> = Vec::with_capacity(overflow_len);
+        if prune_enabled {
+            for (&key, entry) in &self.index {
+                if !self.should_prune(entry) {
+                    surviving_keys.push(key);
+                }
+            }
+        } else {
+            surviving_keys.extend(self.index.keys().copied());
+        }
+        let n = surviving_keys.len();
+        let pruned_count = overflow_len - n;
+
+        if prune_enabled {
+            eprintln!(
+                "[freeze] Pruned {} / {} overflow entries ({:.1}%); building MPHF for {} survivors ({} existing layers, {} frozen total)...",
+                pruned_count,
+                overflow_len,
+                100.0 * pruned_count as f64 / overflow_len as f64,
+                n,
+                n_layers,
+                total_frozen,
+            );
+        } else {
+            eprintln!(
+                "[freeze] Building MPHF for {} overflow entries ({} existing layers, {} frozen total)...",
+                overflow_len, n_layers, total_frozen
+            );
+        }
         let start = std::time::Instant::now();
 
-        // Build MPHF from overflow keys only
-        let all_keys: Vec<u64> = self.index.keys().copied().collect();
-        let mphf = fmph::GOFunction::from_slice(&all_keys);
+        // Edge case: every entry was pruned. There is nothing to freeze;
+        // clear the overflow and bail. Returning before constructing an
+        // empty MPHF avoids a zero-key MPHF build (which fmph rejects).
+        if n == 0 {
+            self.index.clear();
+            self.index.shrink_to(1024);
+            return;
+        }
+
+        // Build MPHF from surviving keys only
+        let mphf = fmph::GOFunction::from_slice(&surviving_keys);
 
         // Build flat arrays for this layer
-        let n = overflow_len;
         let mut keys = vec![0u64; n];
         let mut n_actions_arr = vec![0u8; n];
         let mut epochs_arr = vec![0u16; n];
         let mut offsets_arr = vec![0u64; n];
         let mut fingerprints_arr = vec![0u32; n];
 
-        for (&key, &entry) in &self.index {
-            let slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
-            keys[slot] = key;
+        for key in &surviving_keys {
+            let entry = self.index[key];
+            let slot = mphf.get(key).unwrap_or(u64::MAX) as usize;
+            keys[slot] = *key;
             n_actions_arr[slot] = entry.n_actions;
             epochs_arr[slot] = entry.last_discount_epoch;
             offsets_arr[slot] = entry.regret_offset;
-            fingerprints_arr[slot] = fingerprint(key);
+            fingerprints_arr[slot] = fingerprint(*key);
         }
 
         let old_overflow_bytes = overflow_len * 48;
@@ -1488,5 +1586,79 @@ mod tests {
             let entry = state.find_or_add(k, 2);
             assert_eq!(entry.n_actions, 2);
         }
+    }
+
+    /// Pruning disabled by default: freeze must keep every entry when
+    /// thresholds are 0.0 (which is the constructor default).
+    #[test]
+    fn test_freeze_prune_disabled_keeps_all_entries() {
+        let mut state = CompactCfrState::new(64);
+        let keys: Vec<u64> = (0u64..50).map(|i| i.wrapping_mul(7) + 1).collect();
+        for &k in &keys {
+            let e = state.find_or_add(k, 3);
+            // Make every entry "prune-worthy" by leaving regret=0 and strat=0.
+            // With pruning disabled they must all survive anyway.
+            let _ = state.regret(&e, 0);
+        }
+        state.freeze();
+
+        let frozen = state.frozen.as_ref().expect("freeze produces a layer");
+        assert_eq!(frozen.layers[0].len(), keys.len(),
+            "no pruning -> all entries survive");
+    }
+
+    /// Pruning enabled: an entry with all-zero regret and all-zero strategy
+    /// must be dropped from the new frozen layer; an entry with non-trivial
+    /// regret or strategy must survive.
+    #[test]
+    fn test_freeze_prune_drops_dead_entries() {
+        let mut state = CompactCfrState::new(64);
+        state.set_freeze_prune_thresholds(1e-3, 1e-4);
+
+        // Three entries:
+        //   - K1: all-zero regret and strategy → should be PRUNED
+        //   - K2: regret above threshold → must SURVIVE
+        //   - K3: strategy above threshold → must SURVIVE
+        let k_dead = 0xDEAD_0001u64;
+        let k_regret = 0xDEAD_0002u64;
+        let k_strat = 0xDEAD_0003u64;
+
+        for &k in &[k_dead, k_regret, k_strat] {
+            state.find_or_add(k, 3);
+        }
+        let e_regret = state.find_or_add(k_regret, 3);
+        state.add_regret(&e_regret, 0, 1.0);
+        let e_strat = state.find_or_add(k_strat, 3);
+        state.add_strategy(&e_strat, 0, 1.0);
+
+        state.freeze();
+
+        let frozen = state.frozen.as_ref().expect("freeze produces a layer");
+        let layer = &frozen.layers[0];
+        assert_eq!(layer.len(), 2,
+            "exactly 2 entries should survive pruning (the regretful + the strategic)");
+
+        // Survivors must lookup back; the dead key must not be found.
+        assert!(layer.lookup(k_regret).is_some(), "k_regret must survive");
+        assert!(layer.lookup(k_strat).is_some(),  "k_strat must survive");
+        assert!(layer.lookup(k_dead).is_none(),   "k_dead must be pruned");
+    }
+
+    /// Edge case: every entry is prune-worthy. freeze() must not panic on
+    /// the resulting zero-key MPHF build; it just clears the overflow and
+    /// skips the layer push.
+    #[test]
+    fn test_freeze_prune_all_entries_no_panic() {
+        let mut state = CompactCfrState::new(64);
+        state.set_freeze_prune_thresholds(1e-3, 1e-4);
+        for i in 0..16u64 {
+            state.find_or_add(i + 1, 3);
+        }
+        // All entries have 0 regret + 0 strategy -> all pruned.
+        state.freeze();
+        // Overflow drained; no frozen layer was pushed.
+        assert!(state.index.is_empty(), "overflow must be drained");
+        assert!(state.frozen.is_none(),
+            "no entries survived -> no new layer pushed");
     }
 }
