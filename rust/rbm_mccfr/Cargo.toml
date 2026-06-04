@@ -28,9 +28,14 @@ bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 criterion = "0.5"
+ptr_hash = "1.1"
 
 [[bench]]
 name = "mccfr_bench"
+harness = false
+
+[[bench]]
+name = "mphf_bench"
 harness = false
 
 [profile.release]
