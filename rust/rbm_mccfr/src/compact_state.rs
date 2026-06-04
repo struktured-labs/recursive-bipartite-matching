@@ -44,6 +44,25 @@ pub struct CompactEntry {
     pub last_discount_epoch: u16,
 }
 
+/// 32-bit fingerprint of a u64 info-set key. Used as a fast pre-filter
+/// before the full key compare during frozen-layer lookups: on a fingerprint
+/// miss we can skip touching the 8-byte keys array entirely.
+///
+/// MurmurHash3 finalizer — deterministic, branchless, ~3 cycles. The output
+/// distribution is uniform even if the input keys are clustered, which
+/// matters for the MPHF-derived slot ordering where lookups land at
+/// "random" indices.
+#[inline(always)]
+pub fn fingerprint(key: u64) -> u32 {
+    let mut x = key;
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    x ^= x >> 33;
+    x as u32
+}
+
 /// A single immutable MPHF layer with flat metadata arrays.
 pub struct FrozenLayer {
     mphf: fmph::GOFunction,
@@ -51,6 +70,11 @@ pub struct FrozenLayer {
     n_actions: Arena<u8>,
     epochs: Arena<u16>,
     offsets: Arena<u64>,
+    /// 32-bit fingerprint per slot — fast-path negative filter.
+    /// `None` on layers loaded from disk that predate the fingerprint
+    /// sidecar; lookups then skip the fast path and go straight to the
+    /// full-key compare. Layers written by this build always populate it.
+    fingerprints: Option<Arena<u32>>,
 }
 
 impl FrozenLayer {
@@ -59,10 +83,24 @@ impl FrozenLayer {
     }
 
     /// Look up a key in this layer. Returns slot index if found.
+    ///
+    /// Fast path: when the fingerprint sidecar is present, a 4-byte
+    /// fingerprint compare rules out unknown keys before we touch the
+    /// 8-byte keys array. False-positive rate is ~2^-32 per probe — the
+    /// follow-up full-key compare catches the rare collision, so this is
+    /// purely a perf optimization, not a correctness change.
     #[inline]
     fn lookup(&self, key: u64) -> Option<usize> {
         let slot = self.mphf.get(&key).unwrap_or(u64::MAX) as usize;
-        if slot < self.keys.len() && self.keys.get(slot) == key {
+        if slot >= self.keys.len() {
+            return None;
+        }
+        if let Some(ref fp) = self.fingerprints {
+            if fp.get(slot) != fingerprint(key) {
+                return None;
+            }
+        }
+        if self.keys.get(slot) == key {
             Some(slot)
         } else {
             None
@@ -338,14 +376,37 @@ impl CompactCfrState {
                 ));
             }
 
+            // Fingerprint sidecar is optional (introduced 2026-06-03).
+            // Runs predating this build have no fp file; we accept them
+            // and let lookups fall through to the full-key check.
+            // New runs always emit fp, so the missing-fp branch only fires
+            // on legacy on-disk state.
+            let fp_path = dir.join(format!("frozen_fp_p{}_L{}.bin", player, layer_id));
+            let fp_mmap = if fp_path.exists() {
+                let m = MmapArena::<u32>::open_existing(&fp_path)?;
+                if m.len() != n {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "p{} layer {}: fingerprint sidecar length {} \
+                             differs from keys length {} in {:?} — torn write?",
+                            player, layer_id, m.len(), n, dir,
+                        ),
+                    ));
+                }
+                Some(Arena::Mmap(m))
+            } else {
+                None
+            };
+
             // MPHF is not persisted — rebuild from keys. For small layers (15-30M keys)
             // this is ~2-3 seconds; for compacted layers (1B+ keys) it can be minutes.
             let mut keys_vec: Vec<u64> = Vec::with_capacity(n);
             for i in 0..n {
                 keys_vec.push(keys_mmap.get(i));
             }
-            eprintln!("[load_from_dir] rebuilding MPHF for p{} layer {} ({} keys)...",
-                player, layer_id, n);
+            eprintln!("[load_from_dir] rebuilding MPHF for p{} layer {} ({} keys, fp={})...",
+                player, layer_id, n, if fp_mmap.is_some() { "yes" } else { "no" });
             let start = std::time::Instant::now();
             let mphf = fmph::GOFunction::from_slice(&keys_vec);
             eprintln!("[load_from_dir] p{} layer {} MPHF built in {:.1}s",
@@ -357,6 +418,7 @@ impl CompactCfrState {
                 n_actions: Arena::Mmap(na_mmap),
                 epochs: Arena::Mmap(ep_mmap),
                 offsets: Arena::Mmap(off_mmap),
+                fingerprints: fp_mmap,
             });
         }
 
@@ -441,6 +503,7 @@ impl CompactCfrState {
         let mut n_actions_arr = vec![0u8; n];
         let mut epochs_arr = vec![0u16; n];
         let mut offsets_arr = vec![0u64; n];
+        let mut fingerprints_arr = vec![0u32; n];
 
         for (&key, &entry) in &self.index {
             let slot = mphf.get(&key).unwrap_or(u64::MAX) as usize;
@@ -448,13 +511,15 @@ impl CompactCfrState {
             n_actions_arr[slot] = entry.n_actions;
             epochs_arr[slot] = entry.last_discount_epoch;
             offsets_arr[slot] = entry.regret_offset;
+            fingerprints_arr[slot] = fingerprint(key);
         }
 
         let old_overflow_bytes = overflow_len * 48;
         self.index.clear();
         self.index.shrink_to(1024);
 
-        let new_layer_bytes = n * 15;
+        // +4 bytes per entry for the fingerprint sidecar.
+        let new_layer_bytes = n * 19;
 
         // Convert to mmap if enabled
         fn vec_to_mmap<T: Copy + Default + bytemuck::Pod>(
@@ -470,7 +535,7 @@ impl CompactCfrState {
         }
 
         let layer_id = n_layers;
-        let (k, na, ep, off) = if self.use_mmap {
+        let (k, na, ep, off, fp) = if self.use_mmap {
             let dir = self.mmap_dir.as_path();
             let p = self.player_id;
             (
@@ -478,9 +543,16 @@ impl CompactCfrState {
                 vec_to_mmap(n_actions_arr, &dir.join(format!("frozen_na_p{}_L{}.bin", p, layer_id))),
                 vec_to_mmap(epochs_arr, &dir.join(format!("frozen_ep_p{}_L{}.bin", p, layer_id))),
                 vec_to_mmap(offsets_arr, &dir.join(format!("frozen_off_p{}_L{}.bin", p, layer_id))),
+                vec_to_mmap(fingerprints_arr, &dir.join(format!("frozen_fp_p{}_L{}.bin", p, layer_id))),
             )
         } else {
-            (Arena::Mem(keys), Arena::Mem(n_actions_arr), Arena::Mem(epochs_arr), Arena::Mem(offsets_arr))
+            (
+                Arena::Mem(keys),
+                Arena::Mem(n_actions_arr),
+                Arena::Mem(epochs_arr),
+                Arena::Mem(offsets_arr),
+                Arena::Mem(fingerprints_arr),
+            )
         };
 
         let new_layer = FrozenLayer {
@@ -489,6 +561,7 @@ impl CompactCfrState {
             n_actions: na,
             epochs: ep,
             offsets: off,
+            fingerprints: Some(fp),
         };
 
         // Push new layer
@@ -543,6 +616,7 @@ impl CompactCfrState {
         let mut n_actions_arr = vec![0u8; total];
         let mut epochs_arr = vec![0u16; total];
         let mut offsets_arr = vec![0u64; total];
+        let mut fingerprints_arr = vec![0u32; total];
 
         for layer in &frozen.layers {
             for i in 0..layer.len() {
@@ -552,6 +626,7 @@ impl CompactCfrState {
                 n_actions_arr[slot] = layer.n_actions.get(i);
                 epochs_arr[slot] = layer.epochs.get(i);
                 offsets_arr[slot] = layer.offsets.get(i);
+                fingerprints_arr[slot] = fingerprint(key);
             }
         }
 
@@ -559,7 +634,7 @@ impl CompactCfrState {
 
         // Convert to mmap if needed
         let layer_id = 0;
-        let (k, na, ep, off) = if self.use_mmap {
+        let (k, na, ep, off, fp) = if self.use_mmap {
             let dir = self.mmap_dir.as_path();
             let p = self.player_id;
 
@@ -580,13 +655,27 @@ impl CompactCfrState {
                 vec_to_mmap(n_actions_arr, &dir.join(format!("frozen_na_p{}_L{}.bin", p, layer_id))),
                 vec_to_mmap(epochs_arr, &dir.join(format!("frozen_ep_p{}_L{}.bin", p, layer_id))),
                 vec_to_mmap(offsets_arr, &dir.join(format!("frozen_off_p{}_L{}.bin", p, layer_id))),
+                vec_to_mmap(fingerprints_arr, &dir.join(format!("frozen_fp_p{}_L{}.bin", p, layer_id))),
             )
         } else {
-            (Arena::Mem(keys), Arena::Mem(n_actions_arr), Arena::Mem(epochs_arr), Arena::Mem(offsets_arr))
+            (
+                Arena::Mem(keys),
+                Arena::Mem(n_actions_arr),
+                Arena::Mem(epochs_arr),
+                Arena::Mem(offsets_arr),
+                Arena::Mem(fingerprints_arr),
+            )
         };
 
         self.frozen = Some(FrozenIndex {
-            layers: vec![FrozenLayer { mphf, keys: k, n_actions: na, epochs: ep, offsets: off }],
+            layers: vec![FrozenLayer {
+                mphf,
+                keys: k,
+                n_actions: na,
+                epochs: ep,
+                offsets: off,
+                fingerprints: Some(fp),
+            }],
         });
 
         eprintln!("[compact] Complete in {:.1}s: {} entries in 1 layer", start.elapsed().as_secs_f64(), total);
@@ -1300,5 +1389,104 @@ mod tests {
         state.halve_regrets();
         assert_eq!(state.regret(&e1, 0), 7500.0);
         assert_eq!(state.regret(&e2, 0), 16383.5 / 2.0);
+    }
+
+    /// Fingerprint must be deterministic and well-mixed: identical keys
+    /// hash identically; distinct keys collide very rarely. We test a
+    /// small batch to catch any accidental seed dependency or trivial
+    /// XOR-fold that would collide on patterned keys.
+    #[test]
+    fn test_fingerprint_deterministic_and_mixed() {
+        // Same key -> same fp every call.
+        for &k in &[0u64, 1, 42, 0xDEAD_BEEF_CAFE_BABE, u64::MAX] {
+            let a = fingerprint(k);
+            let b = fingerprint(k);
+            assert_eq!(a, b, "fingerprint not deterministic for {:x}", k);
+        }
+
+        // Patterned keys that a trivial xor-fold (k as u32 ^ (k >> 32) as u32)
+        // would collide on. e.g. (a, a << 32 | a) → xor-fold gives 0 for both.
+        // MurmurHash3 finalizer shatters them.
+        let f0 = fingerprint(0);
+        let f1 = fingerprint(0x12345678_12345678);
+        let f2 = fingerprint(0xAAAA_5555_AAAA_5555);
+        let f3 = fingerprint(0x5555_AAAA_5555_AAAA);
+        let set = [f0, f1, f2, f3];
+        // No pair collides on this small set.
+        for i in 0..set.len() {
+            for j in (i + 1)..set.len() {
+                assert_ne!(set[i], set[j], "patterned-key collision at {},{}", i, j);
+            }
+        }
+    }
+
+    /// Freezing into a frozen layer must produce a layer that carries
+    /// its fingerprint sidecar AND that round-trips every key correctly
+    /// via the lookup fast path.
+    #[test]
+    fn test_freeze_lookup_uses_fingerprint() {
+        let mut state = CompactCfrState::new(1024);
+        // Seed the overflow map with a deterministic key set.
+        let keys: Vec<u64> = (0u64..500).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15)).collect();
+        for &k in &keys {
+            let e = state.find_or_add(k, 3);
+            state.add_regret(&e, 0, k as f32 % 100.0);
+        }
+
+        state.freeze();
+
+        // Assert fp sidecar is present + sized correctly. Scope the
+        // immutable borrow so the round-trip below can take &mut state.
+        {
+            let frozen = state.frozen.as_ref().expect("freeze must produce a layer");
+            assert_eq!(frozen.layers.len(), 1, "single freeze -> one layer");
+            let layer = &frozen.layers[0];
+            let fp = layer.fingerprints.as_ref()
+                .expect("freshly frozen layer must carry fingerprints");
+            assert_eq!(fp.len(), layer.len(), "fp length matches keys length");
+
+            // Unknown keys reliably miss on the frozen layer directly.
+            // FPR is ~2^-32 per probe — 100 trials virtually never produce
+            // a false fingerprint hit, and even if one does, the full-key
+            // compare downstream catches it.
+            for k in keys.iter().take(100).map(|k| k.wrapping_add(1)) {
+                let result = layer.lookup(k);
+                assert!(result.is_none(),
+                    "unknown key {:x} unexpectedly hit slot {:?}", k, result);
+            }
+        }
+
+        // Every original key still looks up; the regret survives the freeze.
+        for &k in &keys {
+            let entry = state.find_or_add(k, 3);
+            assert_eq!(entry.n_actions, 3);
+            let r = state.regret(&entry, 0);
+            assert_eq!(r, k as f32 % 100.0, "regret roundtrip for key {:x}", k);
+        }
+    }
+
+    /// A FrozenLayer with `fingerprints = None` (i.e. a layer loaded from
+    /// an on-disk format that predates the fp sidecar) must still serve
+    /// lookups correctly — falling through to the full-key compare.
+    #[test]
+    fn test_lookup_works_without_fingerprint_sidecar() {
+        let mut state = CompactCfrState::new(64);
+        let keys: Vec<u64> = (0u64..32).map(|i| 0x1000 + i * 7).collect();
+        for &k in &keys {
+            state.find_or_add(k, 2);
+        }
+        state.freeze();
+
+        // Strip the fingerprint sidecar to simulate a legacy on-disk layer.
+        let frozen = state.frozen.as_mut().unwrap();
+        for layer in &mut frozen.layers {
+            layer.fingerprints = None;
+        }
+
+        // Lookups still succeed for known keys.
+        for &k in &keys {
+            let entry = state.find_or_add(k, 2);
+            assert_eq!(entry.n_actions, 2);
+        }
     }
 }
