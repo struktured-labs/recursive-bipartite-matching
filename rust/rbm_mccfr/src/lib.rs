@@ -30,6 +30,7 @@ pub mod rbm_distance;
 pub mod rbm_buckets;
 pub mod frozen_state;
 pub mod mmap_arena;
+pub mod numa;
 
 // -----------------------------------------------------------------------
 // C FFI entry points

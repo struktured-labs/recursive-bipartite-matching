@@ -350,6 +350,12 @@ fn load_checkpoint(path: &Path) -> (rbm_mccfr::compact_state::CompactCfrState, r
 }
 
 fn main() {
+    // Phase 6 of docs/MMAP_INDEX_PLAN.md: interleave newly-touched pages
+    // across NUMA nodes before any thread spawns or mmap arena allocates.
+    // No-op on single-node boxes. The policy is per-thread and inherited
+    // at clone() time, so we must call it BEFORE rayon spawns its pool.
+    rbm_mccfr::numa::interleave_all();
+
     let cli = parse_args();
 
     // --play-only mode: skip training, load strategy, play
