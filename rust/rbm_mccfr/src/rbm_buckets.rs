@@ -317,6 +317,179 @@ pub fn showdown_distribution_tree(
     Tree::node(board_children)
 }
 
+/// Sample `n_samples` showdown leaves for a (possibly partial) board: complete
+/// the remaining board cards at random, deal a random opponent hand, and emit a
+/// {-1,0,+1} leaf from `player`'s perspective. Shared by the potential-aware
+/// tree builder for both the branch-conditioned and the river/flat cases.
+fn sample_completion_leaves(
+    board_partial: &[Card],
+    h1: Card,
+    h2: Card,
+    dealt: &[bool; 52],
+    player: u8,
+    n_samples: usize,
+    rng: &mut impl Rng,
+) -> Vec<Tree> {
+    let mut remaining: Vec<Card> = (0..52u8).filter(|&c| !dealt[c as usize]).collect();
+    let n_rem = remaining.len();
+    let n_board_needed = 5 - board_partial.len();
+    let mut leaves = Vec::with_capacity(n_samples);
+    if n_rem < n_board_needed + 2 {
+        return leaves;
+    }
+    for _ in 0..n_samples {
+        let n_shuffle = (n_board_needed + 2).min(n_rem);
+        for i in 0..n_shuffle {
+            let j = i + (rng.gen::<u32>() as usize % (n_rem - i));
+            remaining.swap(i, j);
+        }
+        let mut full_board = [0u8; 5];
+        for (i, &c) in board_partial.iter().enumerate() {
+            full_board[i] = c;
+        }
+        for i in 0..n_board_needed {
+            full_board[board_partial.len() + i] = remaining[i];
+        }
+        let o1 = remaining[n_board_needed];
+        let o2 = remaining[n_board_needed + 1];
+
+        let mut p1h = [0u8; 7];
+        p1h[0] = h1;
+        p1h[1] = h2;
+        p1h[2..7].copy_from_slice(&full_board);
+        let mut p2h = [0u8; 7];
+        p2h[0] = o1;
+        p2h[1] = o2;
+        p2h[2..7].copy_from_slice(&full_board);
+
+        let cmp = hand_eval_fast::compare_hands7_fast(&p1h, &p2h);
+        let value = if player == 0 {
+            if cmp > 0 { 1.0 } else if cmp == 0 { 0.0 } else { -1.0 }
+        } else {
+            if cmp > 0 { -1.0 } else if cmp == 0 { 0.0 } else { 1.0 }
+        };
+        leaves.push(Tree::leaf(value));
+    }
+    leaves
+}
+
+/// Potential-aware (turn-conditional) showdown tree.
+///
+/// Unlike `showdown_distribution_tree` (which samples full boards in one shot
+/// and so collapses the future-card structure — making RBM ≈ EMD), this builder
+/// branches on the NEXT public card as an internal level, preserving the
+/// conditional outcome structure that distinguishes draws from made hands:
+///   flop  hand: root -> turn-card node  -> opponent {-1,0,+1} leaves (over rivers)
+///   turn  hand: root -> river-card node -> opponent {-1,0,+1} leaves
+///   river hand: root -> opponent leaves  (no future card; equity is sufficient)
+///
+/// `max_branch` = number of next-card nodes, `max_leaf_samples` = leaves per node.
+pub fn potential_aware_tree(
+    hole_cards: &[Card; 2],
+    board_visible: &[Card],
+    player: u8,
+    max_branch: usize,
+    max_leaf_samples: usize,
+    rng: &mut impl Rng,
+) -> Tree {
+    let h1 = hole_cards[0];
+    let h2 = hole_cards[1];
+    let mut dealt = [false; 52];
+    dealt[h1 as usize] = true;
+    dealt[h2 as usize] = true;
+    for &c in board_visible {
+        dealt[c as usize] = true;
+    }
+    let n_visible = board_visible.len();
+
+    // River (or complete): no future public card -> flat tree, equity-sufficient.
+    if n_visible >= 5 {
+        let leaves = sample_completion_leaves(
+            board_visible, h1, h2, &dealt, player, max_branch * max_leaf_samples, rng,
+        );
+        return Tree::node(leaves);
+    }
+
+    // Branch on the next public card (the card revealed at position n_visible).
+    let mut candidates: Vec<Card> = (0..52u8).filter(|&c| !dealt[c as usize]).collect();
+    let n_cand = candidates.len();
+    let n_branch = max_branch.min(n_cand);
+    for i in 0..n_branch {
+        let j = i + (rng.gen::<u32>() as usize % (n_cand - i));
+        candidates.swap(i, j);
+    }
+
+    let mut branch_children = Vec::with_capacity(n_branch);
+    for b in 0..n_branch {
+        let nc = candidates[b];
+        let mut dealt2 = dealt;
+        dealt2[nc as usize] = true;
+        let mut board2: Vec<Card> = board_visible.to_vec();
+        board2.push(nc);
+        let leaves = sample_completion_leaves(
+            &board2, h1, h2, &dealt2, player, max_leaf_samples, rng,
+        );
+        branch_children.push(Tree::node(leaves));
+    }
+    Tree::node(branch_children)
+}
+
+/// Deeper potential-aware tree: branch on SEVERAL successive public cards.
+/// `branch_factors[i]` = number of children at public-card level i (e.g.
+/// `[6,4]` for a flop hand = 6 turn cards x 4 river cards), then `max_leaf`
+/// opponent leaves at the bottom. Stops branching when factors are exhausted
+/// or the board is complete.
+pub fn potential_aware_tree_deep(
+    hole_cards: &[Card; 2],
+    board_visible: &[Card],
+    player: u8,
+    branch_factors: &[usize],
+    max_leaf: usize,
+    rng: &mut impl Rng,
+) -> Tree {
+    let h1 = hole_cards[0];
+    let h2 = hole_cards[1];
+    let mut dealt = [false; 52];
+    dealt[h1 as usize] = true;
+    dealt[h2 as usize] = true;
+    for &c in board_visible {
+        dealt[c as usize] = true;
+    }
+    pa_build_rec(h1, h2, board_visible.to_vec(), dealt, player, branch_factors, max_leaf, rng)
+}
+
+fn pa_build_rec(
+    h1: Card,
+    h2: Card,
+    board: Vec<Card>,
+    dealt: [bool; 52],
+    player: u8,
+    factors: &[usize],
+    max_leaf: usize,
+    rng: &mut impl Rng,
+) -> Tree {
+    if factors.is_empty() || board.len() >= 5 {
+        return Tree::node(sample_completion_leaves(&board, h1, h2, &dealt, player, max_leaf, rng));
+    }
+    let mut candidates: Vec<Card> = (0..52u8).filter(|&c| !dealt[c as usize]).collect();
+    let n_cand = candidates.len();
+    let nb = factors[0].min(n_cand);
+    for i in 0..nb {
+        let j = i + (rng.gen::<u32>() as usize % (n_cand - i));
+        candidates.swap(i, j);
+    }
+    let mut children = Vec::with_capacity(nb);
+    for b in 0..nb {
+        let nc = candidates[b];
+        let mut dealt2 = dealt;
+        dealt2[nc as usize] = true;
+        let mut board2 = board.clone();
+        board2.push(nc);
+        children.push(pa_build_rec(h1, h2, board2, dealt2, player, &factors[1..], max_leaf, rng));
+    }
+    Tree::node(children)
+}
+
 /// Find the nearest existing cluster to a tree, with EV pre-filtering and
 /// progressive distance computation for early-out.
 ///
