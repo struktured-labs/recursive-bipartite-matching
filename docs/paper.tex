@@ -1012,6 +1012,130 @@ both stack depths: 73\% less error at $k{=}25$ for 20bb and 60\% for
 rather than abstraction quality---particularly at 200bb where the bots
 are an order of magnitude undertrained relative to the info set count.
 
+\subsection{When Does the Tree Distance Help? Boundary Experiments}
+\label{sec:boundary}
+
+The poker results above show RBM matching or beating EMD on abstraction
+quality, but they leave a sharper question unanswered: \emph{when} does
+a full recursive tree distance strictly beat a value- or
+moment-based abstraction, and when is it merely an expensive way to
+recover the same clustering? On the Rhode Island toy RBM is provably
+\emph{equal} to EMD at every reachable compression level, because the
+node value (equity) is a near-sufficient statistic for the
+decision---exactly the regime in which a richer metric cannot help. To
+map the boundary directly we ran a battery of small,
+\emph{exactly-solvable} diagnostic decision problems---deliberately
+outside poker---in which the optimal policy can be enumerated and the
+abstraction regret measured without Monte Carlo noise. Each problem is
+a risk-sensitive episodic decision with an entropic certainty-equivalent
+objective $\mathrm{CE}(X) = -\tfrac{1}{\gamma}\log\mathbb{E}[e^{-\gamma
+X}]$; abstraction means clustering states and committing to one action
+(or intermediate policy) per cluster, and we report the risk-adjusted
+regret against the per-state optimum, averaged over cluster counts $k$.
+These are mechanism experiments, not a benchmark; their purpose is to
+isolate the conditions under which the tree distance earns its cost.
+
+The experiments isolate three conditions, each necessary, that together
+are sufficient for the tree distance to strictly help.
+
+\begin{description}[leftmargin=1.2em,nosep]
+\item[\textnormal{(A) The scalar value must be insufficient.}] In a
+  single-step risk-sensitive sizing problem, a decision-aligned tree
+  distance beats every fixed-moment baseline (mean; mean$+$std;
+  mean$+$std$+$skew) once risk aversion is high enough that tail shape
+  drives the optimal size (mean regret $0.028$ vs.\ $0.044$ for the
+  best moment baseline at $\gamma{=}0.6$, and the gap widens with
+  $\gamma$). At low risk aversion the mean is nearly sufficient and the
+  tree distance has no edge---the same null we observe in poker, where
+  equity is the near-sufficient statistic.
+\item[\textnormal{(B) The metric must be in decision-aligned units.}]
+  In the \emph{same} problem, a tree distance computed on raw returns
+  is the \emph{worst} method: the Wasserstein geometry on raw payoffs
+  is decision-agnostic and clusters states across the optimal-action
+  boundary. Transforming leaves into utility units
+  $u(r)=-e^{-\gamma r}$ before matching is what turns the loss into a
+  win. This is precisely the prescription of bisimulation
+  metrics~\citep{ferns2004metrics,castro2020scalable}: the state metric
+  must be defined with respect to the reward, not the raw state.
+\item[\textnormal{(C) Competing actions must have structurally distinct
+  subtrees.}] The permutation-invariant matching that lets RBM compare
+  subtrees across branches becomes a \emph{liability} when two actions
+  have structurally similar subtrees: the match can pair a strong
+  ``act-now'' branch of one state with a strong ``continue'' branch of
+  another and judge them similar despite their requiring opposite
+  actions. We observe exactly this in a draw-poker variant (the metric
+  conflates strength-by-standing-pat with strength-by-drawing) and
+  reproduce it controllably in an optimal-stopping problem: with the
+  natural representation (a deterministic close action vs.\ a stochastic
+  hold) the branches are structurally distinct, the trap does not fire,
+  and RBM ties the best decision-aware baseline ($0.056$, matching a
+  hand-crafted policy feature while value-on-$V^\star$ fails at
+  $0.323$); forcing the close action into a structurally matched
+  representation reproduces the trap and quadruples the regret to
+  $0.241$. This is a controlled instance of the abstraction-pathology
+  mechanism~\citep{waugh2009abstraction}.
+\end{description}
+
+When all three conditions hold, the tree distance captures
+decision-relevant structure that no terminal-distribution feature can.
+We demonstrate this most sharply with a two-step problem in which an
+intermediate hold/close decision follows a step-1 observation. Four
+``regime'' states are constructed to share an \emph{identical} terminal
+return marginal---same mean, variance, skewness, indeed all
+moments---while differing in their \emph{conditional} structure
+(the distribution of the second step given the first). Because the
+optimal intermediate policy depends on that conditional structure,
+terminal-moment and value abstractions are \emph{provably blind}: they
+see four identical states and must merge regimes that demand opposite
+actions. A tree distance over the conditional tree recovers the
+policy-equivalence classes and cuts regret by ${\sim}42\%$
+(Table~\ref{tab:boundary}). The decisive control is internal: the same
+tree distance computed over the same leaves but \emph{without} the
+step-1 grouping (i.e.\ on the terminal marginal) is no better than the
+moment baselines---so the gain is attributable to preserving the
+multi-step path structure, not to the distributional nature of the
+metric.
+
+\begin{table}[t]
+\centering
+\caption{Boundary experiments (risk-adjusted regret, lower is better;
+mean over cluster counts $k$, $\gamma$ as noted). The recursive tree
+distance helps exactly when the scalar value is insufficient (A), the
+metric is in decision-aligned units (B), and competing actions have
+structurally distinct subtrees (C). Poker robustly violates (A).}
+\label{tab:boundary}
+\small
+\begin{tabular}{llcc}
+\toprule
+Problem & Tests & Tree dist. & Best baseline \\
+\midrule
+Risk-sensitive sizing ($\gamma{=}0.6$) & (A),(B) & \textbf{0.028} & 0.044 \\
+\quad raw-return units & (B) & 0.059 & --- \\
+Optimal stopping, natural rep. & (C) & \textbf{0.056} & 0.056 \\
+\quad structurally-matched rep. & (C) & 0.241 & 0.056 \\
+Two-step conditional ($\gamma{=}0.7$) & path & \textbf{0.031} & 0.054 \\
+\quad marginal-only control & path & 0.057 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Synthesis.} The recursive tree distance is not a
+free lunch and not a universal improvement over equity bucketing; it is
+the right tool for a specific regime. It strictly helps when
+(A)~the value function is an insufficient statistic for the decision,
+(B)~the metric is expressed in decision-aligned (reward/utility) units,
+and (C)~competing actions are structurally distinguishable in the tree.
+Heads-up poker, our original target, robustly violates~(A): equity is a
+strong sufficient statistic, which is why RBM equals EMD on Rhode
+Island and why its finer-grained advantage on No-Limit does not survive
+into a head-to-head edge. The conditions are, however, naturally
+satisfied by \emph{risk-sensitive sequential decision problems}, where
+the full outcome distribution and the conditional path structure both
+drive the optimal policy---marking the more promising domain for
+recursive tree-distance abstraction. We emphasize that these are small,
+exactly-solvable diagnostics chosen to expose the mechanism; scaling
+them into a full risk-sensitive control benchmark is future work.
+
 % ====================================================================
 % 7. RELATED WORK
 % ====================================================================
@@ -1127,6 +1251,22 @@ hands and adequately-trained MCCFR than we report here. We also do
 not yet report exploitability, the gold-standard evaluation
 established by \citet{johanson2013evaluating}; closing that gap is the
 clearest follow-up.
+
+Beyond poker, our boundary experiments (Section~\ref{sec:boundary})
+sharpen where a recursive tree distance is the right tool at all. It
+strictly improves on value- and moment-based abstraction precisely when
+(A)~the value function is an insufficient statistic for the decision,
+(B)~the metric is expressed in decision-aligned (reward/utility) units
+in the sense of bisimulation
+metrics~\citep{ferns2004metrics,castro2020scalable}, and (C)~competing
+actions are structurally distinguishable in the tree---and it is
+provably no better than equity bucketing when any of these fails.
+Heads-up poker robustly violates~(A), which is the most honest
+explanation of the EMD-equivalence and abstraction-pathology results
+above; \emph{risk-sensitive sequential decision problems}, where the
+full outcome distribution and conditional path structure both shape the
+optimal policy, satisfy all three and are the more promising domain for
+this machinery.
 
 The clearest follow-up is an
 exploitability-based evaluation along the lines of
@@ -1254,6 +1394,12 @@ S{\'e}bastien Bubeck, R{\'e}mi Munos, Gilles Stoltz, and Csaba
 \newblock {$\mathcal{X}$}-armed bandits.
 \newblock \emph{Journal of Machine Learning Research}, 12:1655--1695, 2011.
 
+\bibitem[Castro(2020)]{castro2020scalable}
+Pablo~Samuel Castro.
+\newblock Scalable methods for computing state similarity in deterministic
+  {Markov} decision processes.
+\newblock In \emph{Proceedings of AAAI}, 2020.
+
 \bibitem[Chuang et~al.(2022)]{chuang2022tree}
 Ching-Yao Chuang, Stefanie Jegelka, and David Alvarez-Melis.
 \newblock Tree {M}over's distance: Bridging graph metrics and stability of
@@ -1272,6 +1418,11 @@ Marco Cuturi.
 \newblock Sinkhorn distances: Lightspeed computation of optimal transport.
 \newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
   pages 2292--2300, 2013.
+
+\bibitem[Ferns et~al.(2004)]{ferns2004metrics}
+Norm Ferns, Prakash Panangaden, and Doina Precup.
+\newblock Metrics for finite {Markov} decision processes.
+\newblock In \emph{Proceedings of UAI}, pages 162--169, 2004.
 
 \bibitem[Ganzfried and Sandholm(2014)]{ganzfried2014potential}
 Sam Ganzfried and Tuomas Sandholm.
