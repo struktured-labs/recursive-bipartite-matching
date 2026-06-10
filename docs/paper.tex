@@ -648,9 +648,19 @@ Remark~\ref{rem:ev-vs-expl}).
 
 \subsection{Multi-Scale Results}
 
-Table~\ref{tab:multiscale} shows RBM vs EMD across three game scales.
-RBM dominates at every scale, achieving zero error at aggressive
-compression levels where EMD retains substantial error.
+Table~\ref{tab:multiscale} shows RBM vs EMD across three toy-deck scales.
+RBM achieves lower error across these target compression levels.
+We note, however, that these ``scales'' (3-rank, 4-rank, and 5-rank) are
+still within the family of highly compressed toy environments, and the
+measured dominance over EMD is largely an artifact of using a
+potential-blind showdown-only EMD baseline (which lacks the future card-draw
+distributions used in production-scale EMD abstractions; cf.\
+Section~\ref{sec:boundary}). When EMD is stripped of potential-awareness,
+it cannot resolve the intermediate game-tree paths that RBM captures
+by construction. We present this comparison to verify that RBM's structural
+advantage is consistent as the toy deck size increases, not as a
+generalization to full-scale games (which are evaluated in
+Sections~\ref{sec:experiments-limit} and~\ref{sec:experiments-nl}).
 
 \begin{table}[t]
 \centering
